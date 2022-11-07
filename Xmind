@@ -1,0 +1,10 @@
+#!name=Xmind pro
+#!desc=破解pro版本
+#!system=ios
+
+[Script]
+# > Xmind pro
+http-response ^https:\/\/www\.xmind\.cn\/_res\/devices requires-body=1,script-path=https://raw.githubusercontent.com/mandxy/ziyong/main/xmind.js
+
+[MITM]
+hostname = %APPEND% www.xmind.cn
