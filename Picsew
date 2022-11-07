@@ -1,0 +1,10 @@
+#!name=Picsew pro
+#!desc=破解pro版本
+#!system=ios
+
+[Script]
+# > Picsew pro
+http-response ^https:\/\/buy\.itunes\.apple\.com\/verifyReceipt requires-body=1,script-path=https://raw.githubusercontent.com/mandxy/ziyong/main/picsew.js
+
+[MITM]
+hostname = %APPEND% buy.itunes.apple.com
