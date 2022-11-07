@@ -8,3 +8,4 @@ http-response ^https:\/\/www\.xmind\.cn\/_res\/devices requires-body=1,script-pa
 
 [MITM]
 hostname = %APPEND% www.xmind.cn
+
