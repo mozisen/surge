@@ -1,5 +1,5 @@
 /* NodeSeek automatic check-in for Surge. Credentials stay in Surge local storage. */
-const KEY = { cookie: "NODESEEK_COOKIE", ua: "NODESEEK_UA", version: "NODESEEK_REFRACT_VERSION" };
+const KEY = { cookie: "NODESEEK_COOKIE", ua: "NODESEEK_UA", version: "NODESEEK_REFRACT_VERSION", refractKey: "NODESEEK_REFRACT_KEY" };
 const HOME = "https://www.nodeseek.com";
 const DEFAULT_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Mobile/15E148 Safari/604.1";
 const DEFAULT_VERSION = "0.3.34";
@@ -23,11 +23,13 @@ if (typeof $request !== "undefined") {
   const ua = header($request.headers, "user-agent");
   const urlVersion = String($request.url || "").match(/\/sw\.js\?v=([0-9.]+)/);
   const version = header($request.headers, "refract-version") || (urlVersion ? urlVersion[1] : "");
+  const refractKey = header($request.headers, "refract-key");
   const oldCookie = read(KEY.cookie);
   if (cookie && cookie !== oldCookie) write(cookie, KEY.cookie);
   if (ua) write(ua, KEY.ua);
   if (version) write(version, KEY.version);
-  if (cookie && cookie !== oldCookie) notify("Cookie 获取成功", "已保存在 Surge 本机，可等待定时签到。");
+  if (refractKey) write(refractKey, KEY.refractKey);
+  if (cookie && cookie !== oldCookie) notify("Cookie 获取成功", refractKey ? "Cookie 与 refract-key 已保存，可等待定时签到。" : "Cookie 已保存；请打开签到页以捕获 refract-key。");
   $done({});
 } else {
   run().catch(error => { notify("运行失败", String(error)); $done(); });
@@ -37,24 +39,30 @@ async function run() {
   const cookie = read(KEY.cookie);
   const ua = read(KEY.ua, DEFAULT_UA);
   const version = read(KEY.version, DEFAULT_VERSION);
-  log("Cron started; mode=" + (typeof $argument !== "undefined" ? String($argument) : "random") + "; cookieLength=" + cookie.length + "; version=" + version);
+  let refractKey = read(KEY.refractKey);
+  log("Cron started; mode=" + (typeof $argument !== "undefined" ? String($argument) : "random") + "; cookieLength=" + cookie.length + "; version=" + version + "; refractKey=" + (refractKey ? "stored" : "missing"));
   if (!cookie) { log("No stored Cookie"); notify("尚未获取 Cookie", "请用 Safari 登录 NodeSeek 并进入个人主页。"); return $done(); }
+  if (!refractKey) { log("No stored refract-key"); notify("尚未获取 refract-key", "请用 Safari 打开 NodeSeek 签到页并刷新一次，再运行签到。"); return $done(); }
 
+  const pingUrl = HOME + "/edge-cgi/ping";
+  const pingSign = makeRefractSign(refractKey, pingUrl, "GET", ua);
   const ping = await get({
-    url: HOME + "/edge-cgi/ping", timeout: 30,
-    headers: { Accept: "*/*", Cookie: cookie, Referer: HOME + "/sw.js?v=" + version, "User-Agent": ua, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty" }
+    url: pingUrl, timeout: 30,
+    headers: { Accept: "*/*", Cookie: cookie, Referer: HOME + "/sw.js?v=" + version, "User-Agent": ua, "refract-version": version, "refract-key": refractKey, "refract-sign": pingSign, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty" }
   });
   if (ping.error) { log("Ping error: " + String(ping.error)); notify("刷新签名失败", String(ping.error)); return $done(); }
-  const refractKey = header(ping.response && ping.response.headers, "refract-key-update");
+  const updatedKey = header(ping.response && ping.response.headers, "refract-key-update");
   const pingStatus = Number((ping.response && (ping.response.status || ping.response.statusCode)) || 0);
-  log("Ping HTTP " + pingStatus + "; refractKey=" + (refractKey ? "received" : "missing"));
-  if (!refractKey) { notify("刷新签名失败", "未取得 refract-key，请重新通过验证并获取 Cookie。"); return $done(); }
+  if (updatedKey) { refractKey = updatedKey; write(refractKey, KEY.refractKey); }
+  log("Ping HTTP " + pingStatus + "; refractKey=" + (updatedKey ? "updated" : "unchanged"));
+  if (pingStatus === 401 || pingStatus === 403) { notify("刷新签名失败：" + pingStatus, "refract-key、Cookie、UA 或网络环境已失效；请在 Safari 刷新签到页后重试。"); return $done(); }
+  if (pingStatus < 200 || pingStatus >= 400) { notify("刷新签名异常 HTTP " + pingStatus, String(ping.data || "").slice(0, 160)); return $done(); }
 
   const signType = (typeof $argument !== "undefined" ? String($argument) : "random").trim().toLowerCase();
   const isRandom = signType !== "fixed" && signType !== "false" && signType !== "5";
   const modeName = isRandom ? "试试手气" : "固定鸡腿×5";
   const url = HOME + "/api/attendance?random=" + (isRandom ? "true" : "false");
-  const sign = sha1(["POST", url, ua, "", refractKey].join("\n\n"));
+  const sign = makeRefractSign(refractKey, url, "POST", ua);
   const result = await post({
     url, timeout: 30, body: "",
     headers: { Accept: "*/*", "Content-Type": "text/plain;charset=UTF-8", Cookie: cookie, Origin: HOME, Referer: HOME + "/", "User-Agent": ua, "refract-version": version, "refract-key": refractKey, "refract-sign": sign, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty" }
@@ -66,9 +74,13 @@ async function run() {
   const message = payload.message || String(result.data || "").slice(0, 160) || "无返回内容";
   log("Attendance HTTP " + status + "; response=" + message.replace(/\s+/g, " "));
   if (status >= 200 && status < 300 && (payload.success || /鸡腿|已完成签到|签到/.test(message))) notify("签到成功 · " + modeName, message);
-  else if (status === 403) notify("签到失败：403", "Cookie、UA 或 Cloudflare 验证已失效，请重新登录获取。");
+  else if (status === 403) notify("签到失败：403", "refract-key/签名、Cookie、UA 或 Cloudflare 验证已失效；请用 Safari 刷新签到页后重试。");
   else notify("签到异常 HTTP " + status, message);
   $done();
+}
+
+function makeRefractSign(refractKey, url, method, ua) {
+  return sha1(String(refractKey || "") + String(url || "") + String(method || "").toUpperCase() + String(ua || ""));
 }
 
 function sha1(message) {
