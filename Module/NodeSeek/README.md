@@ -13,7 +13,7 @@ https://raw.githubusercontent.com/mozisen/surge/main/Module/NodeSeek/nodeseek.sg
 1. 在 Surge 中开启 MITM、脚本和重写，并安装、信任 Surge 证书。
 2. 安装上面的模块链接。
 3. 使用 iPhone Safari 打开 https://www.nodeseek.com/，登录并通过 Cloudflare 验证。
-4. 点击头像进入个人主页，触发 `/api/account/getInfo/...` 请求。
+4. 点击头像进入个人主页；如果没有触发通知，可在签到页面手动点击一次签到。
 5. 收到“Cookie 获取成功”通知后，手动运行一次 `NodeSeek_每日签到` 测试。
 6. 默认每天 00:05 自动执行，时间按 Surge 所在设备时区计算。
 
