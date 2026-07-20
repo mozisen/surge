@@ -14,14 +14,14 @@
 #  
 #  
 #  作者: Zyx0rx
-#  项目地址: https://github.com/Zyx0rx/vless-all-in-one
+#  项目地址: https://github.com/mozisen
 #═══════════════════════════════════════════════════════════════════════════════
 
 readonly VERSION="3.5.3"
-readonly AUTHOR="Zyx0rx"
-readonly REPO_URL="https://github.com/Zyx0rx/vless-all-in-one"
-readonly SCRIPT_REPO="Zyx0rx/vless-all-in-one"
-readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/Zyx0rx/vless-all-in-one/main/vless-server.sh"
+readonly AUTHOR="mozisen"
+readonly REPO_URL="https://github.com/mozisen/surge"
+readonly SCRIPT_REPO="mozisen/vless-all-in-one"
+readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/mozisen/surge/edit/main/vless-server.sh"
 readonly CFG="/etc/vless-reality"
 readonly ACME_DEFAULT_EMAIL="acme@vaio.com"
 
