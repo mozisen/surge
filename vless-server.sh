@@ -21,7 +21,7 @@ readonly VERSION="3.5.3"
 readonly AUTHOR="mozisen"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/vless-all-in-one"
-readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/mozisen/surge/edit/main/vless-server.sh"
+readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/mozisen/surge/main/vless-server.sh"
 readonly CFG="/etc/vless-reality"
 readonly ACME_DEFAULT_EMAIL="acme@vaio.com"
 
