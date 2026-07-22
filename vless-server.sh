@@ -14,15 +14,14 @@
 #  
 #  
 #  作者: Zyx0rx
-#  项目地址: https://github.com/mozisen
-#  作者地址:https://docs.vaiox.de/
+#  项目地址: https://github.com/Zyx0rx/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
 readonly VERSION="3.5.3"
 readonly AUTHOR="Zyx0rx"
-readonly REPO_URL="https://github.com/mozisen/surge"
-readonly SCRIPT_REPO="mozisen/vless-all-in-one"
-readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/mozisen/surge/main/vless-server.sh"
+readonly REPO_URL="https://github.com/Zyx0rx/vless-all-in-one"
+readonly SCRIPT_REPO="Zyx0rx/vless-all-in-one"
+readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/Zyx0rx/vless-all-in-one/main/vless-server.sh"
 readonly CFG="/etc/vless-reality"
 readonly ACME_DEFAULT_EMAIL="acme@vaio.com"
 
@@ -9918,15 +9917,38 @@ install_snell_v5() {
         return 1
     fi
     local tmp=$(mktemp -d)
-    if curl -sLo "$tmp/snell.zip" --connect-timeout 60 "https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"; then
-        unzip -oq "$tmp/snell.zip" -d "$tmp/" && install -m 755 "$tmp/snell-server" /usr/local/bin/snell-server-v5
+    # 多源下载: 官方源 -> xOS GitHub 备份源 -> Gitee 备份源
+    # curl 使用 -f 确保 404 等 HTTP 错误被视为失败 (旧逻辑会把 404 页面当 zip 保存并误报安装成功)
+    local dl_urls=(
+        "https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"
+        "https://raw.githubusercontent.com/xOS/Others/master/snell/v${version}/snell-server-v${version}-linux-${sarch}.zip"
+        "https://gitee.com/ten/Others/raw/master/snell/v${version}/snell-server-v${version}-linux-${sarch}.zip"
+    )
+    local dl_url dl_ok=false
+    for dl_url in "${dl_urls[@]}"; do
+        _info "尝试下载: $dl_url"
+        rm -f "$tmp/snell.zip" "$tmp/snell-server"
+        if curl -fsLo "$tmp/snell.zip" --connect-timeout 10 --max-time "$CURL_TIMEOUT_DOWNLOAD" "$dl_url" \
+            && unzip -oq "$tmp/snell.zip" -d "$tmp/" \
+            && [[ -f "$tmp/snell-server" ]]; then
+            dl_ok=true
+            break
+        fi
+        _warn "该源下载失败，尝试下一个源..."
+    done
+    if [[ "$dl_ok" == "true" ]]; then
+        install -m 755 "$tmp/snell-server" /usr/local/bin/snell-server-v5
         # Alpine: 解压 UPX 压缩 (Snell 官方二进制使用 UPX，musl 不兼容 UPX stub)
         if [[ "$DISTRO" == "alpine" ]] && command -v upx &>/dev/null; then
             upx -d /usr/local/bin/snell-server-v5 &>/dev/null || true
         fi
+        # 最终校验: 确保二进制真实存在且可执行
+        if [[ ! -x /usr/local/bin/snell-server-v5 ]]; then
+            rm -rf "$tmp"; _err "安装校验失败: /usr/local/bin/snell-server-v5 不存在"; return 1
+        fi
         rm -rf "$tmp"; _ok "Snell v$version 已安装"; return 0
     fi
-    rm -rf "$tmp"; _err "下载失败"; return 1
+    rm -rf "$tmp"; _err "下载失败 (所有源均不可用，版本 v${version} 可能不存在)"; return 1
 }
 
 # 安装 AnyTLS
@@ -10646,17 +10668,25 @@ gen_snell_v5_server_config() {
     local psk="$1" port="$2" version="${3:-5}"
     mkdir -p "$CFG"
 
-    local listen_addr=$(_listen_addr)
-    local ipv6_enabled="false"
-    [[ "$listen_addr" == "::" ]] && ipv6_enabled="true"
+    # Snell 的 listen 不支持 [::]:port 带方括号格式
+    # 双栈监听使用 ::0:port 写法 (与 xOS/Snell 管理脚本一致)
+    local listen_val ipv6_enabled="false"
+    if _has_ipv6 && _can_dual_stack_listen; then
+        listen_val="::0:${port}"
+        ipv6_enabled="true"
+    else
+        listen_val="0.0.0.0:${port}"
+    fi
 
     cat > "$CFG/snell-v5.conf" << EOF
 [snell-server]
-listen = $(_fmt_hostport "$listen_addr" "$port")
+listen = $listen_val
 psk = $psk
-version = $version
 ipv6 = $ipv6_enabled
 obfs = off
+tfo = true
+dns = 1.1.1.1, 8.8.8.8
+version = $version
 EOF
 
     register_protocol "snell-v5" "$(build_config psk "$psk" port "$port" version "$version")"
