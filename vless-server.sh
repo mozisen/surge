@@ -8,8 +8,8 @@
 #  
 #  支持协议: VLESS+Reality / VLESS+Reality+XHTTP / VLESS+WS / VMess+WS / 
 #           VLESS-XTLS-Vision / SOCKS5 / SS2022 / HY2 / Trojan / 
-#           Snell v4 / Snell v5 / AnyTLS / TUIC / NaïveProxy (多协议)
-#  插件支持: Snell v4/v5 和 SS2022 可选启用 ShadowTLS
+#           Snell v4 / Snell v5 / Snell v6 / AnyTLS / TUIC / NaïveProxy (多协议)
+#  插件支持: Snell v4/v5/v6 和 SS2022 可选启用 ShadowTLS
 #  适配: Alpine/Debian/Ubuntu/CentOS
 #  
 #  
@@ -458,6 +458,7 @@ get_protocol_name() {
         ss2022-shadowtls) echo "SS2022+ShadowTLS" ;;
         snell) echo "Snell" ;;
         snell-v5) echo "Snell v5" ;;
+        snell-v6) echo "Snell v6" ;;
         snell-shadowtls) echo "Snell+ShadowTLS" ;;
         snell-v5-shadowtls) echo "Snell v5+ShadowTLS" ;;
         trojan) echo "Trojan" ;;
@@ -2827,7 +2828,7 @@ XRAY_PROTOCOLS="vless vless-xhttp vless-xhttp-cdn vless-ws vless-ws-notls vmess-
 # Sing-box 管理的协议 (原独立协议，现统一由 Sing-box 处理)
 SINGBOX_PROTOCOLS="hy2 tuic anytls"
 # 仍需独立进程的协议 (Snell 等闭源协议)
-STANDALONE_PROTOCOLS="snell snell-v5 snell-shadowtls snell-v5-shadowtls ss2022-shadowtls naive"
+STANDALONE_PROTOCOLS="snell snell-v5 snell-v6 snell-shadowtls snell-v5-shadowtls ss2022-shadowtls naive"
 
 #═══════════════════════════════════════════════════════════════════════════════
 #  表驱动元数据 (协议/服务/进程/启动命令)
@@ -2852,6 +2853,7 @@ PROTO_SVC[anytls]="vless-singbox"; PROTO_BIN[anytls]="sing-box"; PROTO_KIND[anyt
 # 独立协议 (Snell 等闭源协议仍需独立进程)
 PROTO_SVC[snell]="vless-snell";     PROTO_EXEC[snell]="/usr/local/bin/snell-server -c $CFG/snell.conf";        PROTO_BIN[snell]="snell-server"; PROTO_KIND[snell]="snell"
 PROTO_SVC[snell-v5]="vless-snell-v5"; PROTO_EXEC[snell-v5]="/usr/local/bin/snell-server-v5 -c $CFG/snell-v5.conf"; PROTO_BIN[snell-v5]="snell-server-v5"; PROTO_KIND[snell-v5]="snell"
+PROTO_SVC[snell-v6]="vless-snell-v6"; PROTO_EXEC[snell-v6]="/usr/local/bin/snell-server-v6 -c $CFG/snell-v6.conf"; PROTO_BIN[snell-v6]="snell-server-v6"; PROTO_KIND[snell-v6]="snell"
 
 # 动态命令：运行时从数据库取参数
 PROTO_SVC[anytls]="vless-anytls"; PROTO_KIND[anytls]="anytls"
@@ -2882,6 +2884,7 @@ declare -A SVC_PROC=(
     [vless-singbox]="sing-box"
     [vless-snell]="snell-server"
     [vless-snell-v5]="snell-server-v5"
+    [vless-snell-v6]="snell-server-v6"
     [vless-anytls]="anytls-server"
     [vless-naive]="caddy"
     [vless-snell-shadowtls]="shadow-tls"
@@ -4607,12 +4610,12 @@ ensure_dual_stack_listen() {
 #═══════════════════════════════════════════════════════════════════════════════
 force_cleanup() {
     # 停止所有 vless 相关服务
-    local services="watchdog reality hy2 tuic snell snell-v5 anytls singbox"
+    local services="watchdog reality hy2 tuic snell snell-v5 snell-v6 anytls singbox"
     services+=" snell-shadowtls snell-v5-shadowtls ss2022-shadowtls"
     services+=" snell-shadowtls-backend snell-v5-shadowtls-backend ss2022-shadowtls-backend"
     for s in $services; do svc stop "vless-$s" 2>/dev/null; done
     
-    killall xray sing-box snell-server snell-server-v5 anytls-server shadow-tls 2>/dev/null
+    killall xray sing-box snell-server snell-server-v5 snell-server-v6 anytls-server shadow-tls 2>/dev/null
     
     # 清理 iptables NAT 规则
     cleanup_hy2_nat_rules
@@ -7007,7 +7010,7 @@ fix_selinux_context() {
     # 恢复文件上下文
     if command -v restorecon &>/dev/null; then
         restorecon -Rv /usr/local/bin/xray /usr/local/bin/sing-box /usr/local/bin/snell-server \
-            /usr/local/bin/snell-server-v5 /usr/local/bin/anytls-server /usr/local/bin/shadow-tls \
+            /usr/local/bin/snell-server-v5 /usr/local/bin/snell-server-v6 /usr/local/bin/anytls-server /usr/local/bin/shadow-tls \
             /etc/vless-reality 2>/dev/null || true
     fi
     
@@ -9974,6 +9977,46 @@ install_snell_v5() {
     return 0
 }
 
+# 安装 Snell v6 (Beta)
+install_snell_v6() {
+    local version="${1:-6.0.0b4}"
+    check_cmd snell-server-v6 && { _ok "Snell v6 已安装"; return 0; }
+
+    if [[ ! "$version" =~ ^6\.[0-9]+\.[0-9]+([A-Za-z][A-Za-z0-9._-]*)?$ ]]; then
+        _err "无效的 Snell v6 版本号：$version"
+        return 1
+    fi
+
+    local sarch
+    sarch=$(_map_arch "amd64:aarch64:") || { _err "Snell v6 仅支持 amd64/aarch64"; return 1; }
+    [[ -z "$sarch" ]] && { _err "Snell v6 暂不支持当前架构"; return 1; }
+
+    _info "安装 Snell v6 Beta v${version}..."
+    local tmp url
+    tmp=$(mktemp -d) || return 1
+    url="https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"
+
+    if ! curl -fL --connect-timeout 20 --max-time 120 --retry 3 --retry-delay 2 \
+        -o "$tmp/snell.zip" "$url"; then
+        rm -rf "$tmp"
+        _err "Snell v6 下载失败：$url"
+        return 1
+    fi
+    if ! unzip -tq "$tmp/snell.zip" >/dev/null 2>&1 || ! unzip -oq "$tmp/snell.zip" -d "$tmp"; then
+        rm -rf "$tmp"
+        _err "Snell v6 压缩包无效或解压失败"
+        return 1
+    fi
+    [[ -f "$tmp/snell-server" ]] || { rm -rf "$tmp"; _err "压缩包内未找到 snell-server"; return 1; }
+    install -m 755 "$tmp/snell-server" /usr/local/bin/snell-server-v6 || { rm -rf "$tmp"; return 1; }
+    if [[ "$DISTRO" == "alpine" ]] && command -v upx >/dev/null 2>&1; then
+        upx -d /usr/local/bin/snell-server-v6 >/dev/null 2>&1 || true
+    fi
+    rm -rf "$tmp"
+    /usr/local/bin/snell-server-v6 --v >/dev/null 2>&1 || true
+    _ok "Snell v6 v${version} 已安装"
+}
+
 # 安装 AnyTLS
 install_anytls() {
     local aarch=$(_map_arch "amd64:arm64:armv7") || { _err "不支持的架构"; return 1; }
@@ -10711,6 +10754,29 @@ EOF
     echo "server" > "$CFG/role"
 }
 
+# Snell v6 服务端配置
+# v6 已移除 obfs/ipv6 字段，改用 dns-ip-preference 和 mode
+gen_snell_v6_server_config() {
+    local psk="$1" port="$2" version="${3:-6}" mode="${4:-default}"
+    mkdir -p "$CFG"
+
+    local listen_addr=$(_listen_addr)
+
+    cat > "$CFG/snell-v6.conf" << EOF
+[snell-server]
+listen = $(_fmt_hostport "$listen_addr" "$port")
+psk = $psk
+dns-ip-preference = default
+mode = $mode
+EOF
+
+    register_protocol "snell-v6" "$(build_config psk "$psk" port "$port" version "$version" mode "$mode")"
+    _save_join_info "snell-v6" "SNELL-V6|%s|$port|$psk|$version" \
+        "gen_snell_link %s $port $psk $version"
+    cp "$CFG/snell-v6.join" "$CFG/join.txt" 2>/dev/null
+    echo "server" > "$CFG/role"
+}
+
 #═══════════════════════════════════════════════════════════════════════════════
 # 服务端辅助脚本生成
 #═══════════════════════════════════════════════════════════════════════════════
@@ -10799,6 +10865,7 @@ get_all_services() {
             hy2|tuic) has_singbox=true ;;
             snell) services+="vless-snell:snell-server " ;;
             snell-v5) services+="vless-snell-v5:snell-server-v5 " ;;
+            snell-v6) services+="vless-snell-v6:snell-server-v6 " ;;
             anytls) services+="vless-anytls:anytls-server " ;;
             snell-shadowtls) services+="vless-snell-shadowtls:shadow-tls " ;;
             snell-v5-shadowtls) services+="vless-snell-v5-shadowtls:shadow-tls " ;;
@@ -17387,6 +17454,7 @@ show_all_share_links() {
                     trojan-ws) link=$(gen_trojan_ws_link "$ipv4" "$display_port" "$password" "$sni" "$path" "$country_code") ;;
                     snell) link=$(gen_snell_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
                     snell-v5) link=$(gen_snell_v5_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
+                    snell-v6) link=$(gen_snell_link "$ipv4" "$display_port" "$psk" "${version:-6}" "$country_code") ;;
                     tuic) link=$(gen_tuic_link "$ipv4" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
                     anytls) link=$(gen_anytls_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
                     naive) link=$(gen_naive_link "$domain" "$display_port" "$username" "$password" "$country_code") ;;
@@ -17438,6 +17506,7 @@ show_all_share_links() {
                     trojan-ws) link=$(gen_trojan_ws_link "$ip6" "$display_port" "$password" "$sni" "$path" "$country_code") ;;
                     snell) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
                     snell-v5) link=$(gen_snell_v5_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
+                    snell-v6) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "${version:-6}" "$country_code") ;;
                     tuic) link=$(gen_tuic_link "$ip6" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
                     anytls) link=$(gen_anytls_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
                     naive) ;; # NaïveProxy 使用域名，不需要 IPv6 链接
@@ -17832,7 +17901,7 @@ show_single_protocol_info() {
             echo -e "  ${Y}Loon 配置:${NC}"
             echo -e "  ${C}${country_code}-SS2022-ShadowTLS = Shadowsocks, ${config_ip}, ${display_port}, ${method}, \"${password}\", udp=true, shadow-tls-password=${stls_password}, shadow-tls-sni=${sni}, shadow-tls-version=3${NC}"
             ;;
-        snell|snell-v5)
+        snell|snell-v5|snell-v6)
             echo -e "  PSK: ${G}$psk${NC}"
             echo -e "  版本: ${G}v$version${NC}"
             echo ""
@@ -17971,6 +18040,10 @@ show_single_protocol_info() {
             snell-v5)
                 link=$(gen_snell_v5_link "$ip_addr" "$link_port" "$psk" "$version" "$country_code")
                 join_code=$(echo "SNELL-V5|${ip_addr}|${link_port}|${psk}|${version}" | base64 -w 0)
+                ;;
+            snell-v6)
+                link=$(gen_snell_link "$ip_addr" "$link_port" "$psk" "${version:-6}" "$country_code")
+                join_code=$(echo "SNELL-V6|${ip_addr}|${link_port}|${psk}|${version:-6}" | base64 -w 0)
                 ;;
             snell-shadowtls|snell-v5-shadowtls)
                 local stls_ver="${version:-4}"
@@ -18592,6 +18665,7 @@ uninstall_specific_protocol() {
         case "$selected_protocol" in
             snell) rm -f "$CFG/snell.conf" ;;
             snell-v5) rm -f "$CFG/snell-v5.conf" ;;
+            snell-v6) rm -f "$CFG/snell-v6.conf" ;;
             snell-shadowtls) rm -f "$CFG/snell-shadowtls.conf" ;;
             snell-v5-shadowtls) rm -f "$CFG/snell-v5-shadowtls.conf" ;;
             ss2022-shadowtls) rm -f "$CFG/ss2022-shadowtls-backend.json" ;;
@@ -18911,19 +18985,20 @@ select_protocol() {
     _line
     _item "10" "Snell v4"
     _item "11" "Snell v5"
+    _item "12" "Snell v6 ${D}(Beta)${NC}"
     _line
     echo -e "  ${W}其他协议${NC}"
     _line
-    _item "12" "AnyTLS"
-    _item "13" "TUIC v5"
-    _item "14" "NaïveProxy"
+    _item "13" "AnyTLS"
+    _item "14" "TUIC v5"
+    _item "15" "NaïveProxy"
     _item "0" "返回"
     echo ""
     echo -e "  ${D}提示: 5/6 使用 8443 端口时，3/4 可作为回落共用${NC}"
     echo ""
     
     while true; do
-        read -rp "  选择协议 [0-14]: " choice
+        read -rp "  选择协议 [0-15]: " choice
         case $choice in
             0) SELECTED_PROTOCOL=""; return 1 ;;
             1) select_vless_mode || return 1; break ;;
@@ -18937,9 +19012,10 @@ select_protocol() {
             9) SELECTED_PROTOCOL="socks"; break ;;
             10) SELECTED_PROTOCOL="snell"; break ;;
             11) SELECTED_PROTOCOL="snell-v5"; break ;;
-            12) SELECTED_PROTOCOL="anytls"; break ;;
-            13) SELECTED_PROTOCOL="tuic"; break ;;
-            14) SELECTED_PROTOCOL="naive"; break ;;
+            12) SELECTED_PROTOCOL="snell-v6"; break ;;
+            13) SELECTED_PROTOCOL="anytls"; break ;;
+            14) SELECTED_PROTOCOL="tuic"; break ;;
+            15) SELECTED_PROTOCOL="naive"; break ;;
             *) _err "无效选择" ;;
         esac
     done
@@ -19019,6 +19095,7 @@ do_install_server() {
             case "$protocol" in
                 snell) rm -f "$CFG/snell.conf" ;;
                 snell-v5) rm -f "$CFG/snell-v5.conf" ;;
+                snell-v6) rm -f "$CFG/snell-v6.conf" ;;
                 snell-shadowtls) rm -f "$CFG/snell-shadowtls.conf" ;;
                 snell-v5-shadowtls) rm -f "$CFG/snell-v5-shadowtls.conf" ;;
                 ss2022-shadowtls) rm -f "$CFG/ss2022-shadowtls-backend.json" ;;
@@ -19147,6 +19224,9 @@ do_install_server() {
             ;;
         snell-v5)
             install_snell_v5 || { _err "Snell v5 安装失败"; _pause; return 1; }
+            ;;
+        snell-v6)
+            install_snell_v6 || { _err "Snell v6 安装失败"; _pause; return 1; }
             ;;
         snell-shadowtls)
             install_snell || { _err "Snell 安装失败"; _pause; return 1; }
@@ -19781,7 +19861,7 @@ do_install_server() {
             local password=$(head -c $key_len /dev/urandom 2>/dev/null | base64 -w 0)
             
             # 使用前面询问的结果
-            if [[ "$enable_stls_pre" =~ ^[yY]$ ]]; then
+            if [[ -n "$stls_protocol" && "$enable_stls_pre" =~ ^[yY]$ ]]; then
                 # 安装 ShadowTLS
                 _info "安装 ShadowTLS..."
                 install_shadowtls || { _err "ShadowTLS 安装失败"; _pause; return 1; }
@@ -20005,21 +20085,25 @@ do_install_server() {
                 gen_trojan_server_config "$password" "$port" "$final_sni"
             fi
             ;;
-        snell|snell-v5)
+        snell|snell-v5|snell-v6)
             # 根据协议确定版本
             local version psk stls_protocol
             if [[ "$protocol" == "snell" ]]; then
                 version="4"
                 psk=$(head -c 16 /dev/urandom 2>/dev/null | base64 -w 0 | tr -d '/+=' | head -c 22)
                 stls_protocol="snell-shadowtls"
-            else
+            elif [[ "$protocol" == "snell-v5" ]]; then
                 version="5"
                 psk=$(ask_password 16 "Snell v5 PSK")
                 stls_protocol="snell-v5-shadowtls"
+            else
+                version="6"
+                psk=$(ask_password 16 "Snell v6 PSK")
+                stls_protocol=""
             fi
             
             # 使用前面询问的结果
-            if [[ "$enable_stls_pre" =~ ^[yY]$ ]]; then
+            if [[ -n "$stls_protocol" && "$enable_stls_pre" =~ ^[yY]$ ]]; then
                 # 安装 ShadowTLS
                 _info "安装 ShadowTLS..."
                 install_shadowtls || { _err "ShadowTLS 安装失败"; _pause; return 1; }
@@ -20076,8 +20160,10 @@ do_install_server() {
                 _info "生成配置..."
                 if [[ "$version" == "4" ]]; then
                     gen_snell_server_config "$psk" "$port" "$version"
-                else
+                elif [[ "$version" == "5" ]]; then
                     gen_snell_v5_server_config "$psk" "$port" "$version"
+                else
+                    gen_snell_v6_server_config "$psk" "$port" "$version"
                 fi
             fi
             ;;
@@ -24127,6 +24213,10 @@ show_service_logs() {
         snell-v5)
             service_name="vless-snell-v5"
             proc_name="snell-server-v5"
+            ;;
+        snell-v6)
+            service_name="vless-snell-v6"
+            proc_name="snell-server-v6"
             ;;
         snell-shadowtls|snell-v5-shadowtls|ss2022-shadowtls)
             service_name="vless-${selected}"
