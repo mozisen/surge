@@ -15,10 +15,11 @@
 #  
 #  作者: Zyx0rx
 #  项目地址: https://github.com/mozisen
+#  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
 readonly VERSION="3.5.3"
-readonly AUTHOR="mozisen"
+readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/vless-all-in-one"
 readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/mozisen/surge/main/vless-server.sh"
