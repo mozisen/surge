@@ -7,3 +7,5 @@ wget -O vless-server.sh https://raw.githubusercontent.com/mozisen/surge/main/vle
 ```bash
 vless
 ```
+更新 2026-7-22：
+修复snell v5 安装异常问题
