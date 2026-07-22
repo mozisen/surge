@@ -9879,54 +9879,99 @@ install_snell_v5() {
     local channel="${1:-stable}"
     local force="${2:-false}"
     local version_override="${3:-}"
-    local exists=false action="安装" channel_label="稳定版"
+    local exists=false
+    local action="安装"
 
     if check_cmd snell-server-v5; then
         exists=true
-        [[ "$force" != "true" ]] && { _ok "Snell v5 已安装"; return 0; }
-    fi
-    [[ "$exists" == "true" ]] && action="更新"
-    if [[ "$channel" == "prerelease" || "$channel" == "test" || "$channel" == "beta" ]]; then
-        _warn "Snell v5 未提供预发布版本，使用稳定版"
-        channel="stable"
+        if [[ "$force" != "true" ]]; then
+            _ok "Snell v5 已安装"
+            return 0
+        fi
     fi
 
-    local sarch=$(_map_arch "amd64:aarch64:armv7l") || { _err "不支持的架构"; return 1; }
-    # Alpine 需要安装 upx 来解压 UPX 压缩的二进制 (musl 不兼容 UPX stub)
-    if [[ "$DISTRO" == "alpine" ]]; then
-        apk add --no-cache upx &>/dev/null
-    fi
-    local version=""
-    if [[ -n "$version_override" ]]; then
-        _info "$action Snell v5 (版本 v$version_override)..."
-        version="$version_override"
-    else
-        _info "$action Snell v5 (获取最新${channel_label})..."
-        version=$(_get_snell_latest_version "true")
-        if [[ -z "$version" ]]; then
-            local cached_version=""
-            cached_version=$(_force_get_cached_version "surge-networks/snell" 2>/dev/null)
-            if [[ -n "$cached_version" ]]; then
-                _warn "获取最新${channel_label}失败，使用缓存版本 v$cached_version"
-                version="$cached_version"
-            fi
-        fi
-    fi
-    [[ -z "$version" ]] && version="$SNELL_DEFAULT_VERSION"
-    if [[ ! "$version" =~ ^[0-9A-Za-z._-]+$ ]]; then
-        _err "无效的版本号格式: $version"
+    [[ "$exists" == "true" ]] && action="更新"
+
+    local sarch
+    sarch=$(_map_arch "amd64:aarch64:armv7l") || {
+        _err "不支持的架构"
+        return 1
+    }
+
+    # Snell v5 当前稳定版本
+    local version="${version_override:-5.0.1}"
+
+    if [[ ! "$version" =~ ^5\.[0-9]+\.[0-9]+([A-Za-z0-9._-]*)?$ ]]; then
+        _err "无效的 Snell v5 版本号：$version"
         return 1
     fi
-    local tmp=$(mktemp -d)
-    if curl -sLo "$tmp/snell.zip" --connect-timeout 60 "https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"; then
-        unzip -oq "$tmp/snell.zip" -d "$tmp/" && install -m 755 "$tmp/snell-server" /usr/local/bin/snell-server-v5
-        # Alpine: 解压 UPX 压缩 (Snell 官方二进制使用 UPX，musl 不兼容 UPX stub)
-        if [[ "$DISTRO" == "alpine" ]] && command -v upx &>/dev/null; then
-            upx -d /usr/local/bin/snell-server-v5 &>/dev/null || true
-        fi
-        rm -rf "$tmp"; _ok "Snell v$version 已安装"; return 0
+
+    _info "$action Snell v5 v${version}..."
+
+    local tmp
+    tmp=$(mktemp -d) || {
+        _err "创建临时目录失败"
+        return 1
+    }
+
+    local url="https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"
+
+    # 使用 -f，HTTP 404/403 时直接判定失败
+    if ! curl -fL \
+        --connect-timeout 20 \
+        --max-time 120 \
+        --retry 3 \
+        --retry-delay 2 \
+        -o "$tmp/snell.zip" \
+        "$url"; then
+        rm -rf "$tmp"
+        _err "Snell v5 下载失败：$url"
+        return 1
     fi
-    rm -rf "$tmp"; _err "下载失败"; return 1
+
+    # 验证确实为 ZIP 文件
+    if ! unzip -tq "$tmp/snell.zip" >/dev/null 2>&1; then
+        echo ""
+        _err "下载文件不是有效的 ZIP 压缩包"
+        echo "下载地址：$url"
+        echo "文件类型：$(file -b "$tmp/snell.zip" 2>/dev/null)"
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    if ! unzip -oq "$tmp/snell.zip" -d "$tmp"; then
+        rm -rf "$tmp"
+        _err "Snell v5 解压失败"
+        return 1
+    fi
+
+    if [[ ! -f "$tmp/snell-server" ]]; then
+        rm -rf "$tmp"
+        _err "压缩包内未找到 snell-server"
+        return 1
+    fi
+
+    if ! install -m 755 \
+        "$tmp/snell-server" \
+        /usr/local/bin/snell-server-v5; then
+        rm -rf "$tmp"
+        _err "Snell v5 二进制安装失败"
+        return 1
+    fi
+
+    if [[ "$DISTRO" == "alpine" ]] && command -v upx >/dev/null 2>&1; then
+        upx -d /usr/local/bin/snell-server-v5 >/dev/null 2>&1 || true
+    fi
+
+    rm -rf "$tmp"
+
+    if [[ ! -x /usr/local/bin/snell-server-v5 ]]; then
+        _err "Snell v5 安装验证失败"
+        return 1
+    fi
+
+    _ok "Snell v5 v${version} 已安装"
+    return 0
 }
 
 # 安装 AnyTLS
