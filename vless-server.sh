@@ -1,6 +1,22 @@
-#!/bin/bash 
+#!/bin/bash
+#
+# 本脚本会保存代理凭据、API Token 和私钥。统一使用私有文件权限，
+# 避免后续通过重定向或 mv 新建的配置意外变成 0644。
+umask 077
+
+# 关联数组、大小写转换和动态文件描述符要求 Bash 4.1+。
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) )); then
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "用法: $0 [选项]"
+        echo "选项: --sync-traffic, --show-traffic, --check-expire, --setup-expire-cron, --help"
+        echo "运行功能需要 Bash 4.1 或更高版本。"
+        exit 0
+    fi
+    echo "错误: 本脚本需要 Bash 4.1 或更高版本（当前: ${BASH_VERSION:-unknown}）" >&2
+    exit 1
+fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.3 [服务端]
+#  多协议代理一键部署脚本 v3.5.4 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -18,11 +34,19 @@
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.3-alpine321.2"
+readonly VERSION="3.5.4"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
-readonly SCRIPT_REPO="mozisen/vless-all-in-one"
-readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/mozisen/surge/main/vless-server.sh"
+readonly SCRIPT_REPO="mozisen/surge"
+readonly SCRIPT_SOURCE_REPO="mozisen/surge"
+SCRIPT_SOURCE_REF="${VLESS_SCRIPT_SOURCE_REF:-main}"
+if [[ ! "$SCRIPT_SOURCE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    echo "错误: VLESS_SCRIPT_SOURCE_REF 格式无效" >&2
+    exit 1
+fi
+readonly SCRIPT_SOURCE_REF
+readonly SCRIPT_SOURCE_PATH="vless-server.sh"
+readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/${SCRIPT_SOURCE_REPO}/${SCRIPT_SOURCE_REF}/${SCRIPT_SOURCE_PATH}"
 readonly CFG="/etc/vless-reality"
 readonly ACME_DEFAULT_EMAIL="acme@vaio.com"
 
@@ -34,6 +58,7 @@ readonly LATENCY_TEST_URL="https://www.gstatic.com/generate_204"
 readonly LATENCY_PARALLEL="${LATENCY_PARALLEL:-4}"
 readonly LATENCY_PROBES="${LATENCY_PROBES:-3}"
 readonly LATENCY_MAX_ATTEMPTS="${LATENCY_MAX_ATTEMPTS:-0}"
+readonly SUBSCRIPTION_MAX_BYTES=10485760
 
 # IP 缓存变量
 _CACHED_IPV4=""
@@ -54,50 +79,128 @@ _pgrep() {
 #  全局状态数据库 (JSON)
 #═══════════════════════════════════════════════════════════════════════════════
 readonly DB_FILE="$CFG/db.json"
+readonly DB_LOCK_FILE="$CFG/.db.lock"
+DB_LOCK_FD=""
+DB_LOCK_DIR_HELD=false
+
+_db_lock_acquire() {
+    mkdir -p "$CFG" || return 1
+    if command -v flock >/dev/null 2>&1; then
+        exec {DB_LOCK_FD}>"$DB_LOCK_FILE" || return 1
+        flock -x "$DB_LOCK_FD" || {
+            exec {DB_LOCK_FD}>&-
+            DB_LOCK_FD=""
+            return 1
+        }
+    else
+        local lock_dir="${DB_LOCK_FILE}.d" owner attempt
+        for ((attempt=0; attempt<200; attempt++)); do
+            if mkdir "$lock_dir" 2>/dev/null; then
+                printf '%s\n' "$$" >"$lock_dir/pid"
+                DB_LOCK_DIR_HELD=true
+                return 0
+            fi
+            owner=$(cat "$lock_dir/pid" 2>/dev/null || true)
+            if [[ -n "$owner" && "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+                rm -f "$lock_dir/pid" 2>/dev/null
+                rmdir "$lock_dir" 2>/dev/null || true
+                continue
+            fi
+            sleep 0.05
+        done
+        _err "等待数据库锁超时"
+        return 1
+    fi
+}
+
+_db_lock_release() {
+    if [[ -n "${DB_LOCK_FD:-}" ]]; then
+        flock -u "$DB_LOCK_FD" 2>/dev/null || true
+        exec {DB_LOCK_FD}>&-
+        DB_LOCK_FD=""
+    fi
+    if [[ "${DB_LOCK_DIR_HELD:-false}" == "true" ]]; then
+        rm -f "${DB_LOCK_FILE}.d/pid" 2>/dev/null
+        rmdir "${DB_LOCK_FILE}.d" 2>/dev/null || true
+        DB_LOCK_DIR_HELD=false
+    fi
+}
 
 # 初始化数据库
 init_db() {
     mkdir -p "$CFG" || return 1
-    [[ -f "$DB_FILE" ]] && return 0
+    # 允许 Nginx 按随机订阅路径穿越目录，但禁止普通用户列出目录内容。
+    chmod 711 "$CFG" 2>/dev/null || true
+    _db_lock_acquire || return 1
+    if [[ -f "$DB_FILE" ]]; then
+        chmod 600 "$DB_FILE" 2>/dev/null || true
+        _db_lock_release
+        return 0
+    fi
     local now tmp
     # Alpine busybox date 不支持 -Iseconds，使用兼容格式
     now=$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
-    tmp=$(mktemp) || return 1
+    tmp=$(mktemp "${DB_FILE}.init.XXXXXX") || { _db_lock_release; return 1; }
     if jq -n --arg v "4.0.0" --arg t "$now" \
       '{version:$v,xray:{},singbox:{},meta:{created:$t,updated:$t}}' >"$tmp" 2>/dev/null; then
-        mv "$tmp" "$DB_FILE"
-        return 0
+        if chmod 600 "$tmp" && mv "$tmp" "$DB_FILE"; then
+            _db_lock_release
+            return 0
+        fi
+        rm -f "$tmp"
+        _db_lock_release
+        return 1
     fi
     # jq 失败时使用简单方式创建
-    echo '{"version":"4.0.0","xray":{},"singbox":{},"meta":{}}' > "$DB_FILE"
+    if printf '%s\n' '{"version":"4.0.0","xray":{},"singbox":{},"meta":{}}' >"$tmp" &&
+       chmod 600 "$tmp" && mv "$tmp" "$DB_FILE"; then
+        _db_lock_release
+        return 0
+    fi
     rm -f "$tmp"
-    return 0
+    _db_lock_release
+    return 1
 }
 
 # 更新数据库时间戳
 _db_touch() {
     [[ -f "$DB_FILE" ]] || init_db || return 1
+    _db_lock_acquire || return 1
     local now tmp
     # Alpine busybox date 不支持 -Iseconds，使用兼容格式
     now=$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
-    tmp=$(mktemp) || return 1
+    tmp=$(mktemp "${DB_FILE}.touch.XXXXXX") || { _db_lock_release; return 1; }
     if jq --arg t "$now" '.meta.updated=$t' "$DB_FILE" >"$tmp"; then
-        mv "$tmp" "$DB_FILE"
+        if chmod 600 "$tmp" && mv "$tmp" "$DB_FILE"; then
+            _db_lock_release
+            return 0
+        fi
+        rm -f "$tmp"
+        _db_lock_release
+        return 1
     else
         rm -f "$tmp"
+        _db_lock_release
         return 1
     fi
 }
 
 _db_apply() { # _db_apply [jq args...] 'filter'
     [[ -f "$DB_FILE" ]] || init_db || return 1
-    local tmp; tmp=$(mktemp) || return 1
-    if jq "$@" "$DB_FILE" >"$tmp" 2>/dev/null; then
-        mv "$tmp" "$DB_FILE"
-        _db_touch
+    _db_lock_acquire || return 1
+    local tmp final now
+    tmp=$(mktemp "${DB_FILE}.apply.XXXXXX") || { _db_lock_release; return 1; }
+    final=$(mktemp "${DB_FILE}.final.XXXXXX") || { rm -f "$tmp"; _db_lock_release; return 1; }
+    now=$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
+    if jq "$@" "$DB_FILE" >"$tmp" 2>/dev/null &&
+       jq --arg t "$now" '.meta.updated=$t' "$tmp" >"$final" 2>/dev/null &&
+       chmod 600 "$final" && mv "$final" "$DB_FILE"; then
+        rm -f "$tmp"
+        _db_lock_release
         return 0
     fi
-    rm -f "$tmp"
+    rm -f "$tmp" "$final"
+    _db_lock_release
     return 1
 }
 
@@ -200,9 +303,7 @@ db_add_port() {
         return 0
     fi
     
-    local tmp_file="${DB_FILE}.tmp"
-    
-    jq --arg c "$core" --arg p "$protocol" --argjson cfg "$port_config" '
+    _db_apply --arg c "$core" --arg p "$protocol" --argjson cfg "$port_config" '
         .[$c][$p] = (
             if .[$c][$p] then
                 if (.[$c][$p] | type) == "array" then
@@ -214,7 +315,7 @@ db_add_port() {
                 [$cfg]
             end
         )
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    '
 }
 
 # 删除指定端口实例
@@ -223,9 +324,7 @@ db_remove_port() {
     local core="$1" protocol="$2" port="$3"
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp_file="${DB_FILE}.tmp"
-    
-    jq --arg c "$core" --arg p "$protocol" --arg port "$port" '
+    _db_apply --arg c "$core" --arg p "$protocol" --arg port "$port" '
         .[$c][$p] = (
             if (.[$c][$p] | type) == "array" then
                 .[$c][$p] | map(select(.port != ($port | tonumber)))
@@ -241,7 +340,7 @@ db_remove_port() {
         else
             .
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    '
 }
 
 # 更新指定端口的配置
@@ -250,9 +349,7 @@ db_update_port() {
     local core="$1" protocol="$2" port="$3" new_config="$4"
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp_file="${DB_FILE}.tmp"
-    
-    jq --arg c "$core" --arg p "$protocol" --arg port "$port" --argjson cfg "$new_config" '
+    _db_apply --arg c "$core" --arg p "$protocol" --arg port "$port" --argjson cfg "$new_config" '
         .[$c][$p] = (
             if (.[$c][$p] | type) == "array" then
                 .[$c][$p] | map(if .port == ($port | tonumber) then $cfg else . end)
@@ -264,7 +361,7 @@ db_update_port() {
                 end
             end
         )
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    '
 }
 
 # 删除协议
@@ -341,13 +438,12 @@ db_add_ip_routing_rule() {
     [[ -z "$inbound_ip" || -z "$outbound_ip" ]] && return 1
     [[ ! -f "$DB_FILE" ]] && init_db
     
-    local tmp=$(mktemp)
-    jq --arg in_ip "$inbound_ip" --arg out_ip "$outbound_ip" '
+    _db_apply --arg in_ip "$inbound_ip" --arg out_ip "$outbound_ip" '
         .ip_routing.enabled = true |
         .ip_routing.rules = ((.ip_routing.rules // []) | 
             [.[] | select(.inbound_ip != $in_ip)] + 
             [{"inbound_ip": $in_ip, "outbound_ip": $out_ip}])
-    ' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    '
 }
 
 # 删除IP路由规则
@@ -357,25 +453,22 @@ db_del_ip_routing_rule() {
     [[ -z "$inbound_ip" ]] && return 1
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp=$(mktemp)
-    jq --arg in_ip "$inbound_ip" '
+    _db_apply --arg in_ip "$inbound_ip" '
         .ip_routing.rules = [(.ip_routing.rules // [])[] | select(.inbound_ip != $in_ip)]
-    ' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    '
 }
 
 # 清空所有IP路由规则
 db_clear_ip_routing_rules() {
     [[ ! -f "$DB_FILE" ]] && return 1
-    local tmp=$(mktemp)
-    jq '.ip_routing.rules = []' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply '.ip_routing.rules = []'
 }
 
 # 设置IP路由启用/禁用
 db_set_ip_routing_enabled() {
     local enabled="$1"
     [[ ! -f "$DB_FILE" ]] && init_db
-    local tmp=$(mktemp)
-    jq --argjson e "$enabled" '.ip_routing.enabled = $e' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply --argjson e "$enabled" '.ip_routing.enabled = $e'
 }
 
 # 获取指定入站IP的出站IP
@@ -429,13 +522,21 @@ ask_password() {
     local length="${1:-16}"
     local prompt="${2:-密码}"
     local password=""
-    
-    read -rp "请输入${prompt} (直接回车自动生成): " password
-    
-    # 如果直接回车，生成随机密码
-    if [[ -z "$password" ]]; then
-        password=$(gen_password "$length")
-    fi
+
+    while true; do
+        read -rsp "请输入${prompt} (直接回车自动生成): " password
+        echo "" >&2
+        if [[ -z "$password" ]]; then
+            password=$(gen_password "$length")
+            break
+        fi
+        # 该安全字符集可直接用于 URI、Snell/Caddy 配置和 JSON 字段，
+        # 排除空白、引号、反斜杠及 shell/config 分隔符。
+        if [[ "$password" =~ ^[a-zA-Z0-9._~!@%+=,-]+$ ]]; then
+            break
+        fi
+        _err "${prompt}只能包含字母、数字及 . _ ~ ! @ % + = , -"
+    done
     
     echo "$password"
 }
@@ -737,8 +838,7 @@ db_add_user() {
     local created=$(date '+%Y-%m-%d')
     
     # 添加用户 (支持多端口数组，包含 expire_date)
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg c "$core" --arg p "$proto" --arg n "$name" --arg u "$uuid" \
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg u "$uuid" \
        --argjson q "$quota" --arg cr "$created" --arg exp "$expire_date" '
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
@@ -748,7 +848,7 @@ db_add_user() {
             # 单端口: 正常添加
             .[$c][$p].users = ((.[$c][$p].users // []) + [{name:$n,uuid:$u,quota:$q,used:0,enabled:true,created:$cr,expire_date:$exp}])
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    ' || return 1
     
     # 如果设置了到期日期，自动安装过期检查 cron
     [[ -n "$expire_date" ]] && ensure_expire_check_cron 2>/dev/null
@@ -768,8 +868,7 @@ db_del_user() {
     local core="$1" proto="$2" name="$3"
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg c "$core" --arg p "$proto" --arg n "$name" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" '
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
             # 多端口: 从所有端口实例中删除该用户
@@ -778,7 +877,7 @@ db_del_user() {
             # 单端口
             .[$c][$p].users = [.[$c][$p].users // [] | .[] | select(.name != $n)]
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    ' || return 1
     
     # 自动重建配置
     if [[ "$core" == "xray" ]]; then
@@ -907,15 +1006,14 @@ db_update_user_traffic() {
     local core="$1" proto="$2" name="$3" bytes="$4"
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg c "$core" --arg p "$proto" --arg n "$name" --argjson b "$bytes" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --argjson b "$bytes" '
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
             .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .used += $b else . end])]
         else
             .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .used += $b else . end]
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    '
 }
 
 # 设置用户流量(覆盖) (支持多端口数组格式)
@@ -924,15 +1022,14 @@ db_set_user_traffic() {
     local core="$1" proto="$2" name="$3" bytes="$4"
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg c "$core" --arg p "$proto" --arg n "$name" --argjson b "$bytes" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --argjson b "$bytes" '
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
             .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .used = $b else . end])]
         else
             .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .used = $b else . end]
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    '
 }
 
 # 重置用户流量
@@ -952,15 +1049,14 @@ db_set_user_quota() {
         quota=$((quota_gb * 1073741824))
     fi
     
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg c "$core" --arg p "$proto" --arg n "$name" --argjson q "$quota" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --argjson q "$quota" '
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
             .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .quota = $q else . end])]
         else
             .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .quota = $q else . end]
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    '
 }
 
 # 启用/禁用用户 (支持多端口数组格式)
@@ -969,15 +1065,14 @@ db_set_user_enabled() {
     local core="$1" proto="$2" name="$3" enabled="$4"
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg c "$core" --arg p "$proto" --arg n "$name" --argjson e "$enabled" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --argjson e "$enabled" '
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
             .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .enabled = $e else . end])]
         else
             .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .enabled = $e else . end]
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    ' || return 1
     
     # 自动重建配置
     [[ "$core" == "xray" ]] && rebuild_and_reload_xray "silent"
@@ -1028,27 +1123,25 @@ db_set_user_alert_state() {
     local core="$1" proto="$2" name="$3" field="$4" value="$5"
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp_file="${DB_FILE}.tmp"
-    
     # 根据值类型选择合适的 jq 参数
     if [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" == "true" ]] || [[ "$value" == "false" ]]; then
-        jq --arg c "$core" --arg p "$proto" --arg n "$name" --arg f "$field" --argjson v "$value" '
+        _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg f "$field" --argjson v "$value" '
             .[$c][$p] as $cfg |
             if ($cfg | type) == "array" then
                 .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .[$f] = $v else . end])]
             else
                 .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .[$f] = $v else . end]
             end
-        ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+        '
     else
-        jq --arg c "$core" --arg p "$proto" --arg n "$name" --arg f "$field" --arg v "$value" '
+        _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg f "$field" --arg v "$value" '
             .[$c][$p] as $cfg |
             if ($cfg | type) == "array" then
                 .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .[$f] = $v else . end])]
             else
                 .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .[$f] = $v else . end]
             end
-        ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+        '
     fi
 }
 # 设置用户路由 (支持多端口数组格式)
@@ -1063,15 +1156,14 @@ db_set_user_routing() {
     local core="$1" proto="$2" name="$3" routing="$4"
     [[ ! -f "$DB_FILE" ]] && return 1
     
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg c "$core" --arg p "$proto" --arg n "$name" --arg r "$routing" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg r "$routing" '
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
             .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .routing = $r else . end])]
         else
             .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .routing = $r else . end]
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    ' || return 1
     
     # 自动重建配置
     if [[ "$core" == "xray" ]]; then
@@ -1127,15 +1219,14 @@ db_set_user_expire_date() {
     # 处理特殊值
     [[ "$expire_date" == "never" ]] && expire_date=""
     
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg c "$core" --arg p "$proto" --arg n "$name" --arg e "$expire_date" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg e "$expire_date" '
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
             .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .expire_date = $e else . end])]
         else
             .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .expire_date = $e else . end]
         end
-    ' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    ' || return 1
     
     # 如果设置了到期日期，自动安装过期检查 cron
     [[ -n "$expire_date" ]] && ensure_expire_check_cron 2>/dev/null
@@ -1276,8 +1367,7 @@ db_get_tg_config() {
 db_set_tg_config() {
     local field="$1" value="$2"
     [[ ! -f "$DB_FILE" ]] && init_db
-    local tmp_file="${DB_FILE}.tmp"
-    jq --arg f "$field" --arg v "$value" '.telegram[$f] = $v' "$DB_FILE" > "$tmp_file" && mv "$tmp_file" "$DB_FILE"
+    _db_apply --arg f "$field" --arg v "$value" '.telegram[$f] = $v'
 }
 
 # 发送 Telegram 消息
@@ -1798,11 +1888,11 @@ xray_api_query() {
         return 1
     fi
     
-    local cmd="xray api statsquery --server=127.0.0.1:${XRAY_API_PORT}"
-    [[ "$reset" == "true" ]] && cmd+=" -reset"
-    [[ -n "$pattern" ]] && cmd+=" -pattern \"$pattern\""
-    
-    eval "$cmd" 2>/dev/null
+    local cmd=(xray api statsquery "--server=127.0.0.1:${XRAY_API_PORT}")
+    [[ "$reset" == "true" ]] && cmd+=("-reset")
+    [[ -n "$pattern" ]] && cmd+=("-pattern" "$pattern")
+
+    "${cmd[@]}" 2>/dev/null
 }
 
 # 查询 Sing-box V2Ray Stats API（通过本地 gRPC helper）
@@ -2349,8 +2439,7 @@ reset_monthly_user_traffic() {
     month_key=$(date +%Y-%m)
     echo "$month_key" > "$TRAFFIC_MONTHLY_RESET_LAST_FILE"
 
-    local tmp=$(mktemp)
-    jq '
+    _db_apply '
       if .xray then
         .xray |= with_entries(
           .value |= (
@@ -2362,7 +2451,7 @@ reset_monthly_user_traffic() {
           )
         )
       else . end
-    ' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    '
     _ok "已按月重置 Xray 用户流量"
 }
 
@@ -2423,16 +2512,31 @@ build_config() {
 }
 
 # 保存 JOIN 信息到文件
-# 用法: _save_join_info "协议名" "数据格式" "链接生成命令" [额外行...]
+# 用法: _save_join_info "协议名" "数据格式" "链接函数" [函数参数...] [--extra 额外行...]
 # 数据格式中 %s 会被替换为 IP，%b 会被替换为 [IP] (IPv6 带括号)
-# 示例: _save_join_info "vless" "REALITY|%s|$port|$uuid" "gen_vless_link %s $port $uuid"
+# 示例: _save_join_info "vless" "REALITY|%s|$port|$uuid" gen_vless_link "%s" "$port" "$uuid"
 _save_join_info() {
-    local protocol="$1" data_fmt="$2" link_cmd="$3"; shift 3
+    local protocol="$1" data_fmt="$2" link_func="$3"; shift 3
     local join_file="$CFG/${protocol}.join"
     local link_prefix; link_prefix=$(tr '[:lower:]-' '[:upper:]_' <<<"$protocol")
+    if [[ ! "$link_func" =~ ^gen_[a-zA-Z0-9_]+_link$ ]] || ! declare -F "$link_func" >/dev/null 2>&1; then
+        _err "无效的链接生成函数: $link_func"
+        return 1
+    fi
+
+    local link_args=() extra_lines=() parsing_extra=false arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--extra" && "$parsing_extra" == "false" ]]; then
+            parsing_extra=true
+        elif [[ "$parsing_extra" == "true" ]]; then
+            extra_lines+=("$arg")
+        else
+            link_args+=("$arg")
+        fi
+    done
     : >"$join_file"
 
-    local label ip ipfmt data code cmd link
+    local label ip ipfmt data code link
     for label in V4 V6; do
         ip=$([[ "$label" == V4 ]] && get_ipv4 || get_ipv6)
         [[ -z "$ip" ]] && continue
@@ -2440,14 +2544,23 @@ _save_join_info() {
 
         data=${data_fmt//%s/$ipfmt}; data=${data//%b/$ipfmt}
         code=$(printf '%s' "$data" | base64 -w 0 2>/dev/null || printf '%s' "$data" | base64)
-        cmd=${link_cmd//%s/$ipfmt}; cmd=${cmd//%b/$ipfmt}
-        link=$(eval "$cmd")
+
+        local resolved_args=() resolved
+        for arg in "${link_args[@]}"; do
+            resolved=${arg//%s/$ipfmt}
+            resolved=${resolved//%b/$ipfmt}
+            resolved_args+=("$resolved")
+        done
+        link=$("$link_func" "${resolved_args[@]}") || {
+            _err "生成 $protocol 分享链接失败"
+            return 1
+        }
 
         printf '# IPv%s\nJOIN_%s=%s\n%s_%s=%s\n' "${label#V}" "$label" "$code" "$link_prefix" "$label" "$link" >>"$join_file"
     done
 
     local line
-    for line in "$@"; do
+    for line in "${extra_lines[@]}"; do
         printf '%s\n' "$line" >>"$join_file"
     done
 }
@@ -2772,11 +2885,20 @@ _log() {
 # 初始化日志文件
 init_log() {
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
+    touch "$LOG_FILE" 2>/dev/null
+    chmod 600 "$LOG_FILE" 2>/dev/null || true
     # 日志轮转：超过 5MB 时截断保留最后 1000 行
     if [[ -f "$LOG_FILE" ]]; then
         local size=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
         if [[ $size -gt 5242880 ]]; then
-            tail -n 1000 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE" 2>/dev/null
+            local rotated
+            rotated=$(mktemp "${LOG_FILE}.rotate.XXXXXX") || return 1
+            if tail -n 1000 "$LOG_FILE" >"$rotated" 2>/dev/null; then
+                chmod 600 "$rotated"
+                mv "$rotated" "$LOG_FILE"
+            else
+                rm -f "$rotated"
+            fi
         fi
     fi
     _log "INFO" "========== 脚本启动 v${VERSION} =========="
@@ -2790,12 +2912,12 @@ if ! command -v timeout &>/dev/null; then
         # 使用后台进程实现简单的超时
         "$@" &
         local pid=$!
-        ( sleep "$duration" 2>/dev/null; kill -9 $pid 2>/dev/null ) &
+        ( sleep "$duration" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; sleep 1; kill -KILL "$pid" 2>/dev/null ) &
         local killer=$!
-        wait $pid 2>/dev/null
+        wait "$pid" 2>/dev/null
         local ret=$?
-        kill $killer 2>/dev/null
-        wait $killer 2>/dev/null
+        kill "$killer" 2>/dev/null
+        wait "$killer" 2>/dev/null
         return $ret
     }
 fi
@@ -4615,8 +4737,6 @@ force_cleanup() {
     services+=" snell-shadowtls-backend snell-v5-shadowtls-backend ss2022-shadowtls-backend"
     for s in $services; do svc stop "vless-$s" 2>/dev/null; done
     
-    killall xray sing-box snell-server snell-server-v5 snell-server-v6 anytls-server shadow-tls 2>/dev/null
-    
     # 清理 iptables NAT 规则
     cleanup_hy2_nat_rules
 }
@@ -4629,8 +4749,15 @@ cleanup_hy2_nat_rules() {
         local hs=$(db_get_field "singbox" "hy2" "hop_start"); hs="${hs:-20000}"
         local he=$(db_get_field "singbox" "hy2" "hop_end"); he="${he:-50000}"
         [[ -n "$port" ]] && {
+            iptables -t nat -D PREROUTING -p udp --dport ${hs}:${he} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports ${port} 2>/dev/null
+            iptables -t nat -D OUTPUT -p udp --dport ${hs}:${he} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports ${port} 2>/dev/null
+            ip6tables -t nat -D PREROUTING -p udp --dport ${hs}:${he} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports ${port} 2>/dev/null
+            ip6tables -t nat -D OUTPUT -p udp --dport ${hs}:${he} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports ${port} 2>/dev/null
+            # 兼容清理由旧版本创建、尚未带 comment 的规则。
             iptables -t nat -D PREROUTING -p udp --dport ${hs}:${he} -j REDIRECT --to-ports ${port} 2>/dev/null
             iptables -t nat -D OUTPUT -p udp --dport ${hs}:${he} -j REDIRECT --to-ports ${port} 2>/dev/null
+            ip6tables -t nat -D PREROUTING -p udp --dport ${hs}:${he} -j REDIRECT --to-ports ${port} 2>/dev/null
+            ip6tables -t nat -D OUTPUT -p udp --dport ${hs}:${he} -j REDIRECT --to-ports ${port} 2>/dev/null
         }
     fi
     # 清理 TUIC 端口跳跃规则
@@ -4639,26 +4766,31 @@ cleanup_hy2_nat_rules() {
         local hs=$(db_get_field "singbox" "tuic" "hop_start"); hs="${hs:-20000}"
         local he=$(db_get_field "singbox" "tuic" "hop_end"); he="${he:-50000}"
         [[ -n "$port" ]] && {
+            iptables -t nat -D PREROUTING -p udp --dport ${hs}:${he} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports ${port} 2>/dev/null
+            iptables -t nat -D OUTPUT -p udp --dport ${hs}:${he} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports ${port} 2>/dev/null
+            ip6tables -t nat -D PREROUTING -p udp --dport ${hs}:${he} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports ${port} 2>/dev/null
+            ip6tables -t nat -D OUTPUT -p udp --dport ${hs}:${he} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports ${port} 2>/dev/null
             iptables -t nat -D PREROUTING -p udp --dport ${hs}:${he} -j REDIRECT --to-ports ${port} 2>/dev/null
             iptables -t nat -D OUTPUT -p udp --dport ${hs}:${he} -j REDIRECT --to-ports ${port} 2>/dev/null
+            ip6tables -t nat -D PREROUTING -p udp --dport ${hs}:${he} -j REDIRECT --to-ports ${port} 2>/dev/null
+            ip6tables -t nat -D OUTPUT -p udp --dport ${hs}:${he} -j REDIRECT --to-ports ${port} 2>/dev/null
         }
     fi
-    # 兜底清理
-    for chain in PREROUTING OUTPUT; do
-        iptables -t nat -S $chain 2>/dev/null | grep -E "REDIRECT.*--to-ports" | while read -r rule; do
-            eval "iptables -t nat $(echo "$rule" | sed 's/^-A/-D/')" 2>/dev/null
-        done
-    done
+    # 不再扫描并删除系统中的其他 REDIRECT 规则。上面仅按数据库记录的
+    # 端口范围删除本脚本创建的 HY2/TUIC 规则。
 }
 
 sync_time() {
     _info "同步系统时间..."
     
-    # 方法1: 使用HTTP获取时间 (最快最可靠)
-    local http_time=$(timeout 5 curl -sI --connect-timeout 3 --max-time 5 http://www.baidu.com 2>/dev/null | grep -i "^date:" | cut -d' ' -f2-)
+    # 仅接受经 TLS 验证的 Date 响应，避免未加密 HTTP 被篡改后修改系统时钟。
+    local http_time
+    http_time=$(timeout 5 curl -fsSI --connect-timeout 3 --max-time 5 \
+        --proto '=https' --proto-redir '=https' -- https://www.cloudflare.com/ 2>/dev/null |
+        awk 'BEGIN{IGNORECASE=1} /^date:/{sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit}')
     if [[ -n "$http_time" ]]; then
         if date -s "$http_time" &>/dev/null; then
-            _ok "时间同步完成 (HTTP)"
+            _ok "时间同步完成 (HTTPS)"
             return 0
         fi
     fi
@@ -4689,13 +4821,13 @@ sync_time() {
 #═══════════════════════════════════════════════════════════════════════════════
 get_ipv4() {
     [[ -n "$_CACHED_IPV4" ]] && { echo "$_CACHED_IPV4"; return; }
-    local result=$(curl -4 -sf --connect-timeout 5 ip.sb 2>/dev/null || curl -4 -sf --connect-timeout 5 ifconfig.me 2>/dev/null)
+    local result=$(curl -4 -sf --connect-timeout 5 https://ip.sb 2>/dev/null || curl -4 -sf --connect-timeout 5 https://ifconfig.me 2>/dev/null)
     [[ -n "$result" ]] && _CACHED_IPV4="$result"
     echo "$result"
 }
 get_ipv6() {
     [[ -n "$_CACHED_IPV6" ]] && { echo "$_CACHED_IPV6"; return; }
-    local result=$(curl -6 -sf --connect-timeout 5 ip.sb 2>/dev/null || curl -6 -sf --connect-timeout 5 ifconfig.me 2>/dev/null)
+    local result=$(curl -6 -sf --connect-timeout 5 https://ip.sb 2>/dev/null || curl -6 -sf --connect-timeout 5 https://ifconfig.me 2>/dev/null)
     [[ -n "$result" ]] && _CACHED_IPV6="$result"
     echo "$result"
 }
@@ -4705,20 +4837,11 @@ get_ip_country() {
     local ip="${1:-}"
     local country=""
     
-    # 方法1: ip-api.com (免费，无需 key)
+    # 使用 HTTPS 查询，避免国家代码在传输途中被篡改。
     if [[ -n "$ip" ]]; then
-        country=$(curl -sf --connect-timeout 3 "http://ip-api.com/line/${ip}?fields=countryCode" 2>/dev/null)
+        country=$(curl -sf --connect-timeout 3 "https://ipinfo.io/${ip}/country" 2>/dev/null)
     else
-        country=$(curl -sf --connect-timeout 3 "http://ip-api.com/line/?fields=countryCode" 2>/dev/null)
-    fi
-    
-    # 方法2: 回退到 ipinfo.io
-    if [[ -z "$country" || "$country" == "fail" ]]; then
-        if [[ -n "$ip" ]]; then
-            country=$(curl -sf --connect-timeout 3 "https://ipinfo.io/${ip}/country" 2>/dev/null)
-        else
-            country=$(curl -sf --connect-timeout 3 "https://ipinfo.io/country" 2>/dev/null)
-        fi
+        country=$(curl -sf --connect-timeout 3 "https://ipinfo.io/country" 2>/dev/null)
     fi
     
     # 清理结果（去除空白字符）
@@ -5275,8 +5398,9 @@ create_fake_website() {
     # 创建网页目录
     mkdir -p "$web_dir"
     
-    # 创建简单的伪装网页
-    cat > "$web_dir/index.html" << 'EOF'
+    # 仅在目标文件不存在时创建，避免覆盖用户已有网站。
+    if [[ ! -e "$web_dir/index.html" ]]; then
+        cat > "$web_dir/index.html" << 'EOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5303,6 +5427,8 @@ create_fake_website() {
 </body>
 </html>
 EOF
+        : >"$CFG/.managed_web_index"
+    fi
     
     # 检查是否有SSL证书，决定使用Nginx
     if [[ -n "$domain" ]] && [[ -f "/etc/vless-reality/certs/server.crt" ]]; then
@@ -5612,12 +5738,10 @@ EOF
             use_https="true"
         fi
         
-        cat > "$CFG/sub.info" << EOF
-sub_uuid=$sub_uuid
-sub_port=$nginx_port
-sub_domain=$domain
-sub_https=$use_https
-EOF
+        if ! _write_sub_info "$sub_uuid" "$nginx_port" "$domain" "$use_https"; then
+            _err "订阅配置参数无效，拒绝写入"
+            return 1
+        fi
         _log "INFO" "订阅配置已保存: UUID=${sub_uuid:0:8}..., 端口=$nginx_port, 域名=$domain"
     fi
     
@@ -5907,6 +6031,8 @@ test_connection() {
 
 test_latency() {
     local ip="$1" port="$2" proto="${3:-tcp}" start end
+    _is_valid_domain_or_ip "$ip" || { echo "无效地址"; return 1; }
+    _is_valid_port "$port" || { echo "无效端口"; return 1; }
     start=$(date +%s%3N 2>/dev/null || echo $(($(date +%s)*1000)))
     
     if [[ "$proto" == "hy2" || "$proto" == "tuic" ]]; then
@@ -5926,7 +6052,7 @@ test_latency() {
                 echo "超时"
             fi
         # 回退到 bash /dev/tcp（某些系统可能不支持）
-        elif timeout 3 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null; then
+        elif timeout 3 bash -c 'echo >/dev/tcp/$1/$2' _ "$ip" "$port" 2>/dev/null; then
             end=$(date +%s%3N 2>/dev/null || echo $(($(date +%s)*1000)))
             echo "$((end-start))ms"
         else
@@ -6032,34 +6158,35 @@ install_acme_tool() {
     
     _info "安装 acme.sh 证书申请工具..."
     
-    # 方法1: 官方安装脚本
-    if curl -sL https://get.acme.sh | sh -s email="$ACME_DEFAULT_EMAIL" 2>&1 | grep -qE "Install success|already installed"; then
-        source "$HOME/.acme.sh/acme.sh.env" 2>/dev/null || true
-        if [[ -f "$HOME/.acme.sh/acme.sh" ]]; then
-            _ok "acme.sh 安装成功"
-            return 0
-        fi
-    fi
-    
-    # 方法2: 使用 git clone
+    # 方法1: 使用 git clone 到私有临时目录，并校验仓库 blob。
     if command -v git &>/dev/null; then
         _info "尝试使用 git 安装..."
-        if git clone --depth 1 https://github.com/acmesh-official/acme.sh.git /tmp/acme.sh 2>/dev/null; then
-            cd /tmp/acme.sh && ./acme.sh --install -m "$ACME_DEFAULT_EMAIL" 2>/dev/null
-            cd - >/dev/null
-            rm -rf /tmp/acme.sh
+        local acme_tmp
+        acme_tmp=$(mktemp -d "${TMPDIR:-/tmp}/vless-acme-install.XXXXXX") || return 1
+        if git clone --depth 1 https://github.com/acmesh-official/acme.sh.git "$acme_tmp/repo" 2>/dev/null &&
+           _verify_github_blob "acmesh-official/acme.sh" "master" "acme.sh" "$acme_tmp/repo/acme.sh"; then
+            (cd "$acme_tmp/repo" && ./acme.sh --install -m "$ACME_DEFAULT_EMAIL" 2>/dev/null)
+            rm -rf "$acme_tmp"
             if [[ -f "$HOME/.acme.sh/acme.sh" ]]; then
                 _ok "acme.sh 安装成功 (git)"
                 return 0
             fi
+        else
+            rm -rf "$acme_tmp"
         fi
     fi
     
-    # 方法3: 直接下载脚本
+    # 方法2: 直接下载脚本；至少先做 Bash 语法校验再安装。
     _info "尝试直接下载..."
     mkdir -p "$HOME/.acme.sh"
     if curl -sL -o "$HOME/.acme.sh/acme.sh" "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh" 2>/dev/null; then
-        chmod +x "$HOME/.acme.sh/acme.sh"
+        if ! _verify_github_blob "acmesh-official/acme.sh" "master" "acme.sh" "$HOME/.acme.sh/acme.sh" ||
+           ! bash -n "$HOME/.acme.sh/acme.sh"; then
+            rm -f "$HOME/.acme.sh/acme.sh"
+            _err "下载的 acme.sh 语法校验失败"
+            return 1
+        fi
+        chmod 700 "$HOME/.acme.sh/acme.sh"
         if [[ -f "$HOME/.acme.sh/acme.sh" ]]; then
             _ok "acme.sh 安装成功 (直接下载)"
             return 0
@@ -6067,7 +6194,7 @@ install_acme_tool() {
     fi
     
     _err "acme.sh 安装失败，请检查网络连接"
-    _warn "你可以手动安装: curl https://get.acme.sh | sh"
+    _warn "请从 acmesh-official/acme.sh 官方仓库核验后手动安装"
     return 1
 }
 
@@ -6126,7 +6253,6 @@ _issue_cert_dns() {
     read -rp "  请选择 DNS 服务商 [1-4]: " dns_choice
     
     local dns_api=""
-    local dns_env=""
     
     case "$dns_choice" in
         1)
@@ -6135,32 +6261,39 @@ _issue_cert_dns() {
             echo -e "  ${D}https://dash.cloudflare.com/profile/api-tokens${NC}"
             echo -e "  ${D}创建 Token 时选择 'Edit zone DNS' 模板${NC}"
             echo ""
-            read -rp "  请输入 CF_Token: " cf_token
+            read -rsp "  请输入 CF_Token: " cf_token
+            echo ""
             [[ -z "$cf_token" ]] && { _err "Token 不能为空"; return 1; }
             dns_api="dns_cf"
-            dns_env="CF_Token=$cf_token"
+            export CF_Token="$cf_token"
             ;;
         2)
             echo ""
             echo -e "  ${D}获取阿里云 AccessKey:${NC}"
             echo -e "  ${D}https://ram.console.aliyun.com/manage/ak${NC}"
             echo ""
-            read -rp "  请输入 Ali_Key: " ali_key
-            read -rp "  请输入 Ali_Secret: " ali_secret
+            read -rsp "  请输入 Ali_Key: " ali_key
+            echo ""
+            read -rsp "  请输入 Ali_Secret: " ali_secret
+            echo ""
             [[ -z "$ali_key" || -z "$ali_secret" ]] && { _err "Key/Secret 不能为空"; return 1; }
             dns_api="dns_ali"
-            dns_env="Ali_Key=$ali_key Ali_Secret=$ali_secret"
+            export Ali_Key="$ali_key"
+            export Ali_Secret="$ali_secret"
             ;;
         3)
             echo ""
             echo -e "  ${D}获取 DNSPod Token:${NC}"
             echo -e "  ${D}https://console.dnspod.cn/account/token/token${NC}"
             echo ""
-            read -rp "  请输入 DP_Id: " dp_id
-            read -rp "  请输入 DP_Key: " dp_key
+            read -rsp "  请输入 DP_Id: " dp_id
+            echo ""
+            read -rsp "  请输入 DP_Key: " dp_key
+            echo ""
             [[ -z "$dp_id" || -z "$dp_key" ]] && { _err "ID/Key 不能为空"; return 1; }
             dns_api="dns_dp"
-            dns_env="DP_Id=$dp_id DP_Key=$dp_key"
+            export DP_Id="$dp_id"
+            export DP_Key="$dp_key"
             ;;
         4)
             # 手动 DNS 验证
@@ -6180,13 +6313,13 @@ _issue_cert_dns() {
     
     _info "正在通过 DNS 验证申请证书..."
     echo ""
-    
-    # 设置环境变量并申请证书
-    eval "export $dns_env"
+
+    local acme_dns_log
+    acme_dns_log=$(mktemp "${TMPDIR:-/tmp}/vless-acme-dns.XXXXXX") || return 1
     
     local reload_cmd="chmod 600 $cert_dir/server.key; chmod 644 $cert_dir/server.crt"
     
-    if "$acme_sh" --issue -d "$domain" --dns "$dns_api" --force 2>&1 | tee /tmp/acme_dns.log | grep -E "^\[|Verify finished|Cert success|error|Error" | sed 's/^/  /'; then
+    if "$acme_sh" --issue -d "$domain" --dns "$dns_api" --force 2>&1 | tee "$acme_dns_log" | grep -E "^\[|Verify finished|Cert success|error|Error" | sed 's/^/  /'; then
         echo ""
         _ok "证书申请成功，安装证书..."
         
@@ -6198,7 +6331,7 @@ _issue_cert_dns() {
         # 保存域名
         echo "$domain" > "$CFG/cert_domain"
         
-        rm -f /tmp/acme_dns.log
+        rm -f "$acme_dns_log"
         
         # 读取自定义 nginx 端口
         local custom_port=""
@@ -6211,8 +6344,8 @@ _issue_cert_dns() {
     else
         echo ""
         _err "DNS 验证失败！"
-        cat /tmp/acme_dns.log 2>/dev/null | grep -E "(error|Error)" | head -3
-        rm -f /tmp/acme_dns.log
+        grep -E "(error|Error)" "$acme_dns_log" 2>/dev/null | head -3
+        rm -f "$acme_dns_log"
         return 1
     fi
 }
@@ -6236,8 +6369,11 @@ _issue_cert_dns_manual() {
     
     if [[ -z "$txt_record" ]]; then
         # 尝试另一种方式获取
-        "$acme_sh" --issue -d "$domain" --dns --yes-I-know-dns-manual-mode-enough-go-ahead-please --force 2>&1 | tee /tmp/acme_manual.log
-        txt_record=$(sed -n "s/.*TXT value: '\([^']*\)'.*/\1/p" "/tmp/acme_manual.log" 2>/dev/null)
+        local acme_manual_log
+        acme_manual_log=$(mktemp "${TMPDIR:-/tmp}/vless-acme-manual.XXXXXX") || return 1
+        "$acme_sh" --issue -d "$domain" --dns --yes-I-know-dns-manual-mode-enough-go-ahead-please --force 2>&1 | tee "$acme_manual_log"
+        txt_record=$(sed -n "s/.*TXT value: '\([^']*\)'.*/\1/p" "$acme_manual_log" 2>/dev/null)
+        rm -f "$acme_manual_log"
     fi
     
     if [[ -z "$txt_record" ]]; then
@@ -6410,7 +6546,8 @@ get_acme_cert() {
     local reload_cmd="chmod 600 $cert_dir/server.key; chmod 644 $cert_dir/server.crt; chown root:root $cert_dir/server.key $cert_dir/server.crt; if command -v systemctl >/dev/null 2>&1; then systemctl restart vless-reality vless-singbox 2>/dev/null || true; elif command -v rc-service >/dev/null 2>&1; then rc-service vless-reality restart 2>/dev/null || true; rc-service vless-singbox restart 2>/dev/null || true; fi"
     
     # 使用 standalone 模式申请证书，显示实时进度
-    local acme_log="/tmp/acme_output.log"
+    local acme_log
+    acme_log=$(mktemp "${TMPDIR:-/tmp}/vless-acme-output.XXXXXX") || return 1
     
     # 直接执行 acme.sh，不使用 timeout（避免某些系统兼容性问题）
     if "$acme_sh" --issue -d "$domain" --standalone --httpport 80 --force 2>&1 | tee "$acme_log" | grep -E "^\[|Verify finished|Cert success|error|Error" | sed 's/^/  /'; then
@@ -6599,7 +6736,7 @@ setup_cert_and_nginx() {
                 
                 # 读取已有的订阅配置
                 if [[ -f "$CFG/sub.info" ]]; then
-                    source "$CFG/sub.info" 2>/dev/null
+                    _load_sub_info "$CFG/sub.info" 2>/dev/null || true
                     NGINX_PORT="${sub_port:-$default_nginx_port}"
                     
                     # Reality 协议使用真实域名时，必须用 HTTPS 端口，不能用 80
@@ -6702,8 +6839,8 @@ setup_cert_and_nginx() {
         echo ""
         read -rp "  请输入你的域名: " input_domain
         
-        if [[ -z "$input_domain" ]]; then
-            _err "域名不能为空"
+        if ! _is_valid_dns_name "$input_domain"; then
+            _err "域名格式无效"
             return 1
         fi
         
@@ -6742,6 +6879,10 @@ setup_cert_and_nginx() {
             read -rp "  请输入你的域名: " input_domain
             
             if [[ -n "$input_domain" ]]; then
+                if ! _is_valid_dns_name "$input_domain"; then
+                    _err "域名格式无效"
+                    return 1
+                fi
                 CERT_DOMAIN="$input_domain"
                 
                 # 确保配置目录存在
@@ -7022,7 +7163,7 @@ fix_selinux_context() {
 
 # GitHub API 请求配置
 readonly GITHUB_API_PER_PAGE=10
-readonly VERSION_CACHE_DIR="/tmp/vless-version-cache"
+readonly VERSION_CACHE_DIR="$CFG/version-cache"
 readonly VERSION_CACHE_TTL=3600  # 缓存1小时
 readonly SCRIPT_VERSION_CACHE_FILE="$VERSION_CACHE_DIR/.script_version"
 readonly SNELL_RELEASE_NOTES_URL="https://kb.nssurge.com/surge-knowledge-base/release-notes/snell.md"
@@ -7066,6 +7207,29 @@ _is_cache_fresh() {
 }
 
 # 下载脚本到临时文件（回显临时文件路径）
+_verify_github_blob() {
+    local repo="$1" ref="$2" path="$3" file="$4" expected actual size
+    expected=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${repo}/contents/${path}?ref=${ref}" |
+        jq -r '.sha // empty' 2>/dev/null) || return 1
+    [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || return 1
+    size=$(wc -c <"$file" | tr -d '[:space:]')
+    if command -v sha1sum >/dev/null 2>&1; then
+        actual=$({ printf 'blob %s\0' "$size"; cat "$file"; } | sha1sum | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$({ printf 'blob %s\0' "$size"; cat "$file"; } | shasum -a 1 | awk '{print $1}')
+    else
+        actual=$({ printf 'blob %s\0' "$size"; cat "$file"; } | openssl dgst -sha1 2>/dev/null | awk '{print $NF}')
+    fi
+    [[ "$actual" == "$expected" ]]
+}
+
+_verify_script_blob() {
+    local file="$1"
+    _verify_github_blob "$SCRIPT_SOURCE_REPO" "$SCRIPT_SOURCE_REF" "$SCRIPT_SOURCE_PATH" "$file" &&
+        bash -n "$file"
+}
+
 _fetch_script_tmp() {
     local connect_timeout="${1:-10}"
     local max_time="${2:-}"
@@ -7081,6 +7245,11 @@ _fetch_script_tmp() {
             rm -f "$tmp_file"
             return 1
         fi
+    fi
+    if ! _verify_script_blob "$tmp_file"; then
+        rm -f "$tmp_file"
+        _err "脚本下载内容与 GitHub 仓库 blob 校验不一致" >&2
+        return 1
     fi
     echo "$tmp_file"
 }
@@ -7126,8 +7295,10 @@ _get_latest_tag_version() {
 }
 
 _get_latest_script_version_from_raw() {
-    local version
-    version=$(curl -sL --connect-timeout 5 --max-time 10 "$SCRIPT_RAW_URL" 2>/dev/null | sed -n 's/^readonly VERSION="\([^"]*\)"/\1/p' | head -n1)
+    local version tmp_file
+    tmp_file=$(_fetch_script_tmp 5 10) || return 1
+    version=$(_extract_script_version "$tmp_file")
+    rm -f "$tmp_file"
     [[ -z "$version" ]] && return 1
     echo "$version"
 }
@@ -7767,9 +7938,91 @@ _map_arch() {
     esac
 }
 
+_sha256_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" | awk '{print $1}'
+    else
+        openssl dgst -sha256 "$file" 2>/dev/null | awk '{print $NF}'
+    fi
+}
+
+# 使用 GitHub Release API 提供的 digest；旧发布缺少 digest 时尝试其 checksum 资产。
+_verify_github_release_asset() {
+    local repo="$1" version="$2" asset_url="$3" file="$4"
+    local asset_name="${asset_url%%\?*}"
+    asset_name="${asset_name##*/}"
+    local release_json digest expected actual checksum_url checksum_file
+
+    release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${repo}/releases/tags/v${version}" 2>/dev/null) ||
+    release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${repo}/releases/tags/${version}" 2>/dev/null) || return 1
+
+    digest=$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
+        '[.assets[]? | select(.name == $n) | .digest // empty][0] // empty' 2>/dev/null)
+    if [[ "$digest" == sha256:* ]]; then
+        expected="${digest#sha256:}"
+    else
+        checksum_url=$(printf '%s' "$release_json" | jq -r '
+            [.assets[]? | select(.name | test("sha256|checksums?"; "i")) | .browser_download_url][0] // empty
+        ' 2>/dev/null)
+        [[ -n "$checksum_url" ]] || return 1
+        checksum_file=$(mktemp "${TMPDIR:-/tmp}/vless-checksum.XXXXXX") || return 1
+        if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "$checksum_url"; then
+            rm -f "$checksum_file"
+            return 1
+        fi
+        expected=$(awk -v name="$asset_name" '
+            index($0, name) {
+                for (i=1; i<=NF; i++) if ($i ~ /^[0-9a-fA-F]{64}$/) { print tolower($i); exit }
+            }
+        ' "$checksum_file")
+        rm -f "$checksum_file"
+    fi
+
+    actual=$(_sha256_file "$file")
+    [[ -n "$expected" && -n "$actual" && "${actual,,}" == "${expected,,}" ]]
+}
+
+_verify_direct_download() {
+    local file="$1" url="$2" expected="${3:-}" checksum_file actual
+    if [[ -z "$expected" ]]; then
+        checksum_file=$(mktemp "${TMPDIR:-/tmp}/vless-direct-checksum.XXXXXX") || return 1
+        if curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "${url}.sha256"; then
+            expected=$(grep -Eo '[0-9a-fA-F]{64}' "$checksum_file" | head -1)
+        fi
+        rm -f "$checksum_file"
+    fi
+    if [[ ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        [[ "${ALLOW_UNVERIFIED_DOWNLOADS:-0}" == "1" ]] && return 0
+        return 1
+    fi
+    actual=$(_sha256_file "$file")
+    [[ -n "$actual" && "${actual,,}" == "${expected,,}" ]]
+}
+
+# 拒绝绝对路径和 .. 路径，避免压缩包在临时目录之外写文件。
+_archive_paths_safe() {
+    local file="$1" kind="$2" entries entry
+    case "$kind" in
+        zip) entries=$(unzip -Z1 "$file" 2>/dev/null) || return 1 ;;
+        tar.gz) entries=$(tar -tzf "$file" 2>/dev/null) || return 1 ;;
+        tar.xz) entries=$(tar -tJf "$file" 2>/dev/null) || return 1 ;;
+        *) return 1 ;;
+    esac
+    while IFS= read -r entry; do
+        case "$entry" in
+            /*|../*|*/../*|*/..) return 1 ;;
+        esac
+    done <<<"$entries"
+}
+
 # 通用二进制下载安装函数
 _install_binary() {
-    local name="$1" repo="$2" url_pattern="$3" extract_cmd="$4"
+    local name="$1" repo="$2" url_pattern="$3" install_kind="$4"
     local channel="${5:-stable}" force="${6:-false}" version_override="${7:-}"
     local exists=false action="安装" channel_label="稳定版"
     
@@ -7824,7 +8077,7 @@ _install_binary() {
     local tmp
     tmp=$(mktemp -d) || { _err "创建临时目录失败"; return 1; }
 
-    # 安全地构建 URL（避免 eval）
+    # 使用固定占位符安全地构建 URL。
     local url="${url_pattern//\$version/$version}"
     url="${url//\$\{version\}/$version}"
     url="${url//\$\{xarch\}/$xarch}"
@@ -7832,16 +8085,59 @@ _install_binary() {
     url="${url//\$\{aarch\}/$aarch}"
 
     # 下载并验证
-    if ! curl -fsSL --connect-timeout 60 --retry 2 -o "$tmp/pkg" "$url"; then
+    if ! curl -fsSL --connect-timeout 60 --retry 2 -o "$tmp/pkg" -- "$url"; then
         rm -rf "$tmp"
         _err "下载 $name 失败: $url"
         return 1
     fi
 
-    # 执行解压安装（仍需 eval 但在受控环境）
-    if ! eval "$extract_cmd" 2>/dev/null; then
+    if ! _verify_github_release_asset "$repo" "$version" "$url" "$tmp/pkg"; then
+        if [[ "${ALLOW_UNVERIFIED_DOWNLOADS:-0}" != "1" ]]; then
+            rm -rf "$tmp"
+            _err "$name 下载包无法通过发布方 SHA-256 校验，已拒绝安装"
+            _warn "仅在你已自行核验来源时，才可临时设置 ALLOW_UNVERIFIED_DOWNLOADS=1"
+            return 1
+        fi
+        _warn "已按显式设置跳过 $name 的完整性校验"
+    fi
+
+    # 使用固定安装分支，不执行字符串形式的 shell 命令。
+    local install_ok=false
+    case "$install_kind" in
+        xray)
+            _archive_paths_safe "$tmp/pkg" zip &&
+            unzip -oq "$tmp/pkg" -d "$tmp/" &&
+            install -m 755 "$tmp/xray" /usr/local/bin/xray &&
+            mkdir -p /usr/local/share/xray &&
+            cp "$tmp"/*.dat /usr/local/share/xray/ 2>/dev/null &&
+            fix_selinux_context && install_ok=true
+            ;;
+        singbox)
+            _archive_paths_safe "$tmp/pkg" tar.gz &&
+            tar -xzf "$tmp/pkg" -C "$tmp/" &&
+            local singbox_bin
+            singbox_bin=$(find "$tmp" -name sing-box -type f -print -quit) &&
+            [[ -n "$singbox_bin" ]] &&
+            install -m 755 "$singbox_bin" /usr/local/bin/sing-box &&
+            install_ok=true
+            ;;
+        anytls)
+            _archive_paths_safe "$tmp/pkg" zip &&
+            unzip -oq "$tmp/pkg" -d "$tmp/" &&
+            install -m 755 "$tmp/anytls-server" /usr/local/bin/anytls-server &&
+            install -m 755 "$tmp/anytls-client" /usr/local/bin/anytls-client &&
+            install_ok=true
+            ;;
+        shadowtls)
+            install -m 755 "$tmp/pkg" /usr/local/bin/shadow-tls && install_ok=true
+            ;;
+        *)
+            _err "未知安装类型: $install_kind"
+            ;;
+    esac
+    if [[ "$install_ok" != "true" ]]; then
         rm -rf "$tmp"
-        _err "安装 $name 失败（解压或文件操作错误）"
+        _err "安装 $name 失败（解压、文件校验或安装错误）"
         return 1
     fi
 
@@ -7861,7 +8157,7 @@ install_xray() {
     fi
     _install_binary "xray" "XTLS/Xray-core" \
         'https://github.com/XTLS/Xray-core/releases/download/v$version/Xray-linux-${xarch}.zip' \
-        'unzip -oq "$tmp/pkg" -d "$tmp/" && install -m 755 "$tmp/xray" /usr/local/bin/xray && mkdir -p /usr/local/share/xray && cp "$tmp"/*.dat /usr/local/share/xray/ 2>/dev/null; fix_selinux_context' \
+        xray \
         "$channel" "$force" "$version_override"
 }
 
@@ -7880,7 +8176,7 @@ install_singbox() {
     fi
     _install_binary "sing-box" "SagerNet/sing-box" \
         'https://github.com/SagerNet/sing-box/releases/download/v$version/sing-box-$version-linux-${sarch}.tar.gz' \
-        'tar -xzf "$tmp/pkg" -C "$tmp/" && install -m 755 "$(find "$tmp" -name sing-box -type f | head -1)" /usr/local/bin/sing-box' \
+        singbox \
         "$channel" "$force" "$version_override"
 }
 
@@ -10045,8 +10341,17 @@ install_snell() {
     [[ "$DISTRO" == "alpine" ]] && ensure_snell_alpine_runtime || [[ "$DISTRO" != "alpine" ]] || return 1
     _info "安装 Snell v4..."
     local tmp=$(mktemp -d)
-    if curl -sLo "$tmp/snell.zip" --connect-timeout 60 "https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-${sarch}.zip"; then
-        if unzip -oq "$tmp/snell.zip" -d "$tmp/" &&            install -m 755 "$tmp/snell-server" /usr/local/bin/snell-server &&            prepare_snell_binary /usr/local/bin/snell-server; then
+    local url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-${sarch}.zip"
+    if curl -fsSLo "$tmp/snell.zip" --connect-timeout 60 -- "$url"; then
+        if ! _verify_direct_download "$tmp/snell.zip" "$url" "${SNELL_V4_SHA256:-}"; then
+            rm -rf "$tmp"
+            _err "Snell v4 无法通过 SHA-256 校验，已拒绝安装"
+            return 1
+        fi
+        if _archive_paths_safe "$tmp/snell.zip" zip &&
+           unzip -oq "$tmp/snell.zip" -d "$tmp/" &&
+           install -m 755 "$tmp/snell-server" /usr/local/bin/snell-server &&
+           prepare_snell_binary /usr/local/bin/snell-server; then
             rm -rf "$tmp"; _ok "Snell v4 已安装"; return 0
         fi
         _snell_alpine_diagnostics /usr/local/bin/snell-server
@@ -10112,6 +10417,12 @@ install_snell_v5() {
         return 1
     fi
 
+    if ! _verify_direct_download "$tmp/snell.zip" "$url" "${SNELL_V5_SHA256:-}"; then
+        rm -rf "$tmp"
+        _err "Snell v5 无法通过 SHA-256 校验，已拒绝安装"
+        return 1
+    fi
+
     # 验证确实为 ZIP 文件
     if ! unzip -tq "$tmp/snell.zip" >/dev/null 2>&1; then
         echo ""
@@ -10122,7 +10433,8 @@ install_snell_v5() {
         return 1
     fi
 
-    if ! unzip -oq "$tmp/snell.zip" -d "$tmp"; then
+    if ! _archive_paths_safe "$tmp/snell.zip" zip ||
+       ! unzip -oq "$tmp/snell.zip" -d "$tmp"; then
         rm -rf "$tmp"
         _err "Snell v5 解压失败"
         return 1
@@ -10198,7 +10510,14 @@ install_snell_v6() {
         _err "Snell v6 下载失败：$url"
         return 1
     fi
-    if ! unzip -tq "$tmp/snell.zip" >/dev/null 2>&1 || ! unzip -oq "$tmp/snell.zip" -d "$tmp"; then
+    if ! _verify_direct_download "$tmp/snell.zip" "$url" "${SNELL_V6_SHA256:-}"; then
+        rm -rf "$tmp"
+        _err "Snell v6 无法通过 SHA-256 校验，已拒绝安装"
+        return 1
+    fi
+    if ! unzip -tq "$tmp/snell.zip" >/dev/null 2>&1 ||
+       ! _archive_paths_safe "$tmp/snell.zip" zip ||
+       ! unzip -oq "$tmp/snell.zip" -d "$tmp"; then
         rm -rf "$tmp"
         _err "Snell v6 压缩包无效或解压失败"
         return 1
@@ -10232,7 +10551,7 @@ install_anytls() {
     fi
     _install_binary "anytls-server" "anytls/anytls-go" \
         'https://github.com/anytls/anytls-go/releases/download/v$version/anytls_${version}_linux_${aarch}.zip' \
-        'unzip -oq "$tmp/pkg" -d "$tmp/" && install -m 755 "$tmp/anytls-server" /usr/local/bin/anytls-server && install -m 755 "$tmp/anytls-client" /usr/local/bin/anytls-client 2>/dev/null'
+        anytls
 }
 
 # 安装 ShadowTLS
@@ -10240,12 +10559,20 @@ install_shadowtls() {
     local aarch=$(_map_arch "x86_64-unknown-linux-musl:aarch64-unknown-linux-musl:armv7-unknown-linux-musleabihf") || { _err "不支持的架构"; return 1; }
     _install_binary "shadow-tls" "ihciah/shadow-tls" \
         'https://github.com/ihciah/shadow-tls/releases/download/v$version/shadow-tls-${aarch}' \
-        'install -m 755 "$tmp/pkg" /usr/local/bin/shadow-tls'
+        shadowtls
 }
 
 # 安装 NaïveProxy (Caddy with forwardproxy)
 install_naive() {
-    check_cmd caddy && caddy list-modules 2>/dev/null | grep -q "http.handlers.forward_proxy" && { _ok "NaïveProxy (Caddy) 已安装"; return 0; }
+    if check_cmd caddy; then
+        if caddy list-modules 2>/dev/null | grep -q "http.handlers.forward_proxy"; then
+            _ok "NaïveProxy (Caddy) 已安装"
+            return 0
+        fi
+        _err "检测到已有 Caddy，但缺少 forward_proxy 模块"
+        _warn "为避免覆盖用户现有 Caddy，请先自行备份并移除或改用其他协议"
+        return 1
+    fi
     
     local narch=$(_map_arch "amd64:arm64:armv7") || { _err "不支持的架构"; return 1; }
     
@@ -10307,7 +10634,7 @@ install_naive() {
     fi
     
     _info "下载: $download_url"
-    if ! curl -fSLo "$tmp/caddy.tar.xz" --connect-timeout 60 --retry 3 --progress-bar "$download_url"; then
+    if ! curl -fSLo "$tmp/caddy.tar.xz" --connect-timeout 60 --retry 3 --progress-bar -- "$download_url"; then
         _err "下载失败"
         rm -rf "$tmp"
         return 1
@@ -10319,10 +10646,20 @@ install_naive() {
         rm -rf "$tmp"
         return 1
     fi
+
+    local naive_tag naive_version
+    naive_tag=$(printf '%s' "$api_response" | jq -r '.tag_name // empty')
+    naive_version="${naive_tag#v}"
+    if ! _verify_github_release_asset "klzgrad/forwardproxy" "$naive_version" "$download_url" "$tmp/caddy.tar.xz"; then
+        _err "NaïveProxy/Caddy SHA-256 校验失败，已拒绝安装"
+        rm -rf "$tmp"
+        return 1
+    fi
     
     _info "解压文件..."
     # 解压
-    if ! tar -xJf "$tmp/caddy.tar.xz" -C "$tmp/" 2>&1; then
+    if ! _archive_paths_safe "$tmp/caddy.tar.xz" tar.xz ||
+       ! tar -xJf "$tmp/caddy.tar.xz" -C "$tmp/" 2>&1; then
         _err "解压失败，可能是 xz-utils 未安装或文件损坏"
         rm -rf "$tmp"
         return 1
@@ -10358,10 +10695,12 @@ install_naive() {
         # ELF 文件的 magic number 是 7f454c46
         if [[ "$magic" == "7f454c46" ]]; then
             chmod +x "$caddy_bin"
-            install -m 755 "$caddy_bin" /usr/local/bin/caddy
-            rm -rf "$tmp"
-            _ok "NaïveProxy (Caddy) 已安装"
-            return 0
+            if install -m 755 "$caddy_bin" /usr/local/bin/caddy; then
+                : >"$CFG/.managed_caddy"
+                rm -rf "$tmp"
+                _ok "NaïveProxy (Caddy) 已安装"
+                return 0
+            fi
         fi
         
         # 方法2: 尝试使用 file 命令 (如果可用)
@@ -10369,20 +10708,24 @@ install_naive() {
             local file_info=$(file "$caddy_bin" 2>/dev/null)
             if echo "$file_info" | grep -qE "ELF.*(executable|shared object)"; then
                 chmod +x "$caddy_bin"
-                install -m 755 "$caddy_bin" /usr/local/bin/caddy
-                rm -rf "$tmp"
-                _ok "NaïveProxy (Caddy) 已安装"
-                return 0
+                if install -m 755 "$caddy_bin" /usr/local/bin/caddy; then
+                    : >"$CFG/.managed_caddy"
+                    rm -rf "$tmp"
+                    _ok "NaïveProxy (Caddy) 已安装"
+                    return 0
+                fi
             fi
         fi
         
         # 方法3: 直接尝试执行 (最后的手段)
         chmod +x "$caddy_bin"
         if "$caddy_bin" version &>/dev/null || "$caddy_bin" --version &>/dev/null; then
-            install -m 755 "$caddy_bin" /usr/local/bin/caddy
-            rm -rf "$tmp"
-            _ok "NaïveProxy (Caddy) 已安装"
-            return 0
+            if install -m 755 "$caddy_bin" /usr/local/bin/caddy; then
+                : >"$CFG/.managed_caddy"
+                rm -rf "$tmp"
+                _ok "NaïveProxy (Caddy) 已安装"
+                return 0
+            fi
         fi
     fi
     
@@ -10438,7 +10781,7 @@ gen_server_config() {
         public_key "$pubkey" short_id "$sid" sni "$sni" security_mode "reality")"
     
     _save_join_info "vless" "REALITY|%s|$port|$uuid|$pubkey|$sid|$sni" \
-        "gen_vless_link %s $port $uuid $pubkey $sid $sni"
+        gen_vless_link "%s" "$port" "$uuid" "$pubkey" "$sid" "$sni"
     echo "server" > "$CFG/role"
 }
 
@@ -10452,7 +10795,7 @@ gen_vless_encryption_server_config() {
         encryption "$encryption" security_mode "encryption")"
 
     _save_join_info "vless" "VLESS-ENCRYPTION|%s|$port|$uuid|$encryption" \
-        "gen_vless_encryption_link %s $port $uuid $encryption"
+        gen_vless_encryption_link "%s" "$port" "$uuid" "$encryption"
     echo "server" > "$CFG/role"
 }
 
@@ -10466,7 +10809,7 @@ gen_vless_xhttp_server_config() {
         public_key "$pubkey" short_id "$sid" sni "$sni" path "$path")"
     
     _save_join_info "vless-xhttp" "REALITY-XHTTP|%s|$port|$uuid|$pubkey|$sid|$sni|$path" \
-        "gen_vless_xhttp_link %s $port $uuid $pubkey $sid $sni $path"
+        gen_vless_xhttp_link "%s" "$port" "$uuid" "$pubkey" "$sid" "$sni" "$path"
     echo "server" > "$CFG/role"
 }
 
@@ -10520,7 +10863,7 @@ gen_hy2_server_config() {
     [[ "$hop_enable" == "1" ]] && extra_lines=("" "# 端口跳跃已启用" "# 客户端请手动将端口改为: ${hop_start}-${hop_end}")
     
     _save_join_info "hy2" "HY2|%s|$port|$password|$sni" \
-        "gen_hy2_link %s $port $password $sni" "${extra_lines[@]}"
+        gen_hy2_link "%s" "$port" "$password" "$sni" --extra "${extra_lines[@]}"
     cp "$CFG/hy2.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -10534,7 +10877,7 @@ gen_trojan_server_config() {
 
     register_protocol "trojan" "$(build_config password "$password" port "$port" sni "$sni")"
     _save_join_info "trojan" "TROJAN|%s|$port|$password|$sni" \
-        "gen_trojan_link %s $port $password $sni"
+        gen_trojan_link "%s" "$port" "$password" "$sni"
     echo "server" > "$CFG/role"
 }
 
@@ -10549,7 +10892,7 @@ gen_trojan_ws_server_config() {
     register_protocol "trojan-ws" "$(build_config \
         password "$password" port "$port" outer_port "$outer_port" sni "$sni" path "$path")"
     _save_join_info "trojan-ws" "TROJAN-WS|%s|$outer_port|$password|$sni|$path" \
-        "gen_trojan_ws_link %s $outer_port $password $sni $path"
+        gen_trojan_ws_link "%s" "$outer_port" "$password" "$sni" "$path"
     echo "server" > "$CFG/role"
 }
 
@@ -10564,7 +10907,7 @@ gen_vless_ws_server_config() {
     register_protocol "vless-ws" "$(build_config \
         uuid "$uuid" port "$port" outer_port "$outer_port" sni "$sni" path "$path")"
     _save_join_info "vless-ws" "VLESS-WS|%s|$outer_port|$uuid|$sni|$path" \
-        "gen_vless_ws_link %s $outer_port $uuid $sni $path"
+        gen_vless_ws_link "%s" "$outer_port" "$uuid" "$sni" "$path"
     echo "server" > "$CFG/role"
 }
 
@@ -10577,7 +10920,7 @@ gen_vless_ws_notls_server_config() {
     register_protocol "vless-ws-notls" "$(build_config \
         uuid "$uuid" port "$port" path "$path" host "$host")"
     _save_join_info "vless-ws-notls" "VLESS-WS-CF|%s|$port|$uuid|$path|$host" \
-        "gen_vless_ws_notls_link %s $port $uuid $path $host"
+        gen_vless_ws_notls_link "%s" "$port" "$uuid" "$path" "$host"
     echo "server" > "$CFG/role"
 }
 
@@ -10593,7 +10936,7 @@ gen_vmess_ws_server_config() {
     register_protocol "vmess-ws" "$(build_config \
         uuid "$uuid" port "$port" outer_port "$outer_port" sni "$sni" path "$path")"
     _save_join_info "vmess-ws" "VMESSWS|%s|$outer_port|$uuid|$sni|$path" \
-        "gen_vmess_ws_link %s $outer_port $uuid $sni $path"
+        gen_vmess_ws_link "%s" "$outer_port" "$uuid" "$sni" "$path"
     echo "server" > "$CFG/role"
 }
 
@@ -10606,7 +10949,7 @@ gen_vless_vision_server_config() {
 
     register_protocol "vless-vision" "$(build_config uuid "$uuid" port "$port" sni "$sni")"
     _save_join_info "vless-vision" "VLESS-VISION|%s|$port|$uuid|$sni" \
-        "gen_vless_vision_link %s $port $uuid $sni"
+        gen_vless_vision_link "%s" "$port" "$uuid" "$sni"
     echo "server" > "$CFG/role"
 }
 
@@ -10617,7 +10960,7 @@ gen_ss2022_server_config() {
 
     register_protocol "ss2022" "$(build_config password "$password" port "$port" method "$method")"
     _save_join_info "ss2022" "SS2022|%s|$port|$method|$password" \
-        "gen_ss2022_link %s $port $method $password"
+        gen_ss2022_link "%s" "$port" "$method" "$password"
     echo "server" > "$CFG/role"
 }
 
@@ -10628,7 +10971,7 @@ gen_ss_legacy_server_config() {
 
     register_protocol "ss-legacy" "$(build_config password "$password" port "$port" method "$method")"
     _save_join_info "ss-legacy" "SS|%s|$port|$method|$password" \
-        "gen_ss_legacy_link %s $port $method $password"
+        gen_ss_legacy_link "%s" "$port" "$method" "$password"
     echo "server" > "$CFG/role"
 }
 
@@ -10657,7 +11000,7 @@ EOF
     register_protocol "snell" "$(build_config psk "$psk" port "$port" version "$version")"
 
     _save_join_info "snell" "SNELL|%s|$port|$psk|$version" \
-        "gen_snell_link %s $port $psk $version"
+        gen_snell_link "%s" "$port" "$psk" "$version"
     cp "$CFG/snell.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -10722,7 +11065,7 @@ gen_tuic_server_config() {
     [[ "$hop_enable" == "1" ]] && extra_lines=("" "# 端口跳跃已启用" "# 客户端请手动将端口改为: ${hop_start}-${hop_end}")
     
     _save_join_info "tuic" "TUIC|%s|$port|$uuid|$password|$sni" \
-        "gen_tuic_link %s $port $uuid $password $sni" "${extra_lines[@]}"
+        gen_tuic_link "%s" "$port" "$uuid" "$password" "$sni" --extra "${extra_lines[@]}"
     cp "$CFG/tuic.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -10766,8 +11109,8 @@ configure_anytls_certificate() {
                 while true; do
                     read -rp "  请输入证书对应的 SNI${detected_sni:+ [回车默认 ${detected_sni}]}: " input_sni
                     input_sni="${input_sni:-$detected_sni}"
-                    [[ -n "$input_sni" ]] && break
-                    _warn "无法从证书识别域名，请手动输入 SNI"
+                    _is_valid_dns_name "$input_sni" && break
+                    _warn "SNI 域名格式无效，请重新输入"
                 done
 
                 ANYTLS_CERT_MODE="existing"
@@ -10780,8 +11123,8 @@ configure_anytls_certificate() {
                 local domain=""
                 while true; do
                     read -rp "  请输入申请证书的域名: " domain
-                    [[ -n "$domain" ]] && break
-                    _warn "域名不能为空"
+                    _is_valid_dns_name "$domain" && break
+                    _warn "域名格式无效"
                 done
 
                 CERT_DOMAIN="$domain"
@@ -10803,6 +11146,10 @@ configure_anytls_certificate() {
                 local self_sni=""
                 read -rp "  请输入自签证书 SNI [回车默认 ${default_sni}]: " self_sni
                 self_sni="${self_sni:-$default_sni}"
+                if ! _is_valid_dns_name "$self_sni"; then
+                    _warn "SNI 域名格式无效"
+                    continue
+                fi
 
                 # 强制重新生成匹配当前 SNI、包含 SAN 的自签证书
                 rm -f "$CFG/certs/server.crt" "$CFG/certs/server.key"
@@ -10843,7 +11190,7 @@ gen_anytls_server_config() {
 
     register_protocol "anytls" "$(build_config password "$password" port "$port" sni "$sni" cert_mode "$cert_mode")"
     _save_join_info "anytls" "ANYTLS|%s|$port|$password|$sni" \
-        "gen_anytls_link %s $port $password $sni"
+        gen_anytls_link "%s" "$port" "$password" "$sni"
     cp "$CFG/anytls.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -10882,12 +11229,15 @@ EOF
     
     # 创建日志目录和伪装页面
     mkdir -p /var/log/caddy /var/www/html
-    echo "<html><body><h1>Welcome</h1></body></html>" > /var/www/html/index.html
+    if [[ ! -e /var/www/html/index.html ]]; then
+        echo "<html><body><h1>Welcome</h1></body></html>" > /var/www/html/index.html
+        : >"$CFG/.managed_web_index"
+    fi
     
     register_protocol "naive" "$(build_config username "$username" password "$password" port "$port" domain "$domain")"
     # 链接使用域名而不是 IP
     _save_join_info "naive" "NAIVE|$domain|$port|$username|$password" \
-        "gen_naive_link $domain $port $username $password"
+        gen_naive_link "$domain" "$port" "$username" "$password"
     cp "$CFG/naive.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -11061,31 +11411,54 @@ EOF
 
     register_protocol "snell-v5" "$(build_config psk "$psk" port "$port" version "$version")"
     _save_join_info "snell-v5" "SNELL-V5|%s|$port|$psk|$version" \
-        "gen_snell_v5_link %s $port $psk $version"
+        gen_snell_v5_link "%s" "$port" "$psk" "$version"
     cp "$CFG/snell-v5.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
 
 # Snell v6 服务端配置
-# 官方 v6 当前公开支持的服务端网络项为 listen 与 dns-ip-preference。
-# 不再写入 v6 未公开支持的 tfo、dns、mode，避免服务因未知字段直接退出。
+# v6.0.0b4 支持 listen、mode、dns、dns-ip-preference 和 egress-interface。
 gen_snell_v6_server_config() {
     local psk="$1" port="$2" version="${3:-6}"
-    local dns_pref="${4:-default}"
+    local dns_pref="${4:-default}" dns_servers="${5:-}" mode="${6:-default}"
+    local tfo="${7:-true}"
     mkdir -p "$CFG"
+
+    case "$dns_pref" in
+        default|prefer-ipv4|prefer-ipv6|ipv4-only|ipv6-only) ;;
+        *) _err "无效的 Snell v6 DNS IP 偏好: $dns_pref"; return 1 ;;
+    esac
+    case "$mode" in
+        default|unshaped|unsafe-raw) ;;
+        *) _err "无效的 Snell v6 混淆模式: $mode"; return 1 ;;
+    esac
+    [[ "$tfo" == "true" || "$tfo" == "false" ]] || {
+        _err "无效的 Snell v6 TCP Fast Open 选项: $tfo"
+        return 1
+    }
+    _is_valid_dns_server_list "$dns_servers" || {
+        _err "无效的 Snell v6 DNS 服务器列表: $dns_servers"
+        return 1
+    }
 
     local listen_addr=$(_listen_addr)
 
-    cat > "$CFG/snell-v6.conf" << EOF
-[snell-server]
-listen = $(_fmt_hostport "$listen_addr" "$port")
-psk = $psk
-dns-ip-preference = $dns_pref
-EOF
+    {
+        printf '[snell-server]\n'
+        printf 'listen = %s\n' "$(_fmt_hostport "$listen_addr" "$port")"
+        printf 'psk = %s\n' "$psk"
+        printf 'mode = %s\n' "$mode"
+        [[ -n "$dns_servers" ]] && printf 'dns = %s\n' "$dns_servers"
+        printf 'dns-ip-preference = %s\n' "$dns_pref"
+    } > "$CFG/snell-v6.conf"
 
-    register_protocol "snell-v6" "$(build_config psk "$psk" port "$port" version "$version" dns_ip_preference "$dns_pref")"
+    register_protocol "snell-v6" "$(build_config \
+        psk "$psk" port "$port" version "$version" \
+        dns "$dns_servers" dns_ip_preference "$dns_pref" mode "$mode" tfo "$tfo")"
     _save_join_info "snell-v6" "SNELL-V6|%s|$port|$psk|$version" \
-        "gen_snell_link %s $port $psk $version"
+        gen_snell_link "%s" "$port" "$psk" "$version" \
+        --extra "MODE=$mode" "DNS=${dns_servers:-system}" \
+        "DNS_IP_PREFERENCE=$dns_pref" "TFO=$tfo"
     cp "$CFG/snell-v6.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -11097,6 +11470,7 @@ create_server_scripts() {
     # Watchdog 脚本 - 服务端监控进程（带重启次数限制）
     cat > "$CFG/watchdog.sh" << 'EOFSCRIPT'
 #!/bin/bash
+umask 077
 CFG="/etc/vless-reality"
 LOG_FILE="/var/log/vless-watchdog.log"
 MAX_RESTARTS=5           # 冷却期内最大重启次数
@@ -11109,7 +11483,14 @@ log() {
     # 日志轮转：超过 2MB 时截断
     local size=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
     if [[ $size -gt 2097152 ]]; then
-        tail -n 500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+        local rotated
+        rotated=$(mktemp "${LOG_FILE}.rotate.XXXXXX") || return
+        if tail -n 500 "$LOG_FILE" >"$rotated"; then
+            chmod 600 "$rotated"
+            mv "$rotated" "$LOG_FILE"
+        else
+            rm -f "$rotated"
+        fi
     fi
 }
 
@@ -11232,30 +11613,36 @@ hop_end=$(jq -r '.singbox.hy2.hop_end // empty' "$DB_FILE" 2>/dev/null)
 hop_start="${hop_start:-20000}"
 hop_end="${hop_end:-50000}"
 
-if ! [[ "$hop_start" =~ ^[0-9]+$ && "$hop_end" =~ ^[0-9]+$ ]] || [[ "$hop_start" -ge "$hop_end" ]]; then
+if ! [[ "$port" =~ ^[0-9]+$ && "$hop_start" =~ ^[0-9]+$ && "$hop_end" =~ ^[0-9]+$ ]]; then
+  exit 0
+fi
+port=$((10#$port)); hop_start=$((10#$hop_start)); hop_end=$((10#$hop_end))
+if (( port < 1 || port > 65535 || hop_start < 1 || hop_end > 65535 || hop_start >= hop_end )); then
   exit 0
 fi
 
 # 清理旧规则 (IPv4)
-iptables -t nat -D PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null
-iptables -t nat -D OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null
+iptables -t nat -D PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port 2>/dev/null
+iptables -t nat -D OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port 2>/dev/null
 # 清理旧规则 (IPv6)
+ip6tables -t nat -D PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port 2>/dev/null
+ip6tables -t nat -D OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port 2>/dev/null
 ip6tables -t nat -D PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null
 ip6tables -t nat -D OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null
 
 [[ "${hop_enable:-0}" != "1" ]] && exit 0
 
 # 添加规则 (IPv4)
-iptables -t nat -C PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null \
-  || iptables -t nat -A PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port
-iptables -t nat -C OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null \
-  || iptables -t nat -A OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port
+iptables -t nat -C PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port 2>/dev/null \
+  || iptables -t nat -A PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port
+iptables -t nat -C OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port 2>/dev/null \
+  || iptables -t nat -A OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port
 
 # 添加规则 (IPv6)
-ip6tables -t nat -C PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null \
-  || ip6tables -t nat -A PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port
-ip6tables -t nat -C OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null \
-  || ip6tables -t nat -A OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port
+ip6tables -t nat -C PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port 2>/dev/null \
+  || ip6tables -t nat -A PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port
+ip6tables -t nat -C OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port 2>/dev/null \
+  || ip6tables -t nat -A OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-hy2-hop -j REDIRECT --to-ports $port
 EOFSCRIPT
     fi
 
@@ -11285,30 +11672,36 @@ hop_end=$(jq -r '.singbox.tuic.hop_end // empty' "$DB_FILE" 2>/dev/null)
 hop_start="${hop_start:-20000}"
 hop_end="${hop_end:-50000}"
 
-if ! [[ "$hop_start" =~ ^[0-9]+$ && "$hop_end" =~ ^[0-9]+$ ]] || [[ "$hop_start" -ge "$hop_end" ]]; then
+if ! [[ "$port" =~ ^[0-9]+$ && "$hop_start" =~ ^[0-9]+$ && "$hop_end" =~ ^[0-9]+$ ]]; then
+  exit 0
+fi
+port=$((10#$port)); hop_start=$((10#$hop_start)); hop_end=$((10#$hop_end))
+if (( port < 1 || port > 65535 || hop_start < 1 || hop_end > 65535 || hop_start >= hop_end )); then
   exit 0
 fi
 
 # 清理旧规则 (IPv4)
-iptables -t nat -D PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null
-iptables -t nat -D OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null
+iptables -t nat -D PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port 2>/dev/null
+iptables -t nat -D OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port 2>/dev/null
 # 清理旧规则 (IPv6)
+ip6tables -t nat -D PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port 2>/dev/null
+ip6tables -t nat -D OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port 2>/dev/null
 ip6tables -t nat -D PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null
 ip6tables -t nat -D OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null
 
 [[ "${hop_enable:-0}" != "1" ]] && exit 0
 
 # 添加规则 (IPv4)
-iptables -t nat -C PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null \
-  || iptables -t nat -A PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port
-iptables -t nat -C OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null \
-  || iptables -t nat -A OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port
+iptables -t nat -C PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port 2>/dev/null \
+  || iptables -t nat -A PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port
+iptables -t nat -C OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port 2>/dev/null \
+  || iptables -t nat -A OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port
 
 # 添加规则 (IPv6)
-ip6tables -t nat -C PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null \
-  || ip6tables -t nat -A PREROUTING -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port
-ip6tables -t nat -C OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port 2>/dev/null \
-  || ip6tables -t nat -A OUTPUT -p udp --dport ${hop_start}:${hop_end} -j REDIRECT --to-ports $port
+ip6tables -t nat -C PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port 2>/dev/null \
+  || ip6tables -t nat -A PREROUTING -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port
+ip6tables -t nat -C OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port 2>/dev/null \
+  || ip6tables -t nat -A OUTPUT -p udp --dport ${hop_start}:${hop_end} -m comment --comment vless-tuic-hop -j REDIRECT --to-ports $port
 EOFSCRIPT
     fi
 
@@ -11500,8 +11893,17 @@ EOF
 
 
 svc() { # svc action service_name
-    local action="$1" name="$2" err=/tmp/svc_error.log
-    _svc_try() { : >"$err"; "$@" 2>"$err" || { [[ -s "$err" ]] && { _err "服务${action}失败:"; cat "$err"; }; rm -f "$err"; return 1; }; rm -f "$err"; }
+    local action="$1" name="$2"
+    _svc_try() {
+        local err
+        err=$(mktemp "${TMPDIR:-/tmp}/vless-svc.XXXXXX") || return 1
+        "$@" 2>"$err" || {
+            [[ -s "$err" ]] && { _err "服务${action}失败:"; cat "$err"; }
+            rm -f "$err"
+            return 1
+        }
+        rm -f "$err"
+    }
 
     if [[ "$DISTRO" == "alpine" ]]; then
         case "$action" in
@@ -11777,10 +12179,12 @@ _auto_update_system_script() {
         fi
         
         if [[ "$need_update" == "true" ]]; then
-            cp -f "$real_path" "$system_script" 2>/dev/null
-            chmod +x "$system_script" 2>/dev/null
-            ln -sf "$system_script" /usr/local/bin/vless 2>/dev/null
-            ln -sf "$system_script" /usr/bin/vless 2>/dev/null
+            if ! install -m 755 "$real_path" "$system_script" 2>/dev/null; then
+                _warn "系统脚本同步失败，保留现有快捷命令"
+                return 1
+            fi
+            ln -sf "$system_script" /usr/local/bin/vless 2>/dev/null || return 1
+            ln -sf "$system_script" /usr/bin/vless 2>/dev/null || return 1
             hash -r 2>/dev/null
             _ok "系统脚本已同步更新 (v$VERSION)"
         fi
@@ -11797,7 +12201,7 @@ create_shortcut() {
         # 解析软链接获取真实路径
         real_path=$(readlink -f "$current_script" 2>/dev/null || echo "$current_script")
     elif [[ "$current_script" == "bash" || "$current_script" == "-bash" ]]; then
-        # 内存运行模式 (curl | bash)，从网络下载
+        # 从标准输入运行时没有可复制的本地脚本路径。
         real_path=""
     else
         real_path="$(cd "$(dirname "$current_script")" 2>/dev/null && pwd)/$(basename "$current_script")"
@@ -11809,7 +12213,10 @@ create_shortcut() {
     if [[ ! -f "$system_script" ]]; then
         if [[ -n "$real_path" && -f "$real_path" ]]; then
             # 从当前脚本复制（不删除原文件）
-            cp -f "$real_path" "$system_script"
+            install -m 755 "$real_path" "$system_script" || {
+                _err "无法安装系统脚本"
+                return 1
+            }
         else
             # 内存运行模式，从网络下载
             if ! _download_script_to "$system_script"; then
@@ -11819,14 +12226,17 @@ create_shortcut() {
         fi
     elif [[ -n "$real_path" && -f "$real_path" && "$real_path" != "$system_script" ]]; then
         # 系统目录已有脚本，用当前脚本更新（不删除原文件）
-        cp -f "$real_path" "$system_script"
+        install -m 755 "$real_path" "$system_script" || {
+            _err "无法更新系统脚本"
+            return 1
+        }
     fi
 
-    chmod +x "$system_script" 2>/dev/null
+    chmod 755 "$system_script" 2>/dev/null || return 1
 
     # 创建软链接
-    ln -sf "$system_script" /usr/local/bin/vless 2>/dev/null
-    ln -sf "$system_script" /usr/bin/vless 2>/dev/null
+    ln -sf "$system_script" /usr/local/bin/vless 2>/dev/null || return 1
+    ln -sf "$system_script" /usr/bin/vless 2>/dev/null || return 1
     hash -r 2>/dev/null
 
     _ok "快捷命令已创建: vless"
@@ -11852,8 +12262,8 @@ WARP_OFFICIAL_PORT=40000  # 官方客户端 SOCKS5 端口
 db_set_warp_mode() {
     local mode="$1"
     [[ ! -f "$DB_FILE" ]] && init_db
-    local tmp=$(mktemp)
-    jq --arg m "$mode" '.routing.warp_mode = $m' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply --arg m "$mode" '.routing.warp_mode = $m' || return 1
+    : >"$CFG/.managed_warp"
 }
 
 # 获取 WARP 模式
@@ -11958,18 +12368,12 @@ download_wgcf() {
         return 1
     fi
     
-    # 删除旧文件（如果存在）
-    if [[ -f "/usr/local/bin/wgcf" ]]; then
-        echo -ne "  ${C}▸${NC} 删除旧版本..."
-        if rm -f "/usr/local/bin/wgcf" 2>/dev/null; then
-            echo -e " ${G}✓${NC}"
-        else
-            echo -e " ${R}✗${NC}"
-            _err "无法删除旧文件（权限不足或文件被锁定）"
-            return 1
-        fi
-    fi
-    
+    local wgcf_staged
+    wgcf_staged=$(mktemp "/usr/local/bin/.wgcf.XXXXXX") || {
+        _err "无法在 /usr/local/bin 创建临时文件"
+        return 1
+    }
+
     local try_num=1
     local last_error=""
     for url in "${wgcf_urls[@]}"; do
@@ -11977,37 +12381,48 @@ download_wgcf() {
         echo -e "    ${D}地址: $url${NC}"
         
         # 捕获详细错误
-        last_error=$(curl -fsSL -o "/usr/local/bin/wgcf" -A "Mozilla/5.0" --max-redirs 5 --connect-timeout 15 --max-time 90 "$url" 2>&1)
+        last_error=$(curl -fsSL -o "$wgcf_staged" -A "Mozilla/5.0" --max-redirs 5 --connect-timeout 15 --max-time 90 -- "$url" 2>&1)
         local curl_ret=$?
         
         # 详细的验证流程
         if [[ $curl_ret -eq 0 ]]; then
-            if [[ ! -f "/usr/local/bin/wgcf" ]]; then
+            if [[ ! -f "$wgcf_staged" ]]; then
                 echo -e "    ${R}✗ 文件未生成${NC}"
-            elif [[ ! -s "/usr/local/bin/wgcf" ]]; then
+            elif [[ ! -s "$wgcf_staged" ]]; then
                 echo -e "    ${R}✗ 文件为空${NC}"
-                rm -f "/usr/local/bin/wgcf"
+            elif ! _verify_github_release_asset "ViRb3/wgcf" "$wgcf_ver" \
+                "https://github.com/ViRb3/wgcf/releases/download/v${wgcf_ver}/wgcf_${wgcf_ver}_linux_${wgcf_arch}" \
+                "$wgcf_staged"; then
+                echo -e "    ${R}✗ SHA-256 完整性校验失败${NC}"
             elif command -v file &>/dev/null; then
                 # 有 file 命令：完整验证
-                if ! file "/usr/local/bin/wgcf" 2>/dev/null | grep -q "ELF"; then
+                if ! file "$wgcf_staged" 2>/dev/null | grep -q "ELF"; then
                     echo -e "    ${R}✗ 文件格式错误（非 ELF 可执行文件）${NC}"
-                    echo -e "    ${D}文件类型: $(file "/usr/local/bin/wgcf" 2>/dev/null)${NC}"
-                    rm -f "/usr/local/bin/wgcf"
+                    echo -e "    ${D}文件类型: $(file "$wgcf_staged" 2>/dev/null)${NC}"
                 else
-                    chmod +x "/usr/local/bin/wgcf"
+                    chmod 755 "$wgcf_staged" &&
+                        mv -f -- "$wgcf_staged" "/usr/local/bin/wgcf" || {
+                            rm -f "$wgcf_staged"
+                            _err "wgcf 安装失败"
+                            return 1
+                        }
                     echo -e "    ${G}✓ 下载成功${NC}"
                     return 0
                 fi
             else
                 # 无 file 命令：降级验证（检查文件大小）
-                local filesize=$(stat -f%z "/usr/local/bin/wgcf" 2>/dev/null || stat -c%s "/usr/local/bin/wgcf" 2>/dev/null)
+                local filesize=$(stat -f%z "$wgcf_staged" 2>/dev/null || stat -c%s "$wgcf_staged" 2>/dev/null)
                 if [[ $filesize -gt 100000 ]]; then
-                    chmod +x "/usr/local/bin/wgcf"
+                    chmod 755 "$wgcf_staged" &&
+                        mv -f -- "$wgcf_staged" "/usr/local/bin/wgcf" || {
+                            rm -f "$wgcf_staged"
+                            _err "wgcf 安装失败"
+                            return 1
+                        }
                     echo -e "    ${G}✓ 下载成功${NC} ${D}(文件大小: $((filesize/1024))KB)${NC}"
                     return 0
                 else
                     echo -e "    ${R}✗ 文件大小异常 (${filesize} 字节)${NC}"
-                    rm -f "/usr/local/bin/wgcf"
                 fi
             fi
         else
@@ -12015,11 +12430,12 @@ download_wgcf() {
         fi
         
         [[ -n "$last_error" ]] && echo -e "    ${D}错误: $last_error${NC}"
-        rm -f "/usr/local/bin/wgcf"
+        : > "$wgcf_staged"
         ((try_num++))
         sleep 1
     done
     
+    rm -f "$wgcf_staged"
     _err "wgcf 下载失败"
     echo -e "  ${Y}提示${NC}: 所有镜像源均不可用，可能是网络问题"
     echo -e "  ${Y}手动下载${NC}: https://github.com/ViRb3/wgcf/releases"
@@ -12036,8 +12452,10 @@ register_warp() {
         return 1
     fi
     
-    cd /tmp
-    rm -f /tmp/wgcf-account.toml /tmp/wgcf-profile.conf 2>/dev/null
+    local warp_tmp old_pwd
+    warp_tmp=$(mktemp -d "${TMPDIR:-/tmp}/vless-wgcf.XXXXXX") || return 1
+    old_pwd="$PWD"
+    cd "$warp_tmp" || { rm -rf "$warp_tmp"; return 1; }
     
     # 注册 WARP 账户
     echo -ne "  ${C}▸${NC} 注册 WARP 账户..."
@@ -12045,10 +12463,12 @@ register_warp() {
     register_output=$(/usr/local/bin/wgcf register --accept-tos 2>&1)
     local register_ret=$?
     
-    if [[ $register_ret -ne 0 ]] || [[ ! -f /tmp/wgcf-account.toml ]]; then
+    if [[ $register_ret -ne 0 ]] || [[ ! -f "$warp_tmp/wgcf-account.toml" ]]; then
         echo -e " ${R}✗${NC}"
         _err "WARP 账户注册失败"
         [[ -n "$register_output" ]] && echo -e "  ${D}$register_output${NC}"
+        cd "$old_pwd" || true
+        rm -rf "$warp_tmp"
         return 1
     fi
     echo -e " ${G}✓${NC}"
@@ -12059,18 +12479,21 @@ register_warp() {
     generate_output=$(/usr/local/bin/wgcf generate 2>&1)
     local generate_ret=$?
     
-    if [[ $generate_ret -ne 0 ]] || [[ ! -f /tmp/wgcf-profile.conf ]]; then
+    if [[ $generate_ret -ne 0 ]] || [[ ! -f "$warp_tmp/wgcf-profile.conf" ]]; then
         echo -e " ${R}✗${NC}"
         _err "配置生成失败"
         [[ -n "$generate_output" ]] && echo -e "  ${D}$generate_output${NC}"
+        cd "$old_pwd" || true
+        rm -rf "$warp_tmp"
         return 1
     fi
     echo -e " ${G}✓${NC}"
     
     # 解析配置并保存到 JSON
     echo -ne "  ${C}▸${NC} 保存配置..."
-    parse_and_save_warp_config /tmp/wgcf-profile.conf
-    rm -f /tmp/wgcf-account.toml /tmp/wgcf-profile.conf
+    parse_and_save_warp_config "$warp_tmp/wgcf-profile.conf"
+    cd "$old_pwd" || true
+    rm -rf "$warp_tmp"
     echo -e " ${G}✓${NC}"
     
     # 显示配置信息
@@ -12398,11 +12821,24 @@ install_warp_official() {
     
     if [[ "$DISTRO" == "ubuntu" || "$DISTRO" == "debian" ]]; then
         # 安装依赖
-        apt-get update -qq >/dev/null 2>&1
-        apt-get install -y -qq curl gnupg lsb-release >/dev/null 2>&1
+        if ! apt-get update -qq >/dev/null 2>&1 ||
+           ! apt-get install -y -qq curl gnupg lsb-release >/dev/null 2>&1; then
+            _err "安装 WARP 软件源依赖失败"
+            return 1
+        fi
         
         # 添加 GPG 密钥
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg 2>/dev/null | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null
+        local warp_key_tmp
+        warp_key_tmp=$(mktemp "${TMPDIR:-/tmp}/vless-warp-key.XXXXXX") || return 1
+        if ! curl -fsSL --connect-timeout 10 --max-time 30 \
+            -o "$warp_key_tmp" -- https://pkg.cloudflareclient.com/pubkey.gpg ||
+           ! gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
+            "$warp_key_tmp" 2>/dev/null; then
+            rm -f "$warp_key_tmp"
+            _err "下载或导入 Cloudflare 软件源密钥失败"
+            return 1
+        fi
+        rm -f "$warp_key_tmp"
         
         # 获取发行版代号
         local codename=""
@@ -12420,7 +12856,8 @@ install_warp_official() {
         
         [[ -z "$codename" ]] && codename="jammy"
         
-        echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $codename main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+        printf 'deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ %s main\n' \
+            "$codename" > /etc/apt/sources.list.d/cloudflare-client.list || return 1
         echo -e " ${G}✓${NC}"
         
         echo -ne "  ${C}▸${NC} 安装 cloudflare-warp..."
@@ -12430,7 +12867,9 @@ install_warp_official() {
         else
             echo -e " ${R}✗${NC}"
             _warn "尝试使用备用源..."
-            echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ focal main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+            printf '%s\n' \
+                'deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ focal main' \
+                > /etc/apt/sources.list.d/cloudflare-client.list || return 1
             apt-get update -qq >/dev/null 2>&1
             if ! apt-get install -y cloudflare-warp >/dev/null 2>&1; then
                 _err "安装失败"
@@ -12439,7 +12878,17 @@ install_warp_official() {
         fi
         
     elif [[ "$DISTRO" == "centos" ]]; then
-        curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null | tee /etc/yum.repos.d/cloudflare-warp.repo >/dev/null
+        local warp_repo_tmp
+        warp_repo_tmp=$(mktemp "${TMPDIR:-/tmp}/vless-warp-repo.XXXXXX") || return 1
+        if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "$warp_repo_tmp" -- \
+            https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo ||
+           ! grep -q '^\[cloudflare-warp\]' "$warp_repo_tmp" ||
+           ! install -m 644 "$warp_repo_tmp" /etc/yum.repos.d/cloudflare-warp.repo; then
+            rm -f "$warp_repo_tmp"
+            _err "下载或安装 Cloudflare 软件源配置失败"
+            return 1
+        fi
+        rm -f "$warp_repo_tmp"
         echo -e " ${G}✓${NC}"
         
         echo -ne "  ${C}▸${NC} 安装 cloudflare-warp..."
@@ -12931,7 +13380,7 @@ db_add_routing_rule() {
     local outbound="$2"     # 出口标识: direct, warp, chain:节点名
     local domains="$3"      # 自定义域名 (仅 custom 类型)
     
-    [[ ! -f "$DB_FILE" ]] && echo '{}' > "$DB_FILE"
+    [[ ! -f "$DB_FILE" ]] && init_db
 
     # 获取 IP 版本选项 (第4个参数)
     local ip_version="${4:-prefer_ipv4}"
@@ -12950,8 +13399,6 @@ db_add_routing_rule() {
     local rule_domains="$domains"
     [[ "$rule_type" != "custom" && "$rule_type" != "all" ]] && rule_domains="${ROUTING_PRESETS[$rule_type]:-}"
     
-    local tmp=$(mktemp)
-    
     # 规则优先级排序：
     # 1. 直连规则 (outbound=direct) - 最高优先级
     # 2. custom 规则 - 次高优先级
@@ -12961,46 +13408,41 @@ db_add_routing_rule() {
     if [[ "$rule_type" == "custom" ]]; then
         if [[ "$outbound" == "direct" ]]; then
             # 直连的 custom 规则插入到最开头
-            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
-                '.routing_rules = ([{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] + (.routing_rules // []))' \
-                "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+            _db_apply --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+                '.routing_rules = ([{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] + (.routing_rules // []))'
         else
             # 非直连的 custom 规则插入到直连规则之后
-            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+            _db_apply --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
                 '.routing_rules = (
                     ((.routing_rules // []) | map(select(.outbound == "direct"))) + 
                     [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] +
                     ((.routing_rules // []) | map(select(.outbound != "direct")))
-                )' \
-                "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+                )'
         fi
     elif [[ "$rule_type" == "all" ]]; then
         # all 规则追加到末尾，优先级最低
-        jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+        _db_apply --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
             '.routing_rules = (
                 ((.routing_rules // []) | map(select(.type != $type or ((.ip_version // "prefer_ipv4") != $ip_ver))))
-            ) + [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}]' \
-            "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+            ) + [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}]'
     else
         # 预设规则：删除同类型旧规则
         if [[ "$outbound" == "direct" ]]; then
             # 直连的预设规则插入到最开头
-            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+            _db_apply --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
                 '.routing_rules = (
                     [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] +
                     ((.routing_rules // []) | map(select(.type != $type)))
-                )' \
-                "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+                )'
         else
             # 非直连的预设规则：插入到直连和 custom 规则之后
-            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+            _db_apply --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
                 '.routing_rules = (
                     ((.routing_rules // []) | map(select(.outbound == "direct"))) + 
                     ((.routing_rules // []) | map(select(.type == "custom" and .outbound != "direct"))) + 
                     [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] +
                     ((.routing_rules // []) | map(select(.type != "custom" and .type != $type and .outbound != "direct")))
-                )' \
-                "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+                )'
         fi
     fi
 }
@@ -13012,13 +13454,12 @@ db_del_routing_rule() {
     local mode="${2:-by_id}"  # 默认按 id 删除
     [[ ! -f "$DB_FILE" ]] && return
     
-    local tmp=$(mktemp)
     if [[ "$mode" == "by_type" ]]; then
         # 按 type 删除 (删除所有同类型规则)
-        jq --arg type "$identifier" '.routing_rules = [.routing_rules[]? | select(.type != $type)]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+        _db_apply --arg type "$identifier" '.routing_rules = [.routing_rules[]? | select(.type != $type)]'
     else
         # 按 id 删除 (只删除单个规则)
-        jq --arg id "$identifier" '.routing_rules = [.routing_rules[]? | select(.id != $id)]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+        _db_apply --arg id "$identifier" '.routing_rules = [.routing_rules[]? | select(.id != $id)]'
     fi
 }
 
@@ -13049,8 +13490,7 @@ db_has_routing_rule_by_type_and_ip_version() {
 # 数据库：清空所有分流规则
 db_clear_routing_rules() {
     [[ ! -f "$DB_FILE" ]] && return
-    local tmp=$(mktemp)
-    jq '.routing_rules = []' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply '.routing_rules = []'
 }
 
 #═══════════════════════════════════════════════════════════════════════════════
@@ -13066,7 +13506,7 @@ db_add_balancer_group() {
     shift 2
     local nodes=("$@")
 
-    [[ ! -f "$DB_FILE" ]] && echo '{}' > "$DB_FILE"
+    [[ ! -f "$DB_FILE" ]] && init_db
 
     # 构建节点数组
     local nodes_json=$(printf '%s\n' "${nodes[@]}" | jq -R . | jq -s .)
@@ -13079,10 +13519,8 @@ db_add_balancer_group() {
         '{name: $name, strategy: $strategy, nodes: $nodes}')
 
     # 写入数据库
-    local tmp=$(mktemp)
-    jq --argjson group "$group_json" \
-        '.balancer_groups = (.balancer_groups // []) + [$group]' \
-        "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply --argjson group "$group_json" \
+        '.balancer_groups = (.balancer_groups // []) + [$group]'
 }
 
 # 数据库：获取所有负载均衡组
@@ -13102,10 +13540,8 @@ db_get_balancer_group() {
 db_delete_balancer_group() {
     local name="$1"
     [[ ! -f "$DB_FILE" ]] && return
-    local tmp=$(mktemp)
-    jq --arg name "$name" \
-        '.balancer_groups = [.balancer_groups[]? | select(.name != $name)]' \
-        "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply --arg name "$name" \
+        '.balancer_groups = [.balancer_groups[]? | select(.name != $name)]'
 }
 
 # 数据库：检查负载均衡组是否存在
@@ -13126,10 +13562,8 @@ db_update_balancer_nodes() {
     [[ ! -f "$DB_FILE" ]] && return 1
 
     local nodes_json=$(printf '%s\n' "${nodes[@]}" | jq -R . | jq -s .)
-    local tmp=$(mktemp)
-    jq --arg name "$name" --argjson nodes "$nodes_json" \
-        '.balancer_groups = [.balancer_groups[]? | if .name == $name then .nodes = $nodes else . end]' \
-        "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply --arg name "$name" --argjson nodes "$nodes_json" \
+        '.balancer_groups = [.balancer_groups[]? | if .name == $name then .nodes = $nodes else . end]'
 }
 
 # 获取可用的出口列表
@@ -13227,7 +13661,11 @@ _display_sorted_latencies() {
 
         # 如果提供了标记数组名，尝试获取对应的标记
         if [[ -n "$marks_array_name" ]]; then
-            eval "local mark_value=\"\${${marks_array_name}[${name}]}\""
+            local mark_value=""
+            case "$marks_array_name" in
+                routing_marks) mark_value="${routing_marks[$name]:-}" ;;
+                *) _warn "忽略未知的延迟标记数组: $marks_array_name" ;;
+            esac
             [[ -n "$mark_value" ]] && mark_suffix=" ${Y}← ${mark_value}${NC}"
         fi
         
@@ -14103,8 +14541,7 @@ _enable_access_rule() {
 
 cleanup_legacy_access_restriction_rules() {
     [[ ! -f "$DB_FILE" ]] && return 0
-    local tmp=$(mktemp)
-    jq '.routing_rules = [.routing_rules[]? | select((
+    _db_apply '.routing_rules = [.routing_rules[]? | select((
         .id == "restrict-cn-geosite" or
         .id == "restrict-cn-geoip" or
         .id == "restrict-btpt-tracker" or
@@ -14121,7 +14558,7 @@ cleanup_legacy_access_restriction_rules() {
             (.domains // "") == "geosite:public-tracker" or
             (.domains // "") == "geosite:private-tracker"
         ))
-    ) | not)]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    ) | not)]'
 }
 
 disable_access_restriction() {
@@ -14833,12 +15270,11 @@ setup_warp_ipv6_chain() {
             selected_node_name="${node_names[$((node_choice-1))]}"
             
             # 标记该节点为通过 WARP 连接
-            local tmp=$(mktemp)
-            jq --arg name "$selected_node_name" '
+            _db_apply --arg name "$selected_node_name" '
                 .chain_proxy.nodes = [.chain_proxy.nodes[]? | 
                     if .name == $name then .via_warp = true else . end
                 ]
-            ' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+            '
             
             _ok "已选择节点: $selected_node_name (通过 WARP)"
         elif [[ "$node_choice" == "$i" ]]; then
@@ -15110,12 +15546,13 @@ _pick_latency_core() {
 _wait_local_port() {
     local port="$1"
     local retries=20
+    _is_valid_port "$port" || return 1
     while [[ "$retries" -gt 0 ]]; do
         if check_cmd nc; then
             if nc -z 127.0.0.1 "$port" &>/dev/null; then
                 return 0
             fi
-        elif timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/${port}" &>/dev/null; then
+        elif timeout 1 bash -c 'echo >/dev/tcp/127.0.0.1/$1' _ "$port" &>/dev/null; then
             return 0
         fi
         sleep 0.1
@@ -15346,8 +15783,7 @@ db_get_chain_nodes() { jq -r '.chain_proxy.nodes // []' "$DB_FILE" 2>/dev/null; 
 db_get_chain_node() { jq -r --arg name "$1" '.chain_proxy.nodes[] | select(.name == $name)' "$DB_FILE" 2>/dev/null; }
 db_get_chain_active() { jq -r '.chain_proxy.active // empty' "$DB_FILE" 2>/dev/null; }
 db_set_chain_active() {
-    local tmp=$(mktemp)
-    jq --arg name "$1" '.chain_proxy.active = $name' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply --arg name "$1" '.chain_proxy.active = $name'
 }
 db_add_chain_node() {
     local node_json="$1"
@@ -15355,14 +15791,14 @@ db_add_chain_node() {
     if ! echo "$node_json" | jq empty 2>/dev/null; then
         return 1
     fi
-    local tmp=$(mktemp)
-    jq --argjson node "$node_json" '.chain_proxy.nodes = ((.chain_proxy.nodes // []) + [$node])' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    _db_apply --argjson node "$node_json" '.chain_proxy.nodes = ((.chain_proxy.nodes // []) + [$node])'
 }
 db_del_chain_node() {
-    local tmp=$(mktemp)
-    jq --arg name "$1" '.chain_proxy.nodes = [.chain_proxy.nodes[] | select(.name != $name)]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
-    # 如果删除的是当前激活节点，清空激活状态
-    [[ "$(db_get_chain_active)" == "$1" ]] && jq 'del(.chain_proxy.active)' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+    local name="$1"
+    _db_apply --arg name "$name" '
+        .chain_proxy.nodes = [(.chain_proxy.nodes // [])[] | select(.name != $name)]
+        | if .chain_proxy.active == $name then del(.chain_proxy.active) else . end
+    '
 }
 
 # 检查链式代理节点是否存在 (返回 0=存在, 1=不存在)
@@ -15382,8 +15818,7 @@ db_rename_chain_node() {
         return 1
     fi
 
-    local tmp=$(mktemp)
-    if jq --arg old "$old_name" --arg new "$new_name" '
+    if _db_apply --arg old "$old_name" --arg new "$new_name" '
         .chain_proxy.nodes = [(.chain_proxy.nodes // [])[] | if .name == $old then .name = $new else . end]
         | if .chain_proxy.active == $old then .chain_proxy.active = $new else . end
         | if .routing_rules then
@@ -15392,12 +15827,10 @@ db_rename_chain_node() {
         | if .balancer_groups then
             .balancer_groups = [.balancer_groups[] | if .nodes then .nodes = [.nodes[] | if . == $old then $new else . end] else . end]
           else . end
-    ' "$DB_FILE" > "$tmp"; then
-        mv "$tmp" "$DB_FILE"
+    '; then
         return 0
     fi
 
-    rm -f "$tmp"
     return 2
 }
 
@@ -15739,9 +16172,22 @@ parse_proxy_link() {
 parse_subscription() {
     local url="$1"
     local content nodes=()
+    local allowed_protocols="=https"
+
+    if ! _is_valid_subscription_url "$url"; then
+        _err "订阅地址无效：仅允许 HTTPS；如确需 HTTP，请显式设置 ALLOW_INSECURE_HTTP_SUBSCRIPTIONS=1"
+        return 1
+    fi
+    [[ "${ALLOW_INSECURE_HTTP_SUBSCRIPTIONS:-0}" == "1" ]] && allowed_protocols="=http,https"
     
     _info "获取订阅内容..."
-    content=$(curl -sL --connect-timeout 10 "$url" 2>/dev/null)
+    if ! content=$(curl -sL --connect-timeout 10 --max-time 30 \
+        --max-filesize "$SUBSCRIPTION_MAX_BYTES" \
+        --proto "$allowed_protocols" --proto-redir "$allowed_protocols" \
+        -- "$url" 2>/dev/null); then
+        _err "获取订阅失败、超时或内容超过 10 MiB"
+        return 1
+    fi
     [[ -z "$content" ]] && { _err "获取订阅失败"; return 1; }
     
     # 尝试 base64 解码
@@ -16359,8 +16805,7 @@ _import_alice_nodes() {
     if [[ $deleted -gt 0 ]]; then
         echo -e "  ${C}▸${NC} 清理了 $deleted 个旧节点"
         # 同时清理相关的分流规则
-        local tmp=$(mktemp)
-        jq '.routing_rules = [.routing_rules[]? | select(.outbound | (startswith("chain:Alice-TW-SOCKS5-") | not))]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+        _db_apply '.routing_rules = [.routing_rules[]? | select(.outbound | (startswith("chain:Alice-TW-SOCKS5-") | not))]'
     fi
 
     local server="2a14:67c0:116::1"
@@ -16540,8 +16985,7 @@ _import_akile_nodes() {
     if [[ $deleted -gt 0 ]]; then
         echo -e "  ${C}▸${NC} 清理了 $deleted 个旧节点"
         # 同时清理相关的分流规则
-        local tmp=$(mktemp)
-        jq '.routing_rules = [.routing_rules[]? | select(.outbound | (startswith("chain:Akile-") | not))]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+        _db_apply '.routing_rules = [.routing_rules[]? | select(.outbound | (startswith("chain:Akile-") | not))]'
     fi
 
     local username="akilecloud"
@@ -16848,12 +17292,8 @@ create_load_balance_group() {
         }')
     
     # 保存到数据库
-    local tmp_file="${DB_FILE}.tmp"
-    if jq --argjson cfg "$lb_config" \
-        '.balancer_groups = ((.balancer_groups // []) + [$cfg])' \
-        "$DB_FILE" > "$tmp_file"; then
-        mv "$tmp_file" "$DB_FILE"
-        
+    if _db_apply --argjson cfg "$lb_config" \
+        '.balancer_groups = ((.balancer_groups // []) + [$cfg])'; then
         echo ""
         echo -e "  ${G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "  ${G}✓ 负载均衡组创建成功!${NC}"
@@ -16867,7 +17307,6 @@ create_load_balance_group() {
         echo -e "  1. 在 ${G}配置分流规则${NC} 中使用该负载均衡组"
         echo -e "  2. 负载均衡组会自动管理节点切换"
     else
-        rm -f "$tmp_file"
         _err "创建失败"
     fi
     
@@ -17064,11 +17503,10 @@ manage_chain_proxy() {
                 if [[ "$idx" == "0" ]]; then
                     continue
                 elif [[ "$idx" == "all" ]]; then
-                    local tmp=$(mktemp)
-                    jq 'del(.chain_proxy)' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
-                    # 清理所有引用链式代理节点的分流规则
-                    tmp=$(mktemp)
-                    jq '.routing_rules = [.routing_rules[]? | select(.outbound | startswith("chain:") | not)]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+                    _db_apply '
+                        del(.chain_proxy)
+                        | .routing_rules = [.routing_rules[]? | select(.outbound | startswith("chain:") | not)]
+                    '
                     _ok "已删除所有节点"
                     _ok "已清理相关分流规则"
                     _regenerate_proxy_configs
@@ -17077,8 +17515,7 @@ manage_chain_proxy() {
                     if [[ -n "$name" ]]; then
                         db_del_chain_node "$name"
                         # 清理引用该节点的分流规则
-                        local tmp=$(mktemp)
-                        jq --arg out "chain:$name" '.routing_rules = [.routing_rules[]? | select(.outbound != $out)]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+                        _db_apply --arg out "chain:$name" '.routing_rules = [.routing_rules[]? | select(.outbound != $out)]'
                         _ok "已删除: $name"
                         _regenerate_proxy_configs
                     fi
@@ -17125,15 +17562,13 @@ manage_chain_proxy() {
                 if [[ "$del_idx" == "0" ]]; then
                     continue
                 elif [[ "$del_idx" == "all" ]]; then
-                    local tmp=$(mktemp)
-                    jq 'del(.balancer_groups)' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+                    _db_apply 'del(.balancer_groups)'
                     _ok "已删除所有负载均衡组"
                     _regenerate_proxy_configs
                 elif [[ -n "$del_idx" && "$del_idx" =~ ^[0-9]+$ ]]; then
                     local group_name=$(echo "$balancer_groups" | jq -r ".[$((del_idx-1))].name // empty")
                     if [[ -n "$group_name" ]]; then
-                        local tmp=$(mktemp)
-                        jq --arg name "$group_name" '.balancer_groups = [.balancer_groups[]? | select(.name != $name)]' "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
+                        _db_apply --arg name "$group_name" '.balancer_groups = [.balancer_groups[]? | select(.name != $name)]'
                         _ok "已删除: $group_name"
                         _regenerate_proxy_configs
                     else
@@ -17975,6 +18410,10 @@ show_single_protocol_info() {
     local hop_start=$(echo "$cfg" | jq -r '.hop_start // empty')
     local hop_end=$(echo "$cfg" | jq -r '.hop_end // empty')
     local stls_password=$(echo "$cfg" | jq -r '.stls_password // empty')
+    local snell_dns=$(echo "$cfg" | jq -r '.dns // empty')
+    local snell_dns_pref=$(echo "$cfg" | jq -r '.dns_ip_preference // empty')
+    local snell_mode=$(echo "$cfg" | jq -r '.mode // empty')
+    local snell_tfo=$(echo "$cfg" | jq -r '.tfo // empty')
     
     # 重新获取 IP（数据库中的可能是旧的）
     [[ -z "$ipv4" ]] && ipv4=$(get_ipv4)
@@ -18250,9 +18689,15 @@ show_single_protocol_info() {
         snell|snell-v5|snell-v6)
             echo -e "  PSK: ${G}$psk${NC}"
             echo -e "  版本: ${G}v$version${NC}"
+            if [[ "$protocol" == "snell-v6" ]]; then
+                echo -e "  混淆模式: ${G}${snell_mode:-default}${NC}"
+                echo -e "  DNS 服务器: ${G}${snell_dns:-系统默认}${NC}"
+                echo -e "  DNS IP 偏好: ${G}${snell_dns_pref:-default}${NC}"
+                echo -e "  TCP Fast Open: ${G}${snell_tfo:-true}${NC}"
+            fi
             echo ""
             echo -e "  ${Y}Surge 配置 (Snell 为 Surge 专属协议):${NC}"
-            echo -e "  ${C}${country_code}-Snell = snell, ${config_ip}, ${display_port}, psk=${psk}, version=${version}, reuse=true, tfo=true${NC}"
+            echo -e "  ${C}${country_code}-Snell = snell, ${config_ip}, ${display_port}, psk=${psk}, version=${version}, reuse=true, tfo=${snell_tfo:-true}${NC}"
             ;;
         tuic)
             echo -e "  UUID: ${G}$uuid${NC}"
@@ -18527,7 +18972,7 @@ show_single_protocol_info() {
         has_cert_protocol=true
         # 从 sub.info 读取实际配置的端口，否则使用默认 8443
         if [[ -f "$CFG/sub.info" ]]; then
-            source "$CFG/sub.info"
+            _load_sub_info "$CFG/sub.info" || { _warn "订阅配置格式无效"; return 1; }
             nginx_port="${sub_port:-8443}"
         else
             nginx_port="8443"
@@ -18545,7 +18990,7 @@ show_single_protocol_info() {
     if [[ "$has_cert_protocol" == "true" ]]; then
         # 有证书协议，显示订阅状态
         if [[ "$web_service_running" == "true" && -f "$CFG/sub.info" ]]; then
-            source "$CFG/sub.info"
+            _load_sub_info "$CFG/sub.info" || { _warn "订阅配置格式无效"; return 1; }
             local sub_protocol="http"
             [[ "$sub_https" == "true" ]] && sub_protocol="https"
             local base_url="${sub_protocol}://${sub_domain:-$ipv4}:${sub_port}/sub/${sub_uuid}"
@@ -18560,7 +19005,7 @@ show_single_protocol_info() {
     elif [[ "$has_reality" == "true" && ("$protocol" == "vless" || "$protocol" == "vless-xhttp") ]]; then
         # Reality 协议：订阅需要手动配置真实域名和启用
         if [[ -n "$domain" && -f "$CFG/sub.info" && "$web_service_running" == "true" ]]; then
-            source "$CFG/sub.info"
+            _load_sub_info "$CFG/sub.info" || { _warn "订阅配置格式无效"; return 1; }
             
             # Reality 真实域名模式时，检查订阅是否已手动启用
             if [[ "${sub_enabled:-false}" == "true" && -n "$sub_port" ]]; then
@@ -19098,19 +19543,20 @@ do_uninstall() {
     local installed_protocols=""
     installed_protocols=$(get_installed_protocols 2>/dev/null || true)
     local has_naive=false
+    local managed_caddy=false
     if grep -qx "naive" <<<"$installed_protocols" || [[ -f "$CFG/naive.join" ]] || [[ -f "$CFG/Caddyfile" ]]; then
         has_naive=true
     fi
+    [[ -f "$CFG/.managed_caddy" ]] && managed_caddy=true
     
     _info "停止所有服务..."
     stop_services
     
-    # 卸载 WARP (如果已安装)
-    local warp_st=$(warp_status 2>/dev/null)
-    if [[ "$warp_st" == "configured" || "$warp_st" == "connected" ]] || check_cmd warp-cli; then
+    # 仅卸载数据库明确记录为由本脚本配置的 WARP。
+    local warp_mode=$(db_get_warp_mode 2>/dev/null)
+    if [[ -f "$CFG/.managed_warp" && -n "$warp_mode" && "$warp_mode" != "none" ]]; then
         _info "卸载 WARP..."
-        local warp_mode=$(db_get_warp_mode 2>/dev/null)
-        if [[ "$warp_mode" == "official" ]] || check_cmd warp-cli; then
+        if [[ "$warp_mode" == "official" ]]; then
             # 卸载官方客户端
             warp-cli disconnect 2>/dev/null
             systemctl stop warp-svc 2>/dev/null
@@ -19131,6 +19577,7 @@ do_uninstall() {
         rm -f ~/.wgcf-account.toml 2>/dev/null
         # 清理分流配置
         db_clear_routing_rules 2>/dev/null
+        rm -f "$CFG/.managed_warp"
         _ok "WARP 已卸载"
     fi
     
@@ -19199,8 +19646,10 @@ do_uninstall() {
         echo "  ▸ 已清理: ${cleaned_items[*]}"
     fi
     
-    # 清理网页文件
-    rm -rf /var/www/html/index.html 2>/dev/null
+    # 只删除本脚本实际创建并标记的伪装页面。
+    if [[ -f "$CFG/.managed_web_index" ]]; then
+        rm -f /var/www/html/index.html "$CFG/.managed_web_index" 2>/dev/null
+    fi
     
     # 强力清理残留进程
     force_cleanup
@@ -19225,15 +19674,6 @@ do_uninstall() {
     
     _info "删除配置目录..."
     
-    # 保留证书目录和域名记录，避免重复申请
-    local cert_backup_dir="/tmp/vless-certs-backup"
-    if [[ -d "$CFG/certs" ]]; then
-        _info "备份证书文件..."
-        mkdir -p "$cert_backup_dir"
-        cp -r "$CFG/certs" "$cert_backup_dir/" 2>/dev/null
-        [[ -f "$CFG/cert_domain" ]] && cp "$CFG/cert_domain" "$cert_backup_dir/" 2>/dev/null
-    fi
-    
     # 删除配置目录（但保留证书）
     find "$CFG" -name "*.json" -delete 2>/dev/null
     find "$CFG" -name "*.join" -delete 2>/dev/null
@@ -19253,12 +19693,11 @@ do_uninstall() {
     
     # 清理 Caddy（如果存在）
     # 支持 NaïveProxy 自定义编译版本和标准版本
-    if [[ -f "/usr/local/bin/caddy" ]]; then
+    if [[ "$managed_caddy" == "true" && "$has_naive" == "true" && -f "/usr/local/bin/caddy" ]]; then
         _info "清理 Caddy 二进制文件..."
-        # 先停止可能存在的 Caddy 进程
-        pkill -9 caddy 2>/dev/null
         # 删除二进制文件
         rm -f /usr/local/bin/caddy 2>/dev/null
+        rm -f "$CFG/.managed_caddy"
         _ok "Caddy 已删除"
     fi
     
@@ -20219,6 +20658,7 @@ do_install_server() {
                 echo ""
                 read -rp "  ShadowTLS 握手域名 [回车使用 $default_sni]: " final_sni
                 final_sni="${final_sni:-$default_sni}"
+                _is_valid_dns_name "$final_sni" || { _err "ShadowTLS 握手域名格式无效"; return 1; }
                 
                 # ShadowTLS 监听端口（对外暴露）
                 echo ""
@@ -20473,6 +20913,7 @@ do_install_server() {
                 echo ""
                 read -rp "  ShadowTLS 握手域名 [回车使用 $default_sni]: " final_sni
                 final_sni="${final_sni:-$default_sni}"
+                _is_valid_dns_name "$final_sni" || { _err "ShadowTLS 握手域名格式无效"; return 1; }
                 
                 # ShadowTLS 监听端口（对外暴露）
                 echo ""
@@ -20504,9 +20945,66 @@ do_install_server() {
             else
                 # 普通 Snell 模式
                 local snell_v6_dns_pref="default"
+                local snell_v6_dns=""
+                local snell_v6_mode="default"
+                local snell_v6_tfo="true"
+                local snell_v6_mode_choice snell_v6_dns_choice dns_pref_choice snell_v6_tfo_choice
 
                 if [[ "$version" == "6" ]]; then
-                    # Snell v6 官方当前公开的可选服务端网络参数
+                    while true; do
+                        echo ""
+                        echo -e "  ${C}配置混淆模式 (Snell v6 mode)${NC}"
+                        _line
+                        echo -e "  ${G}1. default${NC}    ${D}PSK 派生流量整形（推荐）${NC}"
+                        echo -e "  ${G}2. unshaped${NC}   ${D}关闭流量整形${NC}"
+                        echo -e "  ${R}3. unsafe-raw${NC} ${D}原始模式，仅用于兼容性排查${NC}"
+                        _line
+                        read -rp "  请选择 [1-3] (默认: 1.default): " snell_v6_mode_choice
+                        snell_v6_mode_choice="${snell_v6_mode_choice:-1}"
+                        case "$snell_v6_mode_choice" in
+                            1) snell_v6_mode="default"; break ;;
+                            2) snell_v6_mode="unshaped"; break ;;
+                            3)
+                                _warn "unsafe-raw 会关闭 v6 的流量整形保护，不建议日常使用"
+                                snell_v6_mode="unsafe-raw"
+                                break
+                                ;;
+                            *) _err "无效选择，请输入 1-3" ;;
+                        esac
+                    done
+
+                    while true; do
+                        echo ""
+                        echo -e "  ${C}配置 DNS 服务器 (Snell v6)${NC}"
+                        _line
+                        echo -e "  ${G}1. 推荐混合 DNS${NC} ${D}(1.1.1.1,8.8.8.8,2001:4860:4860::8888)${NC}"
+                        echo -e "  ${G}2. 系统默认${NC} ${D}(不写入 dns 参数)${NC}"
+                        echo -e "  ${G}3. Cloudflare${NC} ${D}(1.1.1.1,1.0.0.1)${NC}"
+                        echo -e "  ${G}4. Google${NC} ${D}(8.8.8.8,8.8.4.4)${NC}"
+                        echo -e "  ${G}5. AliDNS${NC} ${D}(223.5.5.5,223.6.6.6)${NC}"
+                        echo -e "  ${G}6. 自定义${NC} ${D}(多个 IPv4/IPv6 地址用逗号分隔)${NC}"
+                        _line
+                        read -rp "  请选择 [1-6] (默认: 1.推荐混合 DNS): " snell_v6_dns_choice
+                        snell_v6_dns_choice="${snell_v6_dns_choice:-1}"
+                        case "$snell_v6_dns_choice" in
+                            1) snell_v6_dns="1.1.1.1,8.8.8.8,2001:4860:4860::8888"; break ;;
+                            2) snell_v6_dns=""; break ;;
+                            3) snell_v6_dns="1.1.1.1,1.0.0.1"; break ;;
+                            4) snell_v6_dns="8.8.8.8,8.8.4.4"; break ;;
+                            5) snell_v6_dns="223.5.5.5,223.6.6.6"; break ;;
+                            6)
+                                read -rp "  DNS 地址列表: " snell_v6_dns
+                                snell_v6_dns="${snell_v6_dns//[[:space:]]/}"
+                                if _is_valid_dns_server_list "$snell_v6_dns" && [[ -n "$snell_v6_dns" ]]; then
+                                    break
+                                fi
+                                _err "DNS 格式无效，请输入逗号分隔的 IPv4/IPv6 地址"
+                                ;;
+                            *) _err "无效选择，请输入 1-6" ;;
+                        esac
+                    done
+
+                    # Snell v6 服务端网络参数
                     while true; do
                         echo ""
                         echo -e "  ${C}配置 DNS IP 偏好 (Snell v6)${NC}"
@@ -20528,7 +21026,24 @@ do_install_server() {
                             *) _err "无效选择，请输入 1-5" ;;
                         esac
                     done
-                    echo -e "  ${D}说明：TCP Fast Open/reuse 属于 Surge 客户端通用参数；v6 服务端不写入 dns、tfo、mode。${NC}"
+
+                    while true; do
+                        echo ""
+                        echo -e "  ${C}是否开启 TCP Fast Open (Surge 客户端)${NC}"
+                        _line
+                        echo -e "  ${G}1. 开启${NC} ${D}(推荐，默认)${NC}"
+                        echo -e "  ${G}2. 关闭${NC}"
+                        _line
+                        read -rp "  请选择 [1-2] (默认: 1.开启): " snell_v6_tfo_choice
+                        snell_v6_tfo_choice="${snell_v6_tfo_choice:-1}"
+                        case "$snell_v6_tfo_choice" in
+                            1) snell_v6_tfo="true"; break ;;
+                            2) snell_v6_tfo="false"; break ;;
+                            *) _err "无效选择，请输入 1-2" ;;
+                        esac
+                    done
+                    echo -e "  ${D}说明：mode 与 dns 为服务端参数；TFO 开关只控制生成的 Surge 客户端 tfo 参数。${NC}"
+                    echo -e "  ${D}Snell v6 服务端会自动尝试启用 TCP Fast Open。${NC}"
                 fi
 
                 echo ""
@@ -20539,7 +21054,10 @@ do_install_server() {
                 echo -e "  PSK: ${G}$psk${NC}"
                 echo -e "  版本: ${G}v$version${NC}"
                 if [[ "$version" == "6" ]]; then
+                    echo -e "  混淆模式: ${G}$snell_v6_mode${NC}"
+                    echo -e "  DNS 服务器: ${G}${snell_v6_dns:-系统默认}${NC}"
                     echo -e "  DNS IP 偏好: ${G}$snell_v6_dns_pref${NC}"
+                    echo -e "  TCP Fast Open: ${G}$snell_v6_tfo${NC}"
                 fi
                 _line
                 echo ""
@@ -20552,7 +21070,9 @@ do_install_server() {
                 elif [[ "$version" == "5" ]]; then
                     gen_snell_v5_server_config "$psk" "$port" "$version"
                 else
-                    gen_snell_v6_server_config "$psk" "$port" "$version" "$snell_v6_dns_pref"
+                    gen_snell_v6_server_config \
+                        "$psk" "$port" "$version" \
+                        "$snell_v6_dns_pref" "$snell_v6_dns" "$snell_v6_mode" "$snell_v6_tfo"
                 fi
             fi
             ;;
@@ -20655,7 +21175,7 @@ do_install_server() {
             local domain="" local_ipv4=$(get_ipv4) local_ipv6=$(get_ipv6)
             while true; do
                 read -rp "  请输入域名: " domain
-                [[ -z "$domain" ]] && { _err "域名不能为空"; continue; }
+                _is_valid_dns_name "$domain" || { _err "域名格式无效"; continue; }
                 
                 # 验证域名解析
                 _info "验证域名解析..."
@@ -20685,7 +21205,9 @@ do_install_server() {
             while true; do
                 read -rp "  请输入端口 [回车使用 $default_port]: " port
                 port="${port:-$default_port}"
-                if ss -tuln 2>/dev/null | grep -q ":${port} "; then
+                if ! _is_valid_port "$port"; then
+                    _err "端口必须是 1-65535 的整数"
+                elif ss -tuln 2>/dev/null | grep -q ":${port} "; then
                     _err "端口 $port 已被占用，请换一个"
                 else
                     break
@@ -21396,7 +21918,19 @@ get_link_name() {
 # 拉取订阅内容
 fetch_subscription() {
     local url="$1"
-    local content=$(curl -sL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null)
+    local allowed_protocols="=https"
+    if ! _is_valid_subscription_url "$url"; then
+        _err "订阅地址无效：仅允许 HTTPS；如确需 HTTP，请显式设置 ALLOW_INSECURE_HTTP_SUBSCRIPTIONS=1"
+        return 1
+    fi
+    [[ "${ALLOW_INSECURE_HTTP_SUBSCRIPTIONS:-0}" == "1" ]] && allowed_protocols="=http,https"
+    local content
+    if ! content=$(curl -sL --connect-timeout 10 --max-time 30 \
+        --max-filesize "$SUBSCRIPTION_MAX_BYTES" \
+        --proto "$allowed_protocols" --proto-redir "$allowed_protocols" \
+        -- "$url" 2>/dev/null); then
+        return 1
+    fi
     [[ -z "$content" ]] && return 1
     
     # 尝试 Base64 解码
@@ -21865,9 +22399,9 @@ add_external_sub() {
     
     [[ -z "$url" ]] && return
     
-    # 验证 URL 格式
-    if [[ "$url" != http://* && "$url" != https://* ]]; then
-        _err "无效的 URL 格式"
+    # 与实际拉取逻辑使用同一校验，默认只接受 HTTPS。
+    if ! _is_valid_subscription_url "$url"; then
+        _err "无效的订阅 URL（默认仅允许 HTTPS）"
         return 1
     fi
     
@@ -22125,6 +22659,134 @@ reset_sub_uuid() {
     echo "$new_uuid" > "$uuid_file"
     chmod 600 "$uuid_file"
     echo "$new_uuid"
+}
+
+_is_valid_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 ))
+}
+
+_is_valid_ipv4_literal() {
+    local value="$1" octet
+    local parts=()
+    [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS='.' read -r -a parts <<<"$value"
+    [[ ${#parts[@]} -eq 4 ]] || return 1
+    for octet in "${parts[@]}"; do
+        [[ "$octet" =~ ^[0-9]+$ ]] && (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+_is_valid_ipv6_literal() {
+    local value="$1" segment left right without_first
+    local left_parts=() right_parts=() parts=()
+    [[ "$value" == *:* && "$value" != *:::* && "$value" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    if [[ "$value" == *::* ]]; then
+        without_first="${value/::/}"
+        [[ "$without_first" != *::* ]] || return 1
+        left="${value%%::*}"
+        right="${value#*::}"
+        [[ -z "$left" ]] || IFS=':' read -r -a left_parts <<<"$left"
+        [[ -z "$right" ]] || IFS=':' read -r -a right_parts <<<"$right"
+        (( ${#left_parts[@]} + ${#right_parts[@]} < 8 )) || return 1
+        parts=("${left_parts[@]}" "${right_parts[@]}")
+    else
+        [[ "$value" != :* && "$value" != *: ]] || return 1
+        IFS=':' read -r -a parts <<<"$value"
+        [[ ${#parts[@]} -eq 8 ]] || return 1
+    fi
+    for segment in "${parts[@]}"; do
+        [[ "$segment" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+    done
+}
+
+_is_valid_dns_server_list() {
+    local list="$1" server
+    local servers=()
+    [[ -z "$list" ]] && return 0
+    [[ "$list" != *, && "$list" != ,* && "$list" != *,,* ]] || return 1
+    IFS=',' read -r -a servers <<<"$list"
+    [[ ${#servers[@]} -ge 1 ]] || return 1
+    for server in "${servers[@]}"; do
+        [[ "$server" != *[[:space:]]* ]] || return 1
+        _is_valid_ipv4_literal "$server" || _is_valid_ipv6_literal "$server" || return 1
+    done
+}
+
+_is_valid_dns_name() {
+    local value="$1"
+    [[ "$value" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$ ]]
+}
+
+_is_valid_domain_or_ip() {
+    local value="$1" octet
+    [[ -z "$value" ]] && return 0
+    if [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        local parts=()
+        IFS='.' read -r -a parts <<<"$value"
+        [[ ${#parts[@]} -eq 4 ]] || return 1
+        for octet in "${parts[@]}"; do
+            [[ "$octet" =~ ^[0-9]+$ ]] && (( 10#$octet <= 255 )) || return 1
+        done
+        return 0
+    fi
+    if [[ "$value" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        return 0
+    fi
+    [[ "$value" == *:* && "$value" != *:::* && "$value" =~ ^[0-9a-fA-F:]+$ ]]
+}
+
+_is_valid_subscription_url() {
+    local url="$1"
+    [[ "$url" =~ ^https://[^[:space:]]+$ ]] && return 0
+    [[ "${ALLOW_INSECURE_HTTP_SUBSCRIPTIONS:-0}" == "1" &&
+       "$url" =~ ^http://[^[:space:]]+$ ]]
+}
+
+_write_sub_info() {
+    local uuid_value="$1" port_value="$2" domain_value="$3" https_value="$4"
+    [[ "$uuid_value" =~ ^[0-9a-fA-F-]{16,64}$ ]] || return 1
+    _is_valid_port "$port_value" || return 1
+    _is_valid_domain_or_ip "$domain_value" || return 1
+    [[ "$https_value" == "true" || "$https_value" == "false" ]] || return 1
+    {
+        printf 'sub_uuid=%s\n' "$uuid_value"
+        printf 'sub_port=%s\n' "$port_value"
+        printf 'sub_domain=%s\n' "$domain_value"
+        printf 'sub_https=%s\n' "$https_value"
+    } >"$CFG/sub.info"
+    chmod 600 "$CFG/sub.info"
+}
+
+# 仅解析白名单字段，不执行 sub.info 中的 shell 代码。
+_load_sub_info() {
+    local file="${1:-$CFG/sub.info}" line key value
+    [[ -f "$file" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        key=${line%%=*}
+        value=${line#*=}
+        case "$key" in
+            sub_uuid)
+                [[ "$value" =~ ^[0-9a-fA-F-]{16,64}$ ]] || return 1
+                printf -v sub_uuid '%s' "$value"
+                ;;
+            sub_port)
+                _is_valid_port "$value" || return 1
+                printf -v sub_port '%s' "$value"
+                ;;
+            sub_domain)
+                _is_valid_domain_or_ip "$value" || return 1
+                printf -v sub_domain '%s' "$value"
+                ;;
+            sub_https)
+                [[ "$value" == "true" || "$value" == "false" ]] || return 1
+                printf -v sub_https '%s' "$value"
+                ;;
+            ""|\#*) ;;
+            *) return 1 ;;
+        esac
+    done <"$file"
+    [[ -n "${sub_uuid:-}" && -n "${sub_port:-}" && -n "${sub_https:-}" ]]
 }
 
 # 生成 V2Ray/通用 Base64 订阅内容
@@ -22626,6 +23288,7 @@ generate_sub_files() {
     local sub_uuid=$(get_sub_uuid)
     local sub_dir="$CFG/subscription/$sub_uuid"
     mkdir -p "$sub_dir"
+    chmod 711 "$CFG" "$CFG/subscription" "$sub_dir"
     
     _info "生成订阅文件..."
     
@@ -22638,7 +23301,7 @@ generate_sub_files() {
     # Surge 订阅
     gen_surge_sub > "$sub_dir/surge.conf"
     
-    chmod -R 644 "$sub_dir"/*
+    chmod 644 "$sub_dir"/*
     _ok "订阅文件已生成"
 }
 
@@ -22752,7 +23415,7 @@ show_sub_links() {
     
     # 清除变量避免污染
     local sub_uuid="" sub_port="" sub_domain="" sub_https=""
-    source "$CFG/sub.info"
+    _load_sub_info "$CFG/sub.info" || { _err "订阅配置格式无效"; return 1; }
     local ipv4=$(get_ipv4)
     local protocol="http"
     [[ "$sub_https" == "true" ]] && protocol="https"
@@ -22790,7 +23453,7 @@ manage_subscription() {
         if [[ -f "$CFG/sub.info" ]]; then
             # 清除变量避免污染
             local sub_uuid="" sub_port="" sub_domain="" sub_https=""
-            source "$CFG/sub.info"
+            _load_sub_info "$CFG/sub.info" || { _warn "订阅配置格式无效"; return 1; }
             echo -e "  状态: ${G}已配置${NC}"
             echo -e "  端口: ${G}$sub_port${NC}"
             [[ -n "$sub_domain" ]] && echo -e "  域名: ${G}$sub_domain${NC}"
@@ -22822,7 +23485,7 @@ manage_subscription() {
                     # 获取订阅端口和域名信息
                     local sub_port="" sub_domain=""
                     if [[ -f "$CFG/sub.info" ]]; then
-                        source "$CFG/sub.info"
+                        _load_sub_info "$CFG/sub.info" || { _warn "订阅配置格式无效"; return 1; }
                     fi
                     
                     # 删除配置文件
@@ -22899,6 +23562,11 @@ setup_subscription_interactive() {
     while true; do
         read -rp "  订阅端口 [$default_port]: " sub_port
         sub_port="${sub_port:-$default_port}"
+
+        if ! _is_valid_port "$sub_port"; then
+            _err "端口必须是 1-65535 的整数"
+            continue
+        fi
         
         # 检查是否被已安装协议占用
         local conflict_proto=$(is_internal_port_occupied "$sub_port")
@@ -22921,7 +23589,11 @@ setup_subscription_interactive() {
     
     # 域名
     echo -e "  ${D}留空使用服务器IP${NC}"
-    read -rp "  域名 (可选): " sub_domain
+    while true; do
+        read -rp "  域名 (可选): " sub_domain
+        _is_valid_domain_or_ip "$sub_domain" && break
+        _err "域名或 IP 格式无效"
+    done
     
     # HTTPS
     local use_https="true"
@@ -23060,15 +23732,15 @@ EOF
 </body>
 </html>
 HTMLEOF
+        : >"$CFG/.managed_web_index"
     fi
     
     # 保存订阅配置
-    cat > "$CFG/sub.info" << EOF
-sub_uuid=$sub_uuid
-sub_port=$sub_port
-sub_domain=$sub_domain
-sub_https=$use_https
-EOF
+    if ! _write_sub_info "$sub_uuid" "$sub_port" "$sub_domain" "$use_https"; then
+        _err "订阅配置参数无效，拒绝写入"
+        rm -f "$nginx_conf"
+        return 1
+    fi
     
     # 添加域名到 hosts（解决部分 VPS 环境下的本地回环问题）
     if [[ -n "$sub_domain" ]]; then
@@ -23235,9 +23907,9 @@ _sync_tunnel_config() {
     # 3. 如果需要，重启 xray
     if [[ "$need_restart" == "true" ]]; then
         if [[ "$DISTRO" == "alpine" ]]; then
-            rc-service xray restart 2>/dev/null || pkill -HUP xray 2>/dev/null
+            svc restart vless-reality 2>/dev/null || true
         else
-            systemctl restart xray 2>/dev/null || pkill -HUP xray 2>/dev/null
+            svc restart vless-reality 2>/dev/null || true
         fi
     fi
     
@@ -23279,15 +23951,28 @@ install_cloudflared() {
     echo -e "  架构: ${G}$arch${NC} → ${G}linux-$dl_arch${NC}"
     
     _info "下载 cloudflared..."
-    local dl_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$dl_arch"
+    local release_tag release_version
+    release_tag=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/cloudflare/cloudflared/releases/latest" |
+        jq -r '.tag_name // empty' 2>/dev/null) || return 1
+    [[ -n "$release_tag" ]] || { _err "无法获取 cloudflared 发布版本"; return 1; }
+    release_version="${release_tag#v}"
+    local dl_url="https://github.com/cloudflare/cloudflared/releases/download/${release_tag}/cloudflared-linux-$dl_arch"
     local tmp_file=$(mktemp)
     
-    if curl -fsSL --connect-timeout 30 -o "$tmp_file" "$dl_url"; then
-        chmod +x "$tmp_file"
-        mv "$tmp_file" "$CLOUDFLARED_BIN"
+    if curl -fsSL --connect-timeout 30 -o "$tmp_file" -- "$dl_url"; then
+        if ! _verify_github_release_asset "cloudflare/cloudflared" "$release_version" "$dl_url" "$tmp_file"; then
+            rm -f "$tmp_file"
+            _err "cloudflared SHA-256 校验失败，已拒绝安装"
+            return 1
+        fi
+        chmod 755 "$tmp_file"
+        mv "$tmp_file" "$CLOUDFLARED_BIN" || { rm -f "$tmp_file"; return 1; }
         
         # 创建配置目录
         mkdir -p "$CLOUDFLARED_DIR"
+        : >"$CFG/.managed_cloudflared_binary"
+        : >"$CLOUDFLARED_DIR/.managed_by_vless"
         
         local ver=$(_get_cloudflared_version)
         _ok "cloudflared 安装成功 (v$ver)"
@@ -23668,9 +24353,6 @@ create_quick_tunnel() {
     echo -e "  ${D}按 Ctrl+C 停止隧道${NC}"
     echo ""
     
-    # 清理旧凭证避免配置冲突
-    rm -rf "$HOME/.cloudflared" 2>/dev/null
-    
     # 启动快速隧道
     if [[ "$is_standalone" == "true" ]]; then
         # 独立模式：使用 HTTPS 并跳过证书验证
@@ -23786,8 +24468,8 @@ add_protocol_to_tunnel() {
     echo -e "  ${D}输入要绑定的域名 (必须已在 Cloudflare 托管)${NC}"
     read -rp "  域名: " hostname
     
-    if [[ -z "$hostname" ]]; then
-        _err "域名不能为空"
+    if ! _is_valid_dns_name "$hostname"; then
+        _err "域名格式无效"
         return 1
     fi
     
@@ -23853,9 +24535,9 @@ EOF
             
             # 重启 xray 使配置生效
             if [[ "$DISTRO" == "alpine" ]]; then
-                rc-service xray restart 2>/dev/null || pkill -HUP xray 2>/dev/null
+                svc restart vless-reality 2>/dev/null || true
             else
-                systemctl restart xray 2>/dev/null || pkill -HUP xray 2>/dev/null
+                svc restart vless-reality 2>/dev/null || true
             fi
             _ok "xray 配置已更新"
         fi
@@ -23981,6 +24663,8 @@ EOF
 # 创建 systemd/openrc 服务
 _setup_cloudflared_service() {
     _info "创建系统服务..."
+    mkdir -p "$CLOUDFLARED_DIR"
+    : >"$CLOUDFLARED_DIR/.managed_by_vless"
     
     if [[ "$DISTRO" == "alpine" ]]; then
         # OpenRC 服务
@@ -24256,11 +24940,11 @@ uninstall_cloudflared() {
         "$CLOUDFLARED_BIN" $CLOUDFLARED_EDGE_OPTS tunnel delete "$tunnel_name" 2>/dev/null
     fi
     
-    # 删除文件
+    # 只删除本脚本明确拥有的文件；保留用户级 Cloudflare 登录资料。
     _info "清理文件..."
-    rm -f "$CLOUDFLARED_BIN"
-    rm -rf "$CLOUDFLARED_DIR"
-    rm -rf "$HOME/.cloudflared"
+    [[ -f "$CFG/.managed_cloudflared_binary" ]] && rm -f "$CLOUDFLARED_BIN" "$CFG/.managed_cloudflared_binary"
+    [[ -f "$CLOUDFLARED_DIR/.managed_by_vless" ]] && rm -rf "$CLOUDFLARED_DIR"
+    _info "已保留 $HOME/.cloudflared，避免删除其他隧道的认证资料"
     
     _ok "cloudflared 已卸载"
     _pause
@@ -25883,7 +26567,8 @@ _configure_tg_notify() {
             1)
                 echo ""
                 echo -e "  ${D}从 @BotFather 获取 Bot Token${NC}"
-                read -rp "  Bot Token: " new_token
+                read -rsp "  Bot Token: " new_token
+                echo ""
                 if [[ -n "$new_token" ]]; then
                     tg_set_config "bot_token" "$new_token"
                     bot_token="$new_token"
@@ -26503,7 +27188,7 @@ install_realm_binary() {
         return 0
     fi
     _info "安装 Realm..."
-    local arch url tmp
+    local arch url tmp release_json release_tag release_version
     arch=$(uname -m)
     case "$arch" in
         x86_64|amd64) arch='x86_64-unknown-linux-gnu' ;;
@@ -26511,18 +27196,42 @@ install_realm_binary() {
         armv7l|armv6l) arch='armv7-unknown-linux-gnueabihf' ;;
         *) _err "暂不支持的架构: $arch"; return 1 ;;
     esac
-    url=$(curl -fsSL https://api.github.com/repos/zhboner/realm/releases/latest | jq -r --arg a "$arch" '.assets[] | select(.name | test($a + ".tar.gz$")) | .browser_download_url' | head -n1)
+    release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 https://api.github.com/repos/zhboner/realm/releases/latest) || {
+        _err "获取 Realm 发布信息失败"
+        return 1
+    }
+    release_tag=$(printf '%s' "$release_json" | jq -r '.tag_name // empty')
+    release_version="${release_tag#v}"
+    url=$(printf '%s' "$release_json" | jq -r --arg a "$arch" '.assets[] | select(.name | test($a + ".tar.gz$")) | .browser_download_url' | head -n1)
     [[ -z "$url" ]] && { _err "获取 Realm 下载地址失败"; return 1; }
-    tmp=$(mktemp -d)
-    curl -fsSL -o "$tmp/realm.tar.gz" "$url" || return 1
-    tar -xzf "$tmp/realm.tar.gz" -C "$tmp" || return 1
+    tmp=$(mktemp -d) || return 1
+    curl -fsSL -o "$tmp/realm.tar.gz" -- "$url" || { rm -rf "$tmp"; return 1; }
+    if ! _verify_github_release_asset "zhboner/realm" "$release_version" "$url" "$tmp/realm.tar.gz"; then
+        rm -rf "$tmp"
+        _err "Realm SHA-256 校验失败，已拒绝安装"
+        return 1
+    fi
+    _archive_paths_safe "$tmp/realm.tar.gz" tar.gz &&
+        tar -xzf "$tmp/realm.tar.gz" -C "$tmp" || {
+            rm -rf "$tmp"
+            _err "Realm 压缩包路径校验或解压失败"
+            return 1
+        }
     local bin=""
     [[ -f "$tmp/realm" ]] && bin="$tmp/realm"
     [[ -f "$tmp/realm-slim" ]] && bin="$tmp/realm-slim"
     [[ -z "$bin" ]] && { _err "Realm 解压后未找到二进制"; rm -rf "$tmp"; return 1; }
-    install -m 755 "$bin" "$REALM_BIN"
+    if ! install -m 755 "$bin" "$REALM_BIN"; then
+        rm -rf "$tmp"
+        _err "Realm 二进制安装失败"
+        return 1
+    fi
     rm -rf "$tmp"
-    _ok "Realm 安装完成: $(realm --version 2>/dev/null | head -n1)"
+    if ! "$REALM_BIN" --version >/dev/null 2>&1; then
+        _err "Realm 安装后运行验证失败"
+        return 1
+    fi
+    _ok "Realm 安装完成: $("$REALM_BIN" --version 2>/dev/null | head -n1)"
 }
 
 create_realm_service() {
@@ -26668,7 +27377,6 @@ realm_cleanup_runtime() {
         systemctl stop "$REALM_SVC" 2>/dev/null || true
     fi
     svc disable "$REALM_SVC" 2>/dev/null || systemctl disable "$REALM_SVC" 2>/dev/null || true
-    pkill -x realm 2>/dev/null || true
 }
 
 realm_restart_service() {
@@ -26731,6 +27439,10 @@ realm_add_rule() {
     read -rp "  目标地址: " remote_host
     read -rp "  目标端口: " remote_port
     [[ -z "$listen_port" || -z "$remote_host" || -z "$remote_port" ]] && { _err "参数不能为空"; return 1; }
+    _is_valid_domain_or_ip "$listen_host" || { _err "监听地址格式无效"; return 1; }
+    _is_valid_domain_or_ip "$remote_host" || { _err "目标地址格式无效"; return 1; }
+    _is_valid_port "$listen_port" || { _err "监听端口必须是 1-65535 的整数"; return 1; }
+    _is_valid_port "$remote_port" || { _err "目标端口必须是 1-65535 的整数"; return 1; }
     echo ""
     echo -e "  ${C}备注:${NC} ${G}${remark:-未命名}${NC}"
     echo -e "  ${C}协议:${NC} ${G}${transport}${NC}"
@@ -26739,7 +27451,7 @@ realm_add_rule() {
     echo ""
     read -rp "  确认创建? [Y/n]: " confirm
     [[ "$confirm" =~ ^[nN]$ ]] && return 0
-    python3 - "$REALM_RULES_FILE" "$remark" "$transport" "$listen_host" "$listen_port" "$remote_host" "$remote_port" <<'PY2'
+    if ! python3 - "$REALM_RULES_FILE" "$remark" "$transport" "$listen_host" "$listen_port" "$remote_host" "$remote_port" <<'PY2'
 import json, sys
 from pathlib import Path
 p=Path(sys.argv[1])
@@ -26756,6 +27468,10 @@ rules.append({
 })
 p.write_text(json.dumps(rules, ensure_ascii=False, indent=2))
 PY2
+    then
+        _err "转发规则写入失败"
+        return 1
+    fi
     realm_restart_service || { _err "Realm 服务启动失败"; return 1; }
     _ok "转发规则已创建并生效"
 }
@@ -26915,7 +27631,9 @@ iperf3_status_menu() {
     _header
     echo -e "  ${W}iPerf3 状态${NC}"
     _line
-    if pgrep -x iperf3 >/dev/null 2>&1; then
+    local iperf_pid=""
+    [[ -f "$CFG/iperf3.pid" ]] && iperf_pid=$(cat "$CFG/iperf3.pid" 2>/dev/null)
+    if [[ "$iperf_pid" =~ ^[0-9]+$ ]] && kill -0 "$iperf_pid" 2>/dev/null; then
         echo -e "  ${C}服务状态:${NC} ${G}运行中${NC}"
         echo ""
         ss -tulnp 2>/dev/null | grep iperf3 | sed 's/^/  /'
@@ -26929,9 +27647,12 @@ stop_iperf3_server_menu() {
     _header
     echo -e "  ${W}停止 iPerf3 服务端${NC}"
     _line
-    if pgrep -x iperf3 >/dev/null 2>&1; then
-        pkill iperf3 2>/dev/null || true
+    local iperf_pid=""
+    [[ -f "$CFG/iperf3.pid" ]] && iperf_pid=$(cat "$CFG/iperf3.pid" 2>/dev/null)
+    if [[ "$iperf_pid" =~ ^[0-9]+$ ]] && kill -0 "$iperf_pid" 2>/dev/null; then
+        kill "$iperf_pid" 2>/dev/null || true
         sleep 1
+        rm -f "$CFG/iperf3.pid"
         _ok "iPerf3 服务端已停止"
     else
         _warn "当前没有运行中的 iPerf3 服务端"
@@ -26953,11 +27674,23 @@ start_iperf3_server_menu() {
     listen_host="${listen_host:-0.0.0.0}"
     read -rp "  监听端口 [5201]: " listen_port
     listen_port="${listen_port:-5201}"
-    pkill iperf3 2>/dev/null || true
+    _is_valid_domain_or_ip "$listen_host" || { _err "监听地址格式无效"; return 1; }
+    _is_valid_port "$listen_port" || { _err "监听端口必须是 1-65535 的整数"; return 1; }
+    if pgrep -x iperf3 >/dev/null 2>&1 && [[ ! -f "$CFG/iperf3.pid" ]]; then
+        _err "检测到非本脚本管理的 iPerf3 进程，拒绝终止或覆盖"
+        return 1
+    fi
+    if [[ -f "$CFG/iperf3.pid" ]]; then
+        local old_iperf_pid
+        old_iperf_pid=$(cat "$CFG/iperf3.pid" 2>/dev/null)
+        [[ "$old_iperf_pid" =~ ^[0-9]+$ ]] && kill "$old_iperf_pid" 2>/dev/null || true
+        rm -f "$CFG/iperf3.pid"
+    fi
     if [[ "$listen_host" == "0.0.0.0" ]]; then
-        iperf3 -s -D -p "$listen_port"
+        iperf3 -s -D -p "$listen_port" --pidfile "$CFG/iperf3.pid"
     else
-        nohup iperf3 -s -B "$listen_host" -p "$listen_port" >/tmp/iperf3-server.log 2>&1 < /dev/null &
+        nohup iperf3 -s -B "$listen_host" -p "$listen_port" >"$CFG/iperf3-server.log" 2>&1 < /dev/null &
+        printf '%s\n' "$!" >"$CFG/iperf3.pid"
     fi
     sleep 1
     local server_ip
@@ -27045,6 +27778,11 @@ do_update() {
     fi
     local downloaded_ver
     downloaded_ver=$(_extract_script_version "$tmp_file")
+    if [[ -z "$downloaded_ver" || ! "$downloaded_ver" =~ ^[0-9A-Za-z._-]+$ ]]; then
+        rm -f "$tmp_file"
+        _err "下载脚本缺少有效版本标识，已拒绝更新"
+        return 1
+    fi
     if [[ -n "$downloaded_ver" && "$downloaded_ver" != "$remote_ver" ]]; then
         remote_ver="$downloaded_ver"
         echo "$remote_ver" > "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null
@@ -27227,18 +27965,21 @@ main_menu() {
 case "${1:-}" in
     --sync-traffic)
         # 静默模式：用于定时任务
+        check_root
         init_db
         sync_all_user_traffic "true"
         exit 0
         ;;
     --show-traffic)
         # 显示流量统计
+        check_root
         init_db
         get_all_traffic_stats
         exit 0
         ;;
     --check-expire)
         # 检查并禁用过期用户，发送提醒
+        check_root
         init_db
         echo "检查用户到期状态..."
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始过期检查..." >> "$CFG/expire.log"
@@ -27260,6 +28001,7 @@ case "${1:-}" in
         ;;
     --setup-expire-cron)
         # 安装过期检查定时任务
+        check_root
         init_db
         install_expire_check_cron
         exit 0
