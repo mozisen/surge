@@ -1,4 +1,4 @@
-使用方法：
+vless脚本使用方法：
 
 ```bash
 wget -O vless-server.sh https://raw.githubusercontent.com/mozisen/surge/main/vless-server.sh && chmod +x vless-server.sh && bash vless-server.sh
@@ -7,6 +7,19 @@ wget -O vless-server.sh https://raw.githubusercontent.com/mozisen/surge/main/vle
 ```bash
 vless
 ```
+nft脚本使用方法：
+```bash
+curl -L https://raw.githubusercontent.com/mozisen/surge/main/nft.sh -o nft.sh  
+chmod +x nft.sh  
+./nft.sh  
+```
+```
+快捷命令：
+```bash
+nftm
+```
+
+
 在Zyx0rx大佬基础上修改  
 ------------------------------------------------  
 更新 ：  
