@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.3-alpine321.2-preview.2"
+readonly VERSION="3.5.3-alpine321.2-preview.3"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -11421,6 +11421,7 @@ EOF
 gen_snell_v6_server_config() {
     local psk="$1" port="$2" version="${3:-6}"
     local dns_pref="${4:-default}" dns_servers="${5:-}" mode="${6:-default}"
+    local tfo="${7:-true}"
     mkdir -p "$CFG"
 
     case "$dns_pref" in
@@ -11431,6 +11432,10 @@ gen_snell_v6_server_config() {
         default|unshaped|unsafe-raw) ;;
         *) _err "无效的 Snell v6 混淆模式: $mode"; return 1 ;;
     esac
+    [[ "$tfo" == "true" || "$tfo" == "false" ]] || {
+        _err "无效的 Snell v6 TCP Fast Open 选项: $tfo"
+        return 1
+    }
     _is_valid_dns_server_list "$dns_servers" || {
         _err "无效的 Snell v6 DNS 服务器列表: $dns_servers"
         return 1
@@ -11449,9 +11454,11 @@ gen_snell_v6_server_config() {
 
     register_protocol "snell-v6" "$(build_config \
         psk "$psk" port "$port" version "$version" \
-        dns "$dns_servers" dns_ip_preference "$dns_pref" mode "$mode")"
+        dns "$dns_servers" dns_ip_preference "$dns_pref" mode "$mode" tfo "$tfo")"
     _save_join_info "snell-v6" "SNELL-V6|%s|$port|$psk|$version" \
-        gen_snell_link "%s" "$port" "$psk" "$version"
+        gen_snell_link "%s" "$port" "$psk" "$version" \
+        --extra "MODE=$mode" "DNS=${dns_servers:-system}" \
+        "DNS_IP_PREFERENCE=$dns_pref" "TFO=$tfo"
     cp "$CFG/snell-v6.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -18406,6 +18413,7 @@ show_single_protocol_info() {
     local snell_dns=$(echo "$cfg" | jq -r '.dns // empty')
     local snell_dns_pref=$(echo "$cfg" | jq -r '.dns_ip_preference // empty')
     local snell_mode=$(echo "$cfg" | jq -r '.mode // empty')
+    local snell_tfo=$(echo "$cfg" | jq -r '.tfo // empty')
     
     # 重新获取 IP（数据库中的可能是旧的）
     [[ -z "$ipv4" ]] && ipv4=$(get_ipv4)
@@ -18685,10 +18693,11 @@ show_single_protocol_info() {
                 echo -e "  混淆模式: ${G}${snell_mode:-default}${NC}"
                 echo -e "  DNS 服务器: ${G}${snell_dns:-系统默认}${NC}"
                 echo -e "  DNS IP 偏好: ${G}${snell_dns_pref:-default}${NC}"
+                echo -e "  TCP Fast Open: ${G}${snell_tfo:-true}${NC}"
             fi
             echo ""
             echo -e "  ${Y}Surge 配置 (Snell 为 Surge 专属协议):${NC}"
-            echo -e "  ${C}${country_code}-Snell = snell, ${config_ip}, ${display_port}, psk=${psk}, version=${version}, reuse=true, tfo=true${NC}"
+            echo -e "  ${C}${country_code}-Snell = snell, ${config_ip}, ${display_port}, psk=${psk}, version=${version}, reuse=true, tfo=${snell_tfo:-true}${NC}"
             ;;
         tuic)
             echo -e "  UUID: ${G}$uuid${NC}"
@@ -20938,7 +20947,8 @@ do_install_server() {
                 local snell_v6_dns_pref="default"
                 local snell_v6_dns=""
                 local snell_v6_mode="default"
-                local snell_v6_mode_choice snell_v6_dns_choice dns_pref_choice
+                local snell_v6_tfo="true"
+                local snell_v6_mode_choice snell_v6_dns_choice dns_pref_choice snell_v6_tfo_choice
 
                 if [[ "$version" == "6" ]]; then
                     while true; do
@@ -20967,20 +20977,22 @@ do_install_server() {
                         echo ""
                         echo -e "  ${C}配置 DNS 服务器 (Snell v6)${NC}"
                         _line
-                        echo -e "  ${G}1. 系统默认${NC} ${D}(不写入 dns 参数)${NC}"
-                        echo -e "  ${G}2. Cloudflare${NC} ${D}(1.1.1.1,1.0.0.1)${NC}"
-                        echo -e "  ${G}3. Google${NC} ${D}(8.8.8.8,8.8.4.4)${NC}"
-                        echo -e "  ${G}4. AliDNS${NC} ${D}(223.5.5.5,223.6.6.6)${NC}"
-                        echo -e "  ${G}5. 自定义${NC} ${D}(多个 IPv4/IPv6 地址用逗号分隔)${NC}"
+                        echo -e "  ${G}1. 推荐混合 DNS${NC} ${D}(1.1.1.1,8.8.8.8,2001:4860:4860::8888)${NC}"
+                        echo -e "  ${G}2. 系统默认${NC} ${D}(不写入 dns 参数)${NC}"
+                        echo -e "  ${G}3. Cloudflare${NC} ${D}(1.1.1.1,1.0.0.1)${NC}"
+                        echo -e "  ${G}4. Google${NC} ${D}(8.8.8.8,8.8.4.4)${NC}"
+                        echo -e "  ${G}5. AliDNS${NC} ${D}(223.5.5.5,223.6.6.6)${NC}"
+                        echo -e "  ${G}6. 自定义${NC} ${D}(多个 IPv4/IPv6 地址用逗号分隔)${NC}"
                         _line
-                        read -rp "  请选择 [1-5] (默认: 1.系统默认): " snell_v6_dns_choice
+                        read -rp "  请选择 [1-6] (默认: 1.推荐混合 DNS): " snell_v6_dns_choice
                         snell_v6_dns_choice="${snell_v6_dns_choice:-1}"
                         case "$snell_v6_dns_choice" in
-                            1) snell_v6_dns=""; break ;;
-                            2) snell_v6_dns="1.1.1.1,1.0.0.1"; break ;;
-                            3) snell_v6_dns="8.8.8.8,8.8.4.4"; break ;;
-                            4) snell_v6_dns="223.5.5.5,223.6.6.6"; break ;;
-                            5)
+                            1) snell_v6_dns="1.1.1.1,8.8.8.8,2001:4860:4860::8888"; break ;;
+                            2) snell_v6_dns=""; break ;;
+                            3) snell_v6_dns="1.1.1.1,1.0.0.1"; break ;;
+                            4) snell_v6_dns="8.8.8.8,8.8.4.4"; break ;;
+                            5) snell_v6_dns="223.5.5.5,223.6.6.6"; break ;;
+                            6)
                                 read -rp "  DNS 地址列表: " snell_v6_dns
                                 snell_v6_dns="${snell_v6_dns//[[:space:]]/}"
                                 if _is_valid_dns_server_list "$snell_v6_dns" && [[ -n "$snell_v6_dns" ]]; then
@@ -20988,7 +21000,7 @@ do_install_server() {
                                 fi
                                 _err "DNS 格式无效，请输入逗号分隔的 IPv4/IPv6 地址"
                                 ;;
-                            *) _err "无效选择，请输入 1-5" ;;
+                            *) _err "无效选择，请输入 1-6" ;;
                         esac
                     done
 
@@ -21014,7 +21026,24 @@ do_install_server() {
                             *) _err "无效选择，请输入 1-5" ;;
                         esac
                     done
-                    echo -e "  ${D}说明：mode 与 dns 为服务端参数；Surge 客户端仍只需配置 PSK 和 version=6。${NC}"
+
+                    while true; do
+                        echo ""
+                        echo -e "  ${C}是否开启 TCP Fast Open (Surge 客户端)${NC}"
+                        _line
+                        echo -e "  ${G}1. 开启${NC} ${D}(推荐，默认)${NC}"
+                        echo -e "  ${G}2. 关闭${NC}"
+                        _line
+                        read -rp "  请选择 [1-2] (默认: 1.开启): " snell_v6_tfo_choice
+                        snell_v6_tfo_choice="${snell_v6_tfo_choice:-1}"
+                        case "$snell_v6_tfo_choice" in
+                            1) snell_v6_tfo="true"; break ;;
+                            2) snell_v6_tfo="false"; break ;;
+                            *) _err "无效选择，请输入 1-2" ;;
+                        esac
+                    done
+                    echo -e "  ${D}说明：mode 与 dns 为服务端参数；TFO 开关只控制生成的 Surge 客户端 tfo 参数。${NC}"
+                    echo -e "  ${D}Snell v6 服务端会自动尝试启用 TCP Fast Open。${NC}"
                 fi
 
                 echo ""
@@ -21028,6 +21057,7 @@ do_install_server() {
                     echo -e "  混淆模式: ${G}$snell_v6_mode${NC}"
                     echo -e "  DNS 服务器: ${G}${snell_v6_dns:-系统默认}${NC}"
                     echo -e "  DNS IP 偏好: ${G}$snell_v6_dns_pref${NC}"
+                    echo -e "  TCP Fast Open: ${G}$snell_v6_tfo${NC}"
                 fi
                 _line
                 echo ""
@@ -21042,7 +21072,7 @@ do_install_server() {
                 else
                     gen_snell_v6_server_config \
                         "$psk" "$port" "$version" \
-                        "$snell_v6_dns_pref" "$snell_v6_dns" "$snell_v6_mode"
+                        "$snell_v6_dns_pref" "$snell_v6_dns" "$snell_v6_mode" "$snell_v6_tfo"
                 fi
             fi
             ;;
