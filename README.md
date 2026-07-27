@@ -13,9 +13,9 @@ curl -L https://raw.githubusercontent.com/mozisen/surge/main/nft.sh -o nft.sh
 chmod +x nft.sh  
 ./nft.sh  
 ```
-```
-快捷命令：
-```bash
+
+快捷命令：    
+```bash  
 nftm
 ```
 
