@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.3-alpine321.2-preview.1"
+readonly VERSION="3.5.3-alpine321.2-preview.2"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -11417,23 +11417,39 @@ EOF
 }
 
 # Snell v6 服务端配置
-# 官方 v6 当前公开支持的服务端网络项为 listen 与 dns-ip-preference。
-# 不再写入 v6 未公开支持的 tfo、dns、mode，避免服务因未知字段直接退出。
+# v6.0.0b4 支持 listen、mode、dns、dns-ip-preference 和 egress-interface。
 gen_snell_v6_server_config() {
     local psk="$1" port="$2" version="${3:-6}"
-    local dns_pref="${4:-default}"
+    local dns_pref="${4:-default}" dns_servers="${5:-}" mode="${6:-default}"
     mkdir -p "$CFG"
+
+    case "$dns_pref" in
+        default|prefer-ipv4|prefer-ipv6|ipv4-only|ipv6-only) ;;
+        *) _err "无效的 Snell v6 DNS IP 偏好: $dns_pref"; return 1 ;;
+    esac
+    case "$mode" in
+        default|unshaped|unsafe-raw) ;;
+        *) _err "无效的 Snell v6 混淆模式: $mode"; return 1 ;;
+    esac
+    _is_valid_dns_server_list "$dns_servers" || {
+        _err "无效的 Snell v6 DNS 服务器列表: $dns_servers"
+        return 1
+    }
 
     local listen_addr=$(_listen_addr)
 
-    cat > "$CFG/snell-v6.conf" << EOF
-[snell-server]
-listen = $(_fmt_hostport "$listen_addr" "$port")
-psk = $psk
-dns-ip-preference = $dns_pref
-EOF
+    {
+        printf '[snell-server]\n'
+        printf 'listen = %s\n' "$(_fmt_hostport "$listen_addr" "$port")"
+        printf 'psk = %s\n' "$psk"
+        printf 'mode = %s\n' "$mode"
+        [[ -n "$dns_servers" ]] && printf 'dns = %s\n' "$dns_servers"
+        printf 'dns-ip-preference = %s\n' "$dns_pref"
+    } > "$CFG/snell-v6.conf"
 
-    register_protocol "snell-v6" "$(build_config psk "$psk" port "$port" version "$version" dns_ip_preference "$dns_pref")"
+    register_protocol "snell-v6" "$(build_config \
+        psk "$psk" port "$port" version "$version" \
+        dns "$dns_servers" dns_ip_preference "$dns_pref" mode "$mode")"
     _save_join_info "snell-v6" "SNELL-V6|%s|$port|$psk|$version" \
         gen_snell_link "%s" "$port" "$psk" "$version"
     cp "$CFG/snell-v6.join" "$CFG/join.txt" 2>/dev/null
@@ -18387,6 +18403,9 @@ show_single_protocol_info() {
     local hop_start=$(echo "$cfg" | jq -r '.hop_start // empty')
     local hop_end=$(echo "$cfg" | jq -r '.hop_end // empty')
     local stls_password=$(echo "$cfg" | jq -r '.stls_password // empty')
+    local snell_dns=$(echo "$cfg" | jq -r '.dns // empty')
+    local snell_dns_pref=$(echo "$cfg" | jq -r '.dns_ip_preference // empty')
+    local snell_mode=$(echo "$cfg" | jq -r '.mode // empty')
     
     # 重新获取 IP（数据库中的可能是旧的）
     [[ -z "$ipv4" ]] && ipv4=$(get_ipv4)
@@ -18662,6 +18681,11 @@ show_single_protocol_info() {
         snell|snell-v5|snell-v6)
             echo -e "  PSK: ${G}$psk${NC}"
             echo -e "  版本: ${G}v$version${NC}"
+            if [[ "$protocol" == "snell-v6" ]]; then
+                echo -e "  混淆模式: ${G}${snell_mode:-default}${NC}"
+                echo -e "  DNS 服务器: ${G}${snell_dns:-系统默认}${NC}"
+                echo -e "  DNS IP 偏好: ${G}${snell_dns_pref:-default}${NC}"
+            fi
             echo ""
             echo -e "  ${Y}Surge 配置 (Snell 为 Surge 专属协议):${NC}"
             echo -e "  ${C}${country_code}-Snell = snell, ${config_ip}, ${display_port}, psk=${psk}, version=${version}, reuse=true, tfo=true${NC}"
@@ -20912,9 +20936,63 @@ do_install_server() {
             else
                 # 普通 Snell 模式
                 local snell_v6_dns_pref="default"
+                local snell_v6_dns=""
+                local snell_v6_mode="default"
+                local snell_v6_mode_choice snell_v6_dns_choice dns_pref_choice
 
                 if [[ "$version" == "6" ]]; then
-                    # Snell v6 官方当前公开的可选服务端网络参数
+                    while true; do
+                        echo ""
+                        echo -e "  ${C}配置混淆模式 (Snell v6 mode)${NC}"
+                        _line
+                        echo -e "  ${G}1. default${NC}    ${D}PSK 派生流量整形（推荐）${NC}"
+                        echo -e "  ${G}2. unshaped${NC}   ${D}关闭流量整形${NC}"
+                        echo -e "  ${R}3. unsafe-raw${NC} ${D}原始模式，仅用于兼容性排查${NC}"
+                        _line
+                        read -rp "  请选择 [1-3] (默认: 1.default): " snell_v6_mode_choice
+                        snell_v6_mode_choice="${snell_v6_mode_choice:-1}"
+                        case "$snell_v6_mode_choice" in
+                            1) snell_v6_mode="default"; break ;;
+                            2) snell_v6_mode="unshaped"; break ;;
+                            3)
+                                _warn "unsafe-raw 会关闭 v6 的流量整形保护，不建议日常使用"
+                                snell_v6_mode="unsafe-raw"
+                                break
+                                ;;
+                            *) _err "无效选择，请输入 1-3" ;;
+                        esac
+                    done
+
+                    while true; do
+                        echo ""
+                        echo -e "  ${C}配置 DNS 服务器 (Snell v6)${NC}"
+                        _line
+                        echo -e "  ${G}1. 系统默认${NC} ${D}(不写入 dns 参数)${NC}"
+                        echo -e "  ${G}2. Cloudflare${NC} ${D}(1.1.1.1,1.0.0.1)${NC}"
+                        echo -e "  ${G}3. Google${NC} ${D}(8.8.8.8,8.8.4.4)${NC}"
+                        echo -e "  ${G}4. AliDNS${NC} ${D}(223.5.5.5,223.6.6.6)${NC}"
+                        echo -e "  ${G}5. 自定义${NC} ${D}(多个 IPv4/IPv6 地址用逗号分隔)${NC}"
+                        _line
+                        read -rp "  请选择 [1-5] (默认: 1.系统默认): " snell_v6_dns_choice
+                        snell_v6_dns_choice="${snell_v6_dns_choice:-1}"
+                        case "$snell_v6_dns_choice" in
+                            1) snell_v6_dns=""; break ;;
+                            2) snell_v6_dns="1.1.1.1,1.0.0.1"; break ;;
+                            3) snell_v6_dns="8.8.8.8,8.8.4.4"; break ;;
+                            4) snell_v6_dns="223.5.5.5,223.6.6.6"; break ;;
+                            5)
+                                read -rp "  DNS 地址列表: " snell_v6_dns
+                                snell_v6_dns="${snell_v6_dns//[[:space:]]/}"
+                                if _is_valid_dns_server_list "$snell_v6_dns" && [[ -n "$snell_v6_dns" ]]; then
+                                    break
+                                fi
+                                _err "DNS 格式无效，请输入逗号分隔的 IPv4/IPv6 地址"
+                                ;;
+                            *) _err "无效选择，请输入 1-5" ;;
+                        esac
+                    done
+
+                    # Snell v6 服务端网络参数
                     while true; do
                         echo ""
                         echo -e "  ${C}配置 DNS IP 偏好 (Snell v6)${NC}"
@@ -20936,7 +21014,7 @@ do_install_server() {
                             *) _err "无效选择，请输入 1-5" ;;
                         esac
                     done
-                    echo -e "  ${D}说明：TCP Fast Open/reuse 属于 Surge 客户端通用参数；v6 服务端不写入 dns、tfo、mode。${NC}"
+                    echo -e "  ${D}说明：mode 与 dns 为服务端参数；Surge 客户端仍只需配置 PSK 和 version=6。${NC}"
                 fi
 
                 echo ""
@@ -20947,6 +21025,8 @@ do_install_server() {
                 echo -e "  PSK: ${G}$psk${NC}"
                 echo -e "  版本: ${G}v$version${NC}"
                 if [[ "$version" == "6" ]]; then
+                    echo -e "  混淆模式: ${G}$snell_v6_mode${NC}"
+                    echo -e "  DNS 服务器: ${G}${snell_v6_dns:-系统默认}${NC}"
                     echo -e "  DNS IP 偏好: ${G}$snell_v6_dns_pref${NC}"
                 fi
                 _line
@@ -20960,7 +21040,9 @@ do_install_server() {
                 elif [[ "$version" == "5" ]]; then
                     gen_snell_v5_server_config "$psk" "$port" "$version"
                 else
-                    gen_snell_v6_server_config "$psk" "$port" "$version" "$snell_v6_dns_pref"
+                    gen_snell_v6_server_config \
+                        "$psk" "$port" "$version" \
+                        "$snell_v6_dns_pref" "$snell_v6_dns" "$snell_v6_mode"
                 fi
             fi
             ;;
@@ -22552,6 +22634,53 @@ reset_sub_uuid() {
 _is_valid_port() {
     local port="$1"
     [[ "$port" =~ ^[0-9]+$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 ))
+}
+
+_is_valid_ipv4_literal() {
+    local value="$1" octet
+    local parts=()
+    [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS='.' read -r -a parts <<<"$value"
+    [[ ${#parts[@]} -eq 4 ]] || return 1
+    for octet in "${parts[@]}"; do
+        [[ "$octet" =~ ^[0-9]+$ ]] && (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+_is_valid_ipv6_literal() {
+    local value="$1" segment left right without_first
+    local left_parts=() right_parts=() parts=()
+    [[ "$value" == *:* && "$value" != *:::* && "$value" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    if [[ "$value" == *::* ]]; then
+        without_first="${value/::/}"
+        [[ "$without_first" != *::* ]] || return 1
+        left="${value%%::*}"
+        right="${value#*::}"
+        [[ -z "$left" ]] || IFS=':' read -r -a left_parts <<<"$left"
+        [[ -z "$right" ]] || IFS=':' read -r -a right_parts <<<"$right"
+        (( ${#left_parts[@]} + ${#right_parts[@]} < 8 )) || return 1
+        parts=("${left_parts[@]}" "${right_parts[@]}")
+    else
+        [[ "$value" != :* && "$value" != *: ]] || return 1
+        IFS=':' read -r -a parts <<<"$value"
+        [[ ${#parts[@]} -eq 8 ]] || return 1
+    fi
+    for segment in "${parts[@]}"; do
+        [[ "$segment" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+    done
+}
+
+_is_valid_dns_server_list() {
+    local list="$1" server
+    local servers=()
+    [[ -z "$list" ]] && return 0
+    [[ "$list" != *, && "$list" != ,* && "$list" != *,,* ]] || return 1
+    IFS=',' read -r -a servers <<<"$list"
+    [[ ${#servers[@]} -ge 1 ]] || return 1
+    for server in "${servers[@]}"; do
+        [[ "$server" != *[[:space:]]* ]] || return 1
+        _is_valid_ipv4_literal "$server" || _is_valid_ipv6_literal "$server" || return 1
+    done
 }
 
 _is_valid_dns_name() {
