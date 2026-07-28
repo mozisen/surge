@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.4 [服务端]
+#  多协议代理一键部署脚本 v3.5.5-preview.1 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.4"
+readonly VERSION="3.5.5-preview.1"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -64,15 +64,39 @@ readonly SUBSCRIPTION_MAX_BYTES=10485760
 _CACHED_IPV4=""
 _CACHED_IPV6=""
 
-# Alpine busybox pgrep 不支持 -x，使用兼容方式检测进程
+# 兼容精简 Alpine：BusyBox 镜像可能没有 pgrep，但通常提供 pidof。
+# 最后一层直接检查 /proc，避免服务已经启动却被误判为“进程未运行”。
 _pgrep() {
     local proc="$1"
-    if [[ "$DISTRO" == "alpine" ]]; then
-        # Alpine busybox pgrep: 先尝试精确匹配，再尝试命令行匹配
-        pgrep "$proc" >/dev/null 2>&1 || pgrep -f "$proc" >/dev/null 2>&1
-    else
-        pgrep -x "$proc" >/dev/null 2>&1
+    [[ -n "$proc" ]] || return 1
+
+    if command -v pgrep >/dev/null 2>&1; then
+        if [[ "$DISTRO" == "alpine" ]]; then
+            # Alpine busybox pgrep 可能不支持 -x。
+            pgrep "$proc" >/dev/null 2>&1 && return 0
+            pgrep -f "$proc" >/dev/null 2>&1 && return 0
+        else
+            pgrep -x "$proc" >/dev/null 2>&1 && return 0
+        fi
     fi
+
+    if command -v pidof >/dev/null 2>&1; then
+        pidof "$proc" >/dev/null 2>&1 && return 0
+    fi
+
+    local proc_dir comm cmdline
+    for proc_dir in /proc/[0-9]*; do
+        [[ -r "$proc_dir/comm" ]] || continue
+        IFS= read -r comm < "$proc_dir/comm" 2>/dev/null || continue
+        [[ "$comm" == "$proc" ]] && return 0
+
+        # Linux comm 最多保存 15 个字符；长进程名再检查 argv[0]。
+        if [[ ${#proc} -gt 15 && -r "$proc_dir/cmdline" ]]; then
+            cmdline=$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null)
+            [[ "${cmdline%% *}" == */"$proc" || "${cmdline%% *}" == "$proc" ]] && return 0
+        fi
+    done
+    return 1
 }
 
 #═══════════════════════════════════════════════════════════════════════════════
@@ -11968,11 +11992,12 @@ _start_core_service() {
         return 1
     fi
     
-    # 等待进程启动
+    # 等待服务启动。OpenRC 的 PID 文件/服务状态比精简 Alpine 中可能缺失的
+    # pgrep 更可靠；同时保留进程检测以兼容非标准服务管理环境。
     local wait_count=0
     local max_wait=$([[ "$is_running" == "true" ]] && echo 5 || echo 10)
     while [[ $wait_count -lt $max_wait ]]; do
-        if _pgrep "$process_name"; then
+        if svc status "$service_name" >/dev/null 2>&1 || _pgrep "$process_name"; then
             local proto_list=$(echo $protocols | tr '\n' ' ')
             _ok "${process_name} 服务已${action_word} (协议: $proto_list)"
             return 0
