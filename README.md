@@ -1,3 +1,6 @@
+问题反馈：  
+[![Telegram](https://img.shields.io/badge/Telegram-@vless__vaio-26A5E4?logo=telegram&logoColor=white)](https://t.me/vless_vaio)  
+
 vless脚本使用方法：
 
 ```bash
