@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# nftables 端口转发管理工具 v1.1
+# nftables 端口转发管理工具 v1.2
 # 交互式管理 DNAT 端口转发规则
 #
 
@@ -13,6 +13,7 @@ SYSCTL_CONF="/etc/sysctl.d/99-nft-forward.conf"
 LOG_FILE="/var/log/nft-forward.log"
 LOGROTATE_CONF="/etc/logrotate.d/nft-forward"
 TABLE_NAME="port_forward"
+SERVICE_NAME="nftables"
 SHORTCUT_NAME="nftm"
 INSTALL_DIR="/usr/local/lib/nft-forward"
 INSTALL_SCRIPT="${INSTALL_DIR}/nft.sh"
@@ -438,51 +439,91 @@ reload_rules() {
     return 0
 }
 
-# ============== 备份配置 ==============
-backup_conf() {
-    if [[ -f "${CONF_FILE}" ]]; then
-        local ts
-        ts=$(date '+%Y%m%d_%H%M%S')
-        cp "${CONF_FILE}" "${BACKUP_DIR}/port-forward.conf.${ts}" 2>/dev/null || true
+# ============== 确保 nftables 当前运行并开机自启 ==============
+ensure_nftables_service() {
+    if ! command -v systemctl &>/dev/null; then
+        warn "当前系统不支持 systemd，无法自动设置 nftables 开机自启。"
+        return 1
     fi
-}
 
-# ============== 开启内核参数：IP 转发 + BBR/fq ==============
-enable_ip_forward() {
-    local current
-    current=$(sysctl -n net.ipv4.ip_forward 2>/dev/null) || current="0"
-    if [[ "$current" != "1" ]]; then
-        if sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1; then
-            info "已开启 IPv4 转发。"
+    if ! systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        if systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1; then
+            info "已启用 nftables 开机自启。"
+            log_action "启用 nftables 开机自启"
         else
-            warn "无法开启 IPv4 转发，请手动执行: sysctl -w net.ipv4.ip_forward=1"
+            warn "无法启用 nftables 开机自启，请手动执行: systemctl enable ${SERVICE_NAME}"
+            return 1
         fi
     fi
 
-    # 持久化：统一替换所有匹配行为 =1，没有则追加（避免重复项导致后值覆盖前值的误判）
-    mkdir -p "$(dirname "${SYSCTL_CONF}")" 2>/dev/null || true
-    touch "${SYSCTL_CONF}" 2>/dev/null || true
-
-    if grep -qE '^[[:space:]]*net\.ipv4\.ip_forward[[:space:]]*=' "${SYSCTL_CONF}" 2>/dev/null; then
-        sed -i -E 's|^[[:space:]]*net\.ipv4\.ip_forward[[:space:]]*=.*|net.ipv4.ip_forward=1|' "${SYSCTL_CONF}" 2>/dev/null || true
-    else
-        echo "net.ipv4.ip_forward=1" >> "${SYSCTL_CONF}" 2>/dev/null || true
+    if ! systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        if systemctl start "${SERVICE_NAME}" >/dev/null 2>&1; then
+            info "已启动 nftables 服务。"
+            log_action "启动 nftables 服务"
+        else
+            warn "无法启动 nftables 服务，请运行【诊断/自检】查看详情。"
+            return 1
+        fi
     fi
 
-    sysctl -p "${SYSCTL_CONF}" >/dev/null 2>&1 || true
+    return 0
 }
 
-enable_bbr_fq() {
-    # 1) 内核是否支持 bbr
-    modprobe tcp_bbr 2>/dev/null || true
-    if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
-        warn "内核不支持 BBR（tcp_available_congestion_control 中未找到 bbr），已跳过。"
+# 已安装过本工具的服务器升级脚本后，无需再次选择“安装”：
+# 每次进入工具都会补齐 include、IP 转发和 nftables 服务自启。
+repair_startup_state() {
+    command -v nft &>/dev/null || return 0
+    [[ -f "${CONF_FILE}" ]] || return 0
+
+    init_conf || return 0
+    enable_ip_forward
+
+    # 先检查完整的启动配置，避免坏配置导致启动服务时清空现有规则。
+    if ! nft -c -f "${MAIN_CONF}" >/dev/null 2>&1; then
+        warn "检测到 ${MAIN_CONF} 配置校验失败，已跳过自动启动修复。"
+        warn "请运行【诊断/自检】并检查配置文件。"
         return 0
     fi
 
-    # 2) 读取当前配置
-    local cur_cc cur_qd
-    cur_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) || cur_cc=""
+    ensure_nftables_service || return 0
+
+    # 某些系统的服务虽处于 active，但规则可能被其他防火墙刷新。
+    if ! nft list table ip "${TABLE_NAME}" &>/dev/null; then
+        if reload_rules; then
+            info "已恢复端口转发规则。"
+            log_action "启动管理工具时恢复端口转发规则"
+        fi
+    fi
+}
+
+# ============== 主界面运行状态 ==============
+show_runtime_status() {
+    local rule_count=0 ip_fwd="0"
+    local enabled="否" active="否" table_loaded="否"
+
+    if ! command -v nft &>/dev/null; then
+        printf "  \033[33m运行状态：未安装 nftables\033[0m\n"
+        return
+    fi
+
+    load_rules
+    rule_count=${#RULES[@]}
+    ip_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null) || ip_fwd="未知"
+
+    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        enabled="是"
+    fi
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        active="是"
+    fi
+    if nft list table ip "${TABLE_NAME}" &>/dev/null; then
+        table_loaded="是"
+    fi
+
+    if [[ "${active}" == "是" && "${table_loaded}" == "是" && "${ip_fwd}" == "1" ]]; then
+        printf "  \033[32m运行状态：运行中\033[0m（规则: %s，开机自启: %s）\n" \
+            "${rule_count}" "${enabled}"
+  …493 tokens truncated…t.ipv4.tcp_congestion_control 2>/dev/null) || cur_cc=""
     cur_qd=$(sysctl -n net.core.default_qdisc 2>/dev/null) || cur_qd=""
 
     # 3) 判断是否已经开启
@@ -897,6 +938,9 @@ do_add() {
         return
     fi
 
+    # 先确保系统服务已启用；若服务刚启动，它会从持久化配置加载最新规则。
+    ensure_nftables_service || true
+
     if reload_rules; then
         firewall_open_port "$lport" "$dip" "$dport"
         info "转发规则添加成功: ${lport} → ${dip}:${dport}"
@@ -1035,8 +1079,10 @@ main_menu() {
     while true; do
         echo ""
         echo "========================================"
-        echo "   nftables 端口转发管理工具 v1.0"
+        echo "   nftables 端口转发管理工具 v1.2"
         echo "========================================"
+        show_runtime_status
+        echo "----------------------------------------"
         echo "  1) 安装 nftables"
         echo "  2) 查看现有端口转发"
         echo "  3) 新增端口转发"
@@ -1068,4 +1114,6 @@ main_menu() {
 # ============== 入口 ==============
 check_root
 install_shortcut
+repair_startup_state
 main_menu
+
