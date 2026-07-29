@@ -523,7 +523,57 @@ show_runtime_status() {
     if [[ "${active}" == "是" && "${table_loaded}" == "是" && "${ip_fwd}" == "1" ]]; then
         printf "  \033[32m运行状态：运行中\033[0m（规则: %s，开机自启: %s）\n" \
             "${rule_count}" "${enabled}"
-  …493 tokens truncated…t.ipv4.tcp_congestion_control 2>/dev/null) || cur_cc=""
+    else
+        printf "  \033[33m运行状态：异常\033[0m（服务: %s，转发表: %s，IPv4转发: %s，开机自启: %s）\n" \
+            "${active}" "${table_loaded}" "${ip_fwd}" "${enabled}"
+    fi
+}
+
+# ============== 备份配置 ==============
+backup_conf() {
+    if [[ -f "${CONF_FILE}" ]]; then
+        local ts
+        ts=$(date '+%Y%m%d_%H%M%S')
+        cp "${CONF_FILE}" "${BACKUP_DIR}/port-forward.conf.${ts}" 2>/dev/null || true
+    fi
+}
+
+# ============== 开启内核参数：IP 转发 + BBR/fq ==============
+enable_ip_forward() {
+    local current
+    current=$(sysctl -n net.ipv4.ip_forward 2>/dev/null) || current="0"
+    if [[ "$current" != "1" ]]; then
+        if sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1; then
+            info "已开启 IPv4 转发。"
+        else
+            warn "无法开启 IPv4 转发，请手动执行: sysctl -w net.ipv4.ip_forward=1"
+        fi
+    fi
+
+    # 持久化：统一替换所有匹配行为 =1，没有则追加（避免重复项导致后值覆盖前值的误判）
+    mkdir -p "$(dirname "${SYSCTL_CONF}")" 2>/dev/null || true
+    touch "${SYSCTL_CONF}" 2>/dev/null || true
+
+    if grep -qE '^[[:space:]]*net\.ipv4\.ip_forward[[:space:]]*=' "${SYSCTL_CONF}" 2>/dev/null; then
+        sed -i -E 's|^[[:space:]]*net\.ipv4\.ip_forward[[:space:]]*=.*|net.ipv4.ip_forward=1|' "${SYSCTL_CONF}" 2>/dev/null || true
+    else
+        echo "net.ipv4.ip_forward=1" >> "${SYSCTL_CONF}" 2>/dev/null || true
+    fi
+
+    sysctl -p "${SYSCTL_CONF}" >/dev/null 2>&1 || true
+}
+
+enable_bbr_fq() {
+    # 1) 内核是否支持 bbr
+    modprobe tcp_bbr 2>/dev/null || true
+    if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        warn "内核不支持 BBR（tcp_available_congestion_control 中未找到 bbr），已跳过。"
+        return 0
+    fi
+
+    # 2) 读取当前配置
+    local cur_cc cur_qd
+    cur_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) || cur_cc=""
     cur_qd=$(sysctl -n net.core.default_qdisc 2>/dev/null) || cur_qd=""
 
     # 3) 判断是否已经开启
@@ -1116,4 +1166,3 @@ check_root
 install_shortcut
 repair_startup_state
 main_menu
-
