@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.5 [服务端]
+#  多协议代理一键部署脚本 v3.5.6 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.5"
+readonly VERSION="3.5.6"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -7973,6 +7973,24 @@ _sha256_file() {
     fi
 }
 
+# Snell 官方下载站只发布固定 ZIP，没有提供对应的 .sha256 旁车文件。
+# 对脚本支持的固定版本按版本和架构内置校验值，避免把旁车 404 误判为
+# ZIP 下载失败，同时继续拒绝任何内容不匹配的安装包。
+_snell_release_sha256() {
+    local version="$1" arch="$2"
+    case "${version}:${arch}" in
+        4.1.1:amd64)  echo "cc2271b79c7506888b34e651e8741b3aa7fc7d5f60aa65ef8bb096f3313a193b" ;;
+        4.1.1:aarch64) echo "38d4cdc03dcdb3608af8594df83e1795265167fafc5d802f815148908902d758" ;;
+        4.1.1:armv7l)  echo "d00b98ed803be4039f0f0630b810932cd3d3d87ee3e6ed224106fdc63347d8e6" ;;
+        5.0.1:amd64)  echo "9bea1c2b9e35b73b31634856c04d18c393072b9e5dcde6a32781d8b8f908c539" ;;
+        5.0.1:aarch64) echo "2f178bf5ac468ce1a130454efa40a0603fbbe4e47ecc4880a989f4abc7f824cf" ;;
+        5.0.1:armv7l)  echo "14489f3e857569c8835dd3598b7ea6bca5371d4290ac7cf0f6c8dfb3381c1fb2" ;;
+        6.0.0b4:amd64)  echo "d66891cffc9f1b24a7b959ffbd2c4a246013f4f9e612733027b5ad106ce5f87f" ;;
+        6.0.0b4:aarch64) echo "2c957ee6bb37ce4b1df2b6a23e652b75546d10bc4f0443a2928e5834ae0429af" ;;
+        *) return 1 ;;
+    esac
+}
+
 # 使用 GitHub Release API 提供的 digest；旧发布缺少 digest 时尝试其 checksum 资产。
 _verify_github_release_asset() {
     local repo="$1" version="$2" asset_url="$3" file="$4"
@@ -8015,7 +8033,7 @@ _verify_direct_download() {
     local file="$1" url="$2" expected="${3:-}" checksum_file actual
     if [[ -z "$expected" ]]; then
         checksum_file=$(mktemp "${TMPDIR:-/tmp}/vless-direct-checksum.XXXXXX") || return 1
-        if curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "${url}.sha256"; then
+        if curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "${url}.sha256" 2>/dev/null; then
             expected=$(grep -Eo '[0-9a-fA-F]{64}' "$checksum_file" | head -1)
         fi
         rm -f "$checksum_file"
@@ -8025,7 +8043,9 @@ _verify_direct_download() {
         return 1
     fi
     actual=$(_sha256_file "$file")
-    [[ -n "$actual" && "${actual,,}" == "${expected,,}" ]]
+    actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
+    expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+    [[ -n "$actual" && "$actual" == "$expected" ]]
 }
 
 # 拒绝绝对路径和 .. 路径，避免压缩包在临时目录之外写文件。
@@ -10362,12 +10382,14 @@ _snell_alpine_diagnostics() { # _snell_alpine_diagnostics <binary>
 install_snell() {
     check_cmd snell-server && { _ok "Snell 已安装"; return 0; }
     local sarch=$(_map_arch "amd64:aarch64:armv7l") || { _err "不支持的架构"; return 1; }
+    local version="4.1.1" expected_sha="${SNELL_V4_SHA256:-}"
+    [[ -n "$expected_sha" ]] || expected_sha=$(_snell_release_sha256 "$version" "$sarch")
     [[ "$DISTRO" == "alpine" ]] && ensure_snell_alpine_runtime || [[ "$DISTRO" != "alpine" ]] || return 1
     _info "安装 Snell v4..."
     local tmp=$(mktemp -d)
-    local url="https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-${sarch}.zip"
+    local url="https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"
     if curl -fsSLo "$tmp/snell.zip" --connect-timeout 60 -- "$url"; then
-        if ! _verify_direct_download "$tmp/snell.zip" "$url" "${SNELL_V4_SHA256:-}"; then
+        if ! _verify_direct_download "$tmp/snell.zip" "$url" "$expected_sha"; then
             rm -rf "$tmp"
             _err "Snell v4 无法通过 SHA-256 校验，已拒绝安装"
             return 1
@@ -10427,6 +10449,8 @@ install_snell_v5() {
     }
 
     local url="https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"
+    local expected_sha="${SNELL_V5_SHA256:-}"
+    [[ -n "$expected_sha" ]] || expected_sha=$(_snell_release_sha256 "$version" "$sarch" 2>/dev/null || true)
 
     # 使用 -f，HTTP 404/403 时直接判定失败
     if ! curl -fL \
@@ -10441,7 +10465,7 @@ install_snell_v5() {
         return 1
     fi
 
-    if ! _verify_direct_download "$tmp/snell.zip" "$url" "${SNELL_V5_SHA256:-}"; then
+    if ! _verify_direct_download "$tmp/snell.zip" "$url" "$expected_sha"; then
         rm -rf "$tmp"
         _err "Snell v5 无法通过 SHA-256 校验，已拒绝安装"
         return 1
@@ -10524,9 +10548,10 @@ install_snell_v6() {
     [[ "$DISTRO" == "alpine" ]] && ensure_snell_alpine_runtime || [[ "$DISTRO" != "alpine" ]] || return 1
 
     _info "安装 Snell v6 Beta v${version}..."
-    local tmp url staged
+    local tmp url staged expected_sha="${SNELL_V6_SHA256:-}"
     tmp=$(mktemp -d) || return 1
     url="https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"
+    [[ -n "$expected_sha" ]] || expected_sha=$(_snell_release_sha256 "$version" "$sarch" 2>/dev/null || true)
 
     if ! curl -fL --connect-timeout 20 --max-time 120 --retry 3 --retry-delay 2 \
         -o "$tmp/snell.zip" "$url"; then
@@ -10534,7 +10559,7 @@ install_snell_v6() {
         _err "Snell v6 下载失败：$url"
         return 1
     fi
-    if ! _verify_direct_download "$tmp/snell.zip" "$url" "${SNELL_V6_SHA256:-}"; then
+    if ! _verify_direct_download "$tmp/snell.zip" "$url" "$expected_sha"; then
         rm -rf "$tmp"
         _err "Snell v6 无法通过 SHA-256 校验，已拒绝安装"
         return 1
