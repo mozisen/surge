@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.6 [服务端]
+#  多协议代理一键部署脚本 v3.5.7-preview.1 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.6"
+readonly VERSION="3.5.7-preview.1"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -7991,6 +7991,25 @@ _snell_release_sha256() {
     esac
 }
 
+# GitHub 的旧 Release 资产可能没有 digest 字段，发布页也未必提供 checksum
+# 文件。仅为已经核对过的固定资产提供内置校验值；未知资产仍必须由
+# GitHub digest/checksum 验证，否则拒绝安装。
+_pinned_github_asset_sha256() {
+    local repo="$1" version="$2" asset_name="$3"
+    case "${repo}:${version}:${asset_name}" in
+        ihciah/shadow-tls:0.2.25:shadow-tls-x86_64-unknown-linux-musl)
+            echo "a173f5f2d57f45211b68e10ceeddc15b1791077b914fa89747bc705fddc71532"
+            ;;
+        ihciah/shadow-tls:0.2.25:shadow-tls-aarch64-unknown-linux-musl)
+            echo "3295476b37f549a68906519d3eaecb74bf3b6eaf9094cebb16ee84f0151373c6"
+            ;;
+        ihciah/shadow-tls:0.2.25:shadow-tls-armv7-unknown-linux-musleabihf)
+            echo "e6f918a072557c50fd0ea950af9a156a9b102af72c1d010ff85d08d13006c54f"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 # 使用 GitHub Release API 提供的 digest；旧发布缺少 digest 时尝试其 checksum 资产。
 _verify_github_release_asset() {
     local repo="$1" version="$2" asset_url="$3" file="$4"
@@ -7998,35 +8017,42 @@ _verify_github_release_asset() {
     asset_name="${asset_name##*/}"
     local release_json digest expected actual checksum_url checksum_file
 
-    release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
-        "https://api.github.com/repos/${repo}/releases/tags/v${version}" 2>/dev/null) ||
-    release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
-        "https://api.github.com/repos/${repo}/releases/tags/${version}" 2>/dev/null) || return 1
+    # 固定资产不依赖 GitHub API 是否返回 digest，也避免 API 限流导致误报。
+    expected=$(_pinned_github_asset_sha256 "$repo" "$version" "$asset_name" 2>/dev/null || true)
 
-    digest=$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
-        '[.assets[]? | select(.name == $n) | .digest // empty][0] // empty' 2>/dev/null)
-    if [[ "$digest" == sha256:* ]]; then
-        expected="${digest#sha256:}"
-    else
-        checksum_url=$(printf '%s' "$release_json" | jq -r '
-            [.assets[]? | select(.name | test("sha256|checksums?"; "i")) | .browser_download_url][0] // empty
-        ' 2>/dev/null)
-        [[ -n "$checksum_url" ]] || return 1
-        checksum_file=$(mktemp "${TMPDIR:-/tmp}/vless-checksum.XXXXXX") || return 1
-        if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "$checksum_url"; then
+    if [[ -z "$expected" ]]; then
+        release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+            "https://api.github.com/repos/${repo}/releases/tags/v${version}" 2>/dev/null) ||
+        release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+            "https://api.github.com/repos/${repo}/releases/tags/${version}" 2>/dev/null) || return 1
+
+        digest=$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
+            '[.assets[]? | select(.name == $n) | .digest // empty][0] // empty' 2>/dev/null)
+        if [[ "$digest" == sha256:* ]]; then
+            expected="${digest#sha256:}"
+        else
+            checksum_url=$(printf '%s' "$release_json" | jq -r '
+                [.assets[]? | select(.name | test("sha256|checksums?"; "i")) | .browser_download_url][0] // empty
+            ' 2>/dev/null)
+            [[ -n "$checksum_url" ]] || return 1
+            checksum_file=$(mktemp "${TMPDIR:-/tmp}/vless-checksum.XXXXXX") || return 1
+            if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "$checksum_url"; then
+                rm -f "$checksum_file"
+                return 1
+            fi
+            expected=$(awk -v name="$asset_name" '
+                index($0, name) {
+                    for (i=1; i<=NF; i++) if ($i ~ /^[0-9a-fA-F]{64}$/) { print tolower($i); exit }
+                }
+            ' "$checksum_file")
             rm -f "$checksum_file"
-            return 1
         fi
-        expected=$(awk -v name="$asset_name" '
-            index($0, name) {
-                for (i=1; i<=NF; i++) if ($i ~ /^[0-9a-fA-F]{64}$/) { print tolower($i); exit }
-            }
-        ' "$checksum_file")
-        rm -f "$checksum_file"
     fi
 
     actual=$(_sha256_file "$file")
-    [[ -n "$expected" && -n "$actual" && "${actual,,}" == "${expected,,}" ]]
+    actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
+    expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+    [[ -n "$expected" && -n "$actual" && "$actual" == "$expected" ]]
 }
 
 _verify_direct_download() {
