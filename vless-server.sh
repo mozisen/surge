@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.7 [服务端]
+#  多协议代理一键部署脚本 v3.5.8 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.7"
+readonly VERSION="3.5.8"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -4598,6 +4598,41 @@ _has_ca_bundle() {
 }
 
 # 检测并安装基础依赖
+_install_optional_qrencode() {
+    command -v qrencode >/dev/null 2>&1 && return 0
+
+    _info "尝试安装可选依赖 qrencode（用于显示二维码）..."
+    case "$DISTRO" in
+        alpine)
+            # qrencode 位于 Alpine community 仓库；未启用时不能阻断主程序安装。
+            if apk add --no-cache libqrencode-tools >/dev/null 2>&1 || \
+               apk add --no-cache 'cmd:qrencode' >/dev/null 2>&1; then
+                _ok "可选依赖 qrencode 已安装"
+            else
+                _warn "当前 Alpine 软件源无法安装 libqrencode-tools，已跳过二维码工具"
+                _warn "这只影响终端二维码显示，不影响协议安装和服务运行"
+                _warn "启用 community 仓库后可执行: apk add --no-cache libqrencode-tools"
+            fi
+            ;;
+        centos)
+            if yum install -y qrencode >/dev/null 2>&1; then
+                _ok "可选依赖 qrencode 已安装"
+            else
+                _warn "qrencode 安装失败，已跳过；不影响协议安装和服务运行"
+            fi
+            ;;
+        debian|ubuntu)
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y qrencode >/dev/null 2>&1; then
+                _ok "可选依赖 qrencode 已安装"
+            else
+                _warn "qrencode 安装失败，已跳过；不影响协议安装和服务运行"
+            fi
+            ;;
+    esac
+
+    return 0
+}
+
 check_dependencies() {
     # 先配置 DNS64 (如果是纯 IPv6 环境)
     configure_dns64
@@ -4606,7 +4641,7 @@ check_dependencies() {
     local need_install=false
     
     # 必需的基础命令
-    local required_cmds="curl jq openssl qrencode"
+    local required_cmds="curl jq openssl"
     
     for cmd in $required_cmds; do
         if ! command -v "$cmd" &>/dev/null; then
@@ -4632,8 +4667,7 @@ check_dependencies() {
         case "$DISTRO" in
             alpine)
                 apk update >/dev/null 2>&1
-                # Alpine 上 qrencode 命令来自 libqrencode-tools，不是 qrencode 包名
-                local alpine_base_pkgs="curl jq openssl coreutils ca-certificates gawk libqrencode-tools"
+                local alpine_base_pkgs="curl jq openssl coreutils ca-certificates gawk"
                 apk add --no-cache $alpine_base_pkgs >/dev/null 2>&1 || {
                     _err "Alpine 基础依赖安装失败"
                     _warn "请手动执行: apk add --no-cache $alpine_base_pkgs"
@@ -4658,14 +4692,14 @@ check_dependencies() {
                 rc-update add cronie default >/dev/null 2>&1 || rc-update add crond default >/dev/null 2>&1 || true
                 ;;
             centos)
-                yum install -y curl jq openssl ca-certificates qrencode cronie >/dev/null 2>&1
+                yum install -y curl jq openssl ca-certificates cronie >/dev/null 2>&1
                 # 启动 crond 服务
                 systemctl enable crond >/dev/null 2>&1
                 systemctl start crond >/dev/null 2>&1
                 ;;
             debian|ubuntu)
                 apt-get update >/dev/null 2>&1
-                DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq openssl ca-certificates qrencode cron >/dev/null 2>&1
+                DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq openssl ca-certificates cron >/dev/null 2>&1
                 # Debian/Ubuntu 的 cron 通常自动启动,但确保服务运行
                 if command -v systemctl >/dev/null 2>&1; then
                     systemctl enable cron >/dev/null 2>&1
@@ -4694,6 +4728,9 @@ check_dependencies() {
         fi
         _ok "依赖安装完成"
     fi
+
+    # qrencode 只用于终端显示二维码，不应因软件源缺包阻断协议安装。
+    _install_optional_qrencode
     return 0
 }
 
