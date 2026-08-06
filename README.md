@@ -11,6 +11,11 @@ wget -O vless-server.sh https://raw.githubusercontent.com/mozisen/surge/main/vle
 ```bash
 vless
 ```
+![image](https://tc.mozisen.com/i/db7cd00e-62ab-40a8-ab37-06b9dbf8084b.png)
+
+![image](https://tc.mozisen.com/i/29701fc8-b1bb-44a1-996f-afb172199829.png)
+
+
 nft脚本使用方法：
 ```bash
 curl -L https://raw.githubusercontent.com/mozisen/surge/main/nft.sh -o nft.sh  
