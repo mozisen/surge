@@ -28290,6 +28290,10 @@ main_menu() {
         else
             _item "1" "安装协议"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
+            _item "9" "CF Tunnel(Argo)"
+            _item "10" "端口转发"
+            _item "11" "BBR 网络优化"
+            echo -e "  ${D}───────────────────────────────────────────${NC}"
             local script_update_item="检查脚本更新"
             [[ -n "$script_update_ver" ]] && script_update_item="检查脚本更新 ${Y}[有更新 v${script_update_ver}]${NC}"
             _item "12" "$script_update_item"
@@ -28322,6 +28326,9 @@ main_menu() {
         else
             case $choice in
                 1) do_install_server; skip_pause=true ;;
+                9) manage_cloudflare_tunnel; skip_pause=true ;;
+                10) manage_port_forwarding_backends; skip_pause=true ;;
+                11) enable_bbr; skip_pause=true ;;
                 12) do_update ;;
                 0) exit 0 ;;
                 *) _err "无效选择"; skip_pause=true ;;
