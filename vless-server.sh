@@ -28052,7 +28052,7 @@ run_nftables_port_forwarding() {
     echo -e "  ${W}nftables 端口转发${NC}"
     _line
 
-    local script_url="https://raw.githubusercontent.com/mozisen/surge/main/nft.sh"
+    local script_url="https://raw.githubusercontent.com/${SCRIPT_SOURCE_REPO}/${SCRIPT_SOURCE_REF}/nft.sh"
     local script_path="./nft.sh"
     local staged=""
     staged=$(mktemp "${TMPDIR:-/tmp}/nft-forward.XXXXXX") || {
@@ -28072,7 +28072,7 @@ run_nftables_port_forwarding() {
         _err "下载的 nft.sh 为空，已拒绝执行"
         return 1
     fi
-    if ! _verify_github_blob "mozisen/surge" "main" "nft.sh" "$staged"; then
+    if ! _verify_github_blob "$SCRIPT_SOURCE_REPO" "$SCRIPT_SOURCE_REF" "nft.sh" "$staged"; then
         rm -f "$staged"
         _err "nft.sh 与 GitHub 仓库内容校验不一致，已拒绝执行"
         return 1
