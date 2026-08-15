@@ -7233,6 +7233,7 @@ readonly SNELL_DEFAULT_VERSION="5.0.1"
 readonly SNELL_V6_REPO="passeway/Snell"
 # GitHub API/缓存不可用时的安全回退版本；正常情况下动态读取官方最新预发布版。
 readonly SNELL_V6_DEFAULT_VERSION="6.0.0rc"
+readonly SNELL_V6_INSTALLED_VERSION_FILE="$CFG/.snell-v6-installed-version"
 
 # 获取文件修改时间戳（跨平台兼容）
 _get_file_mtime() {
@@ -8421,13 +8422,60 @@ _get_snell_v5_version() {
 }
 
 # Snell v6 版本获取
+_save_snell_v6_installed_version() {
+    local version="$1" tmp=""
+    _is_snell_v6_version "$version" || return 1
+    mkdir -p "$CFG" 2>/dev/null || return 1
+    tmp=$(mktemp "${CFG}/.snell-v6-version.XXXXXX") || return 1
+    if printf '%s\n' "$version" > "$tmp" && chmod 600 "$tmp" &&
+       mv "$tmp" "$SNELL_V6_INSTALLED_VERSION_FILE"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+_snell_v6_base_version() {
+    printf '%s\n' "$1" | sed -E 's/[A-Za-z][A-Za-z0-9._-]*$//'
+}
+
 _get_snell_v6_version() {
-    local version="未知"
+    local version="未知" detected="" saved="" saved_base=""
     if check_cmd snell-server-v6; then
         local output
         output=$(snell-server-v6 --v 2>&1 || snell-server-v6 --version 2>&1 || true)
-        version=$(printf '%s\n' "$output" | head -n 2 | grep -oE '6\.[0-9]+\.[0-9]+([A-Za-z][A-Za-z0-9._-]*)?' | head -n 1)
-        [[ -z "$version" ]] && version="未知"
+        detected=$(printf '%s\n' "$output" | head -n 2 | grep -oE '6\.[0-9]+\.[0-9]+([A-Za-z][A-Za-z0-9._-]*)?' | head -n 1)
+        if ! _is_snell_v6_version "$detected"; then
+            echo "未知"
+            return 0
+        fi
+
+        # RC 二进制的 --v 输出可能只有 6.0.0，因此优先使用安装时保存的完整发布标签。
+        saved=$(head -n 1 "$SNELL_V6_INSTALLED_VERSION_FILE" 2>/dev/null || true)
+        if _is_snell_v6_version "$saved"; then
+            saved_base=$(_snell_v6_base_version "$saved")
+            if [[ "$detected" == "$saved" || "$detected" == "$saved_base" ]]; then
+                echo "$saved"
+                return 0
+            fi
+        fi
+
+        # 兼容热修复前已安装的 RC：用官方通道把二进制报告的基础版本还原为
+        # 完整标签，并立即写入元数据，后续即使发布同基础版本的稳定版也不会误判。
+        local stable_version prerelease_version candidate
+        stable_version=$(_get_snell_v6_stable_version "true" 2>/dev/null || true)
+        prerelease_version=$(_get_snell_v6_prerelease_version "true" 2>/dev/null || true)
+        if _is_snell_v6_version "$stable_version" && [[ "$detected" == "$(_snell_v6_base_version "$stable_version")" ]]; then
+            candidate="$stable_version"
+        elif _is_snell_v6_version "$prerelease_version" && [[ "$detected" == "$(_snell_v6_base_version "$prerelease_version")" ]]; then
+            candidate="$prerelease_version"
+        elif [[ "$detected" == "$(_snell_v6_base_version "$SNELL_V6_DEFAULT_VERSION")" ]]; then
+            candidate="$SNELL_V6_DEFAULT_VERSION"
+        else
+            candidate="$detected"
+        fi
+        _save_snell_v6_installed_version "$candidate" 2>/dev/null || true
+        version="$candidate"
     else
         version="未安装"
     fi
@@ -10798,6 +10846,9 @@ install_snell_v6() {
     rm -rf "$tmp"
 
     [[ -x "$bin" ]] || { _err "Snell v6 安装验证失败"; return 1; }
+    if ! _save_snell_v6_installed_version "$version"; then
+        _warn "Snell v6 已安装，但无法保存完整版本标签；版本显示可能不准确"
+    fi
     _ok "Snell v6 v${version} 已安装"
 }
 
@@ -19716,7 +19767,7 @@ uninstall_specific_protocol() {
         case "$selected_protocol" in
             snell) rm -f "$CFG/snell.conf" ;;
             snell-v5) rm -f "$CFG/snell-v5.conf" ;;
-            snell-v6) rm -f "$CFG/snell-v6.conf" ;;
+            snell-v6) rm -f "$CFG/snell-v6.conf" "$SNELL_V6_INSTALLED_VERSION_FILE" ;;
             snell-shadowtls) rm -f "$CFG/snell-shadowtls.conf" ;;
             snell-v5-shadowtls) rm -f "$CFG/snell-v5-shadowtls.conf" ;;
             ss2022-shadowtls) rm -f "$CFG/ss2022-shadowtls-backend.json" ;;
@@ -20140,7 +20191,7 @@ do_install_server() {
             case "$protocol" in
                 snell) rm -f "$CFG/snell.conf" ;;
                 snell-v5) rm -f "$CFG/snell-v5.conf" ;;
-                snell-v6) rm -f "$CFG/snell-v6.conf" ;;
+                snell-v6) rm -f "$CFG/snell-v6.conf" "$SNELL_V6_INSTALLED_VERSION_FILE" ;;
                 snell-shadowtls) rm -f "$CFG/snell-shadowtls.conf" ;;
                 snell-v5-shadowtls) rm -f "$CFG/snell-v5-shadowtls.conf" ;;
                 ss2022-shadowtls) rm -f "$CFG/ss2022-shadowtls-backend.json" ;;
