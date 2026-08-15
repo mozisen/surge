@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.9 [服务端]
+#  多协议代理一键部署脚本 v3.5.10-preview.1 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.9"
+readonly VERSION="3.5.10-preview.1"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -28047,6 +28047,65 @@ manage_port_forwarding() {
     done
 }
 
+run_nftables_port_forwarding() {
+    _header
+    echo -e "  ${W}nftables 端口转发${NC}"
+    _line
+
+    local script_url="https://raw.githubusercontent.com/mozisen/surge/main/nft.sh"
+    local script_path="./nft.sh"
+    local staged=""
+    staged=$(mktemp "${TMPDIR:-/tmp}/nft-forward.XXXXXX") || {
+        _err "无法创建 nftables 脚本临时文件"
+        return 1
+    }
+
+    _info "下载 nftables 端口转发脚本..."
+    if ! curl -fL --connect-timeout 10 --max-time 120 --retry 2 \
+        "$script_url" -o "$staged"; then
+        rm -f "$staged"
+        _err "nft.sh 下载失败"
+        return 1
+    fi
+    if [[ ! -s "$staged" ]]; then
+        rm -f "$staged"
+        _err "下载的 nft.sh 为空，已拒绝执行"
+        return 1
+    fi
+    if ! _verify_github_blob "mozisen/surge" "main" "nft.sh" "$staged"; then
+        rm -f "$staged"
+        _err "nft.sh 与 GitHub 仓库内容校验不一致，已拒绝执行"
+        return 1
+    fi
+    if ! mv -f "$staged" "$script_path" || ! chmod +x "$script_path"; then
+        rm -f "$staged"
+        _err "nft.sh 保存或授权失败"
+        return 1
+    fi
+
+    _ok "nft.sh 下载并校验完成"
+    "$script_path"
+}
+
+manage_port_forwarding_backends() {
+    while true; do
+        _header
+        echo -e "  ${W}端口转发${NC}"
+        _line
+        _item "1" "Realm 转发"
+        _item "2" "nftables 转发"
+        _item "0" "返回"
+        _line
+        read -rp "  请选择: " choice
+        case "$choice" in
+            1) manage_port_forwarding ;;
+            2) run_nftables_port_forwarding; _pause ;;
+            0) return ;;
+            *) _err "无效选择" ;;
+        esac
+    done
+}
+
 #═══════════════════════════════════════════════════════════════════════════════
 # 脚本更新与主入口
 #═══════════════════════════════════════════════════════════════════════════════
@@ -28252,7 +28311,7 @@ main_menu() {
                 7) manage_protocol_services; skip_pause=true ;;
                 8) manage_routing; skip_pause=true ;;
                 9) manage_cloudflare_tunnel; skip_pause=true ;;
-                10) manage_port_forwarding; skip_pause=true ;;
+                10) manage_port_forwarding_backends; skip_pause=true ;;
                 11) enable_bbr; skip_pause=true ;;
                 12) show_logs; skip_pause=true ;;
                 13) do_update ;;
