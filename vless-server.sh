@@ -7846,21 +7846,81 @@ _get_latest_prerelease_version() {
     echo "$version"
 }
 
-# 获取 Snell v6 官方最新预发布版本；网络失败时依次回退旧缓存和固定版本。
+_is_snell_v6_version() {
+    [[ "$1" =~ ^6\.[0-9]+\.[0-9]+([A-Za-z][A-Za-z0-9._-]*)?$ ]]
+}
+
+# 一次请求同时缓存 Snell v6 稳定版和预发布版。必须限定 v6 标签，避免把同一
+# 仓库中的 Snell v5 稳定版误认为 v6 推荐版本。
+_refresh_snell_v6_version_cache() {
+    local result stable_version prerelease_version
+    local stable_cache="$VERSION_CACHE_DIR/passeway_Snell_v6_stable"
+    local prerelease_cache="$VERSION_CACHE_DIR/passeway_Snell_v6_prerelease"
+
+    _init_version_cache
+    result=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+        "https://api.github.com/repos/${SNELL_V6_REPO}/releases?per_page=${GITHUB_API_PER_PAGE}" 2>/dev/null) || return 1
+    printf '%s' "$result" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+
+    stable_version=$(printf '%s' "$result" | jq -r '
+        [.[] | select(.draft == false and .prerelease == false and (.tag_name | test("^v?6\\.")))][0].tag_name // empty
+    ' 2>/dev/null | sed 's/^v//' | head -n 1)
+    prerelease_version=$(printf '%s' "$result" | jq -r '
+        [.[] | select(.draft == false and .prerelease == true and (.tag_name | test("^v?6\\.")))][0].tag_name // empty
+    ' 2>/dev/null | sed 's/^v//' | head -n 1)
+
+    _is_snell_v6_version "$stable_version" || stable_version="无"
+    _is_snell_v6_version "$prerelease_version" || prerelease_version="无"
+    printf '%s\n' "$stable_version" > "$stable_cache" 2>/dev/null || true
+    printf '%s\n' "$prerelease_version" > "$prerelease_cache" 2>/dev/null || true
+}
+
+_get_snell_v6_channel_version() {
+    local channel="$1" use_cache="${2:-true}" force="${3:-false}"
+    local cache_file=""
+    case "$channel" in
+        stable) cache_file="$VERSION_CACHE_DIR/passeway_Snell_v6_stable" ;;
+        prerelease) cache_file="$VERSION_CACHE_DIR/passeway_Snell_v6_prerelease" ;;
+        *) return 1 ;;
+    esac
+
+    _init_version_cache
+    if [[ "$force" != "true" && "$use_cache" == "true" ]] && _is_cache_fresh "$cache_file"; then
+        cat "$cache_file" 2>/dev/null
+        return 0
+    fi
+    if _refresh_snell_v6_version_cache; then
+        cat "$cache_file" 2>/dev/null
+        return 0
+    fi
+    # 网络失败时允许使用过期缓存；没有缓存则由推荐版本函数使用固定 RC 回退。
+    [[ -f "$cache_file" ]] && cat "$cache_file" 2>/dev/null
+}
+
+_get_snell_v6_stable_version() {
+    _get_snell_v6_channel_version stable "${1:-true}" "${2:-false}"
+}
+
+_get_snell_v6_prerelease_version() {
+    _get_snell_v6_channel_version prerelease "${1:-true}" "${2:-false}"
+}
+
+# 推荐版本优先使用 v6 稳定版；尚无 v6 稳定版时才使用预发布版和固定回退。
 _get_snell_v6_latest_version() {
-    local use_cache="${1:-true}"
-    local force="${2:-false}"
-    local version=""
+    local use_cache="${1:-true}" force="${2:-false}"
+    local stable_version prerelease_version
 
-    version=$(_get_latest_prerelease_version "$SNELL_V6_REPO" "$use_cache" "$force" 2>/dev/null)
-    if [[ ! "$version" =~ ^6\.[0-9]+\.[0-9]+([A-Za-z][A-Za-z0-9._-]*)?$ ]]; then
-        version=$(_force_get_cached_prerelease_version "$SNELL_V6_REPO" 2>/dev/null || true)
+    stable_version=$(_get_snell_v6_stable_version "$use_cache" "$force" 2>/dev/null || true)
+    if _is_snell_v6_version "$stable_version"; then
+        echo "$stable_version"
+        return 0
     fi
-    if [[ ! "$version" =~ ^6\.[0-9]+\.[0-9]+([A-Za-z][A-Za-z0-9._-]*)?$ ]]; then
-        version="$SNELL_V6_DEFAULT_VERSION"
+    prerelease_version=$(_get_snell_v6_prerelease_version "$use_cache" "$force" 2>/dev/null || true)
+    if _is_snell_v6_version "$prerelease_version"; then
+        echo "$prerelease_version"
+    else
+        echo "$SNELL_V6_DEFAULT_VERSION"
     fi
-
-    echo "$version"
 }
 
 # 获取最近版本列表
@@ -8773,7 +8833,7 @@ _update_core_versions_async() {
             _get_latest_prerelease_version "XTLS/Xray-core" "false" >/dev/null 2>&1
             _get_latest_prerelease_version "SagerNet/sing-box" "false" >/dev/null 2>&1
             _get_latest_prerelease_version "surge-networks/snell" "false" >/dev/null 2>&1
-            _get_latest_prerelease_version "$SNELL_V6_REPO" "false" >/dev/null 2>&1
+            _refresh_snell_v6_version_cache >/dev/null 2>&1
         ) &
     ) &
 }
@@ -8786,7 +8846,7 @@ _refresh_core_versions_now() {
     _get_latest_prerelease_version "SagerNet/sing-box" "false" "true" >/dev/null 2>&1
     _get_latest_version "surge-networks/snell" "false" "true" >/dev/null 2>&1
     _get_latest_prerelease_version "surge-networks/snell" "false" "true" >/dev/null 2>&1
-    _get_latest_prerelease_version "$SNELL_V6_REPO" "false" "true" >/dev/null 2>&1
+    _refresh_snell_v6_version_cache >/dev/null 2>&1
     local xray_current singbox_current
     xray_current=$(_get_core_version "xray")
     singbox_current=$(_get_core_version "sing-box")
@@ -8964,14 +9024,16 @@ _show_core_versions() {
         fi
     fi
 
-    # 显示 Snell v6 版本信息（官方预发布通道）
+    # 显示 Snell v6 稳定版和预发布版；推荐版本优先稳定版。
     if [[ "$filter" == "all" ]] || [[ "$filter" == "snellv6" ]]; then
         [[ "$filter" == "all" ]] && echo ""
-        local snell_v6_current snell_v6_latest
+        local snell_v6_current snell_v6_stable snell_v6_prerelease snell_v6_latest
         snell_v6_current=$(_get_snell_v6_version)
+        snell_v6_stable=$(_get_snell_v6_stable_version "true")
+        snell_v6_prerelease=$(_get_snell_v6_prerelease_version "true")
         snell_v6_latest=$(_get_snell_v6_latest_version "true")
 
-        echo -e "  ${W}Snell v6 ${D}(预发布)${NC}"
+        echo -e "  ${W}Snell v6${NC}"
         if [[ "$snell_v6_current" == "未安装" ]]; then
             echo -e "    ${W}当前版本:${NC} ${D}${snell_v6_current}${NC}"
         elif [[ "$snell_v6_current" == "未知" ]]; then
@@ -8981,7 +9043,19 @@ _show_core_versions() {
             [[ "$snell_v6_current" != "$snell_v6_latest" ]] && snell_v6_status=" ${Y}[可更新]${NC}"
             echo -e "    ${W}当前版本:${NC} ${G}v${snell_v6_current}${NC}${snell_v6_status}"
         fi
-        echo -e "    ${W}推荐版本:${NC} ${M}v${snell_v6_latest}${NC} ${D}(官方预发布版)${NC}"
+        if _is_snell_v6_version "$snell_v6_stable"; then
+            echo -e "    ${W}稳定版本:${NC} ${C}v${snell_v6_stable}${NC}"
+        else
+            echo -e "    ${W}稳定版本:${NC} ${D}无${NC}"
+        fi
+        if _is_snell_v6_version "$snell_v6_prerelease"; then
+            echo -e "    ${W}预发布版本:${NC} ${M}v${snell_v6_prerelease}${NC}"
+        else
+            echo -e "    ${W}预发布版本:${NC} ${D}无${NC}"
+        fi
+        local snell_v6_channel_label="预发布版"
+        [[ "$snell_v6_latest" == "$snell_v6_stable" ]] && snell_v6_channel_label="稳定版"
+        echo -e "    ${W}推荐版本:${NC} ${G}v${snell_v6_latest}${NC} ${D}(${snell_v6_channel_label})${NC}"
     fi
 
     # 启动后台异步更新（为下次访问准备）
@@ -9000,9 +9074,7 @@ _show_core_versions() {
         _update_prerelease_cache_async "surge-networks/snell"
     fi
 
-    if [[ "$filter" == "all" ]] || [[ "$filter" == "snellv6" ]]; then
-        _update_prerelease_cache_async "$SNELL_V6_REPO"
-    fi
+    # Snell v6 已在上方一次请求同时更新两个通道，无需分别重复请求。
 }
 
 update_xray_core() {
@@ -9164,8 +9236,10 @@ update_snell_v5_core() {
 update_snell_v6_core() {
     local version="${1:-}"
     [[ -z "$version" ]] && version=$(_get_snell_v6_latest_version "true")
+    local channel="prerelease"
+    [[ "$version" =~ ^6\.[0-9]+\.[0-9]+$ ]] && channel="stable"
     _check_core_update_deps || return 1
-    _confirm_core_update_version "Snell v6" "prerelease" "$version" || return 1
+    _confirm_core_update_version "Snell v6" "$channel" "$version" || return 1
 
     if [[ ! "$version" =~ ^6\.[0-9]+\.[0-9]+([A-Za-z][A-Za-z0-9._-]*)?$ ]]; then
         _err "无效的 Snell v6 版本号：$version"
@@ -9312,21 +9386,41 @@ _update_core_with_channel_select() {
     fi
 
     if [[ "$core_name" == "Snell v6" ]]; then
-        local snell_v6_recommended
+        local snell_v6_stable snell_v6_prerelease snell_v6_recommended
+        snell_v6_stable=$(_get_snell_v6_stable_version "true")
+        snell_v6_prerelease=$(_get_snell_v6_prerelease_version "true")
         snell_v6_recommended=$(_get_snell_v6_latest_version "true")
         _header
         echo -e "  ${W}${core_name} 版本选择${NC}"
         _line
         echo -e "  ${W}当前版本:${NC} ${G}${current_ver}${NC}"
         echo ""
-        _item "1" "推荐预发布版 (v${snell_v6_recommended})"
-        _item "2" "指定版本"
+        if _is_snell_v6_version "$snell_v6_stable"; then
+            _item "1" "稳定版 (v${snell_v6_stable}) ${G}[推荐]${NC}"
+        else
+            _item "1" "稳定版 ${D}(暂无 v6 稳定版)${NC}"
+        fi
+        if _is_snell_v6_version "$snell_v6_prerelease"; then
+            local prerelease_recommended=""
+            [[ "$snell_v6_recommended" == "$snell_v6_prerelease" ]] && prerelease_recommended=" ${G}[推荐]${NC}"
+            _item "2" "预发布版 (v${snell_v6_prerelease})${prerelease_recommended}"
+        else
+            _item "2" "预发布版 ${D}(暂不可获取)${NC}"
+        fi
+        _item "3" "指定版本"
         _item "0" "返回"
         _line
         read -rp "  请选择: " channel_choice
         case "$channel_choice" in
-            1) update_snell_v6_core "$snell_v6_recommended" ;;
-            2) update_snell_v6_core_custom ;;
+            1)
+                _is_snell_v6_version "$snell_v6_stable" || { _warn "当前没有可用的 Snell v6 稳定版"; return 1; }
+                update_snell_v6_core "$snell_v6_stable"
+                ;;
+            2)
+                _is_snell_v6_version "$snell_v6_prerelease" || { _warn "当前无法获取 Snell v6 预发布版"; return 1; }
+                update_snell_v6_core "$snell_v6_prerelease"
+                ;;
+            3) update_snell_v6_core_custom ;;
             0) return 0 ;;
             *) _err "无效选择"; return 1 ;;
         esac
@@ -10634,7 +10728,7 @@ install_snell_v5() {
     return 0
 }
 
-# 安装/更新 Snell v6（官方预发布版）
+# 安装/更新 Snell v6（稳定版优先，无稳定版时使用官方预发布版）
 # 不传版本且二进制可用时复用现有安装；显式传入版本时强制覆盖，用于核心更新。
 install_snell_v6() {
     local requested_version="${1:-}"
@@ -10661,7 +10755,9 @@ install_snell_v6() {
 
     [[ "$DISTRO" == "alpine" ]] && ensure_snell_alpine_runtime || [[ "$DISTRO" != "alpine" ]] || return 1
 
-    _info "安装 Snell v6 预发布版 v${version}..."
+    local release_label="预发布版"
+    [[ "$version" =~ ^6\.[0-9]+\.[0-9]+$ ]] && release_label="稳定版"
+    _info "安装 Snell v6 ${release_label} v${version}..."
     local tmp url staged expected_sha="${SNELL_V6_SHA256:-}"
     tmp=$(mktemp -d) || return 1
     url="https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"
@@ -19934,7 +20030,7 @@ select_protocol() {
     _line
     _item "10" "Snell v4"
     _item "11" "Snell v5"
-    _item "12" "Snell v6 ${D}(预发布)${NC}"
+    _item "12" "Snell v6"
     _line
     echo -e "  ${W}其他协议${NC}"
     _line
