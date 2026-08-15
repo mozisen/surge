@@ -30,6 +30,11 @@ info()    { printf '\033[32m[信息]\033[0m %s\n' "$1"; }
 warn()    { printf '\033[33m[警告]\033[0m %s\n' "$1"; }
 err()     { printf '\033[31m[错误]\033[0m %s\n' "$1"; }
 
+pause_menu() {
+    echo ""
+    read -rp "按回车返回主菜单..." _ || true
+}
+
 # ============== root 权限检查 ==============
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -1145,7 +1150,11 @@ main_menu() {
 
         case "$choice" in
             1) do_install ;;
-            2) do_list ;;
+            2)
+                do_list
+                # 列表是纯输出操作；等待确认，避免主菜单立即重绘造成“无反应”的错觉。
+                pause_menu
+                ;;
             3) do_add ;;
             4) do_delete ;;
             5) do_clear_all ;;
