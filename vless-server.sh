@@ -2120,7 +2120,18 @@ tg_user_bot_handle_update() {
                 tg_user_bot_bind_chat "$chat_id" "$tg_username" "$args"
             fi
             ;;
-        /traffic|/status)
+        /traffic)
+            # 查询前先抓取核心中的增量。即使某台机器的 cron 曾异常，用户也能
+            # 获得最新数据；同步锁会阻止与定时任务并发 reset。
+            sync_all_user_traffic "true" >/dev/null 2>&1 || true
+            local report
+            if report=$(tg_get_user_report_by_chat "$chat_id"); then
+                tg_send_chat_message "$chat_id" "$report"
+            else
+                tg_send_chat_message "$chat_id" "尚未绑定代理账号。请发送 /bind 绑定码。"
+            fi
+            ;;
+        /status)
             local report
             if report=$(tg_get_user_report_by_chat "$chat_id"); then
                 tg_send_chat_message "$chat_id" "$report"
@@ -2368,6 +2379,7 @@ readonly TRAFFIC_INTERVAL_FILE="$CFG/traffic_interval"
 readonly TRAFFIC_MONTHLY_RESET_ENABLED_FILE="$CFG/traffic_monthly_reset_enabled"
 readonly TRAFFIC_MONTHLY_RESET_DAY_FILE="$CFG/traffic_monthly_reset_day"
 readonly TRAFFIC_MONTHLY_RESET_LAST_FILE="$CFG/traffic_monthly_reset_last"
+readonly TRAFFIC_SYNC_LOCK_DIR="$CFG/.traffic-sync.lock"
 
 # 查询 Xray Stats API
 # 用法: xray_api_query "user>>>user1@vless>>>traffic>>>downlink"
@@ -2568,9 +2580,20 @@ get_user_traffic() {
     echo $((uplink + downlink))
 }
 
-# 同步所有用户流量到数据库
-# 用法: sync_all_user_traffic [reset]
-sync_all_user_traffic() {
+# 记录同步结果，便于界面和 cron 日志判断任务是否真正执行。
+mark_traffic_sync_result() {
+    local status="$1" updated="${2:-0}" sync_time
+    sync_time=$(date '+%Y-%m-%d %H:%M:%S')
+    _db_apply --arg t "$sync_time" --arg s "$status" --argjson n "$updated" \
+        '.meta.last_traffic_sync_attempt = $t |
+         .meta.last_traffic_sync_status = $s |
+         .meta.last_traffic_sync_updates = $n |
+         if $s == "ok" then .meta.last_traffic_sync = $t else . end' || true
+}
+
+# 同步实现。外层 sync_all_user_traffic() 负责加锁，避免 cron 与 TG 查询同时
+# 使用 -reset 读取核心计数器而造成流量遗漏。
+_sync_all_user_traffic_unlocked() {
     local reset="${1:-true}"  # 默认重置计数器
     
     [[ ! -f "$DB_FILE" ]] && return 1
@@ -2588,12 +2611,13 @@ sync_all_user_traffic() {
     _pgrep sing-box && has_singbox=true
 
     if [[ "$has_xray" == "false" && "$has_singbox" == "false" ]]; then
+        mark_traffic_sync_result "no_core" 0
         return 0
     fi
     
     # 使用临时文件存储 API 结果，避免内存问题
-    local tmp_stats=$(mktemp)
-    trap "rm -f '$tmp_stats'" RETURN
+    local tmp_stats
+    tmp_stats=$(mktemp) || { mark_traffic_sync_result "temp_error" 0; return 1; }
     : > "$tmp_stats"
     
     # 一次性获取所有流量统计（带重置选项）
@@ -2613,7 +2637,7 @@ sync_all_user_traffic() {
         fi
     fi
     
-    [[ ! -s "$tmp_stats" ]] && { rm -f "$tmp_stats"; return 0; }
+    [[ ! -s "$tmp_stats" ]] && { rm -f "$tmp_stats"; mark_traffic_sync_result "no_stats" 0; return 0; }
     
     local updated=0
     local need_reload=false  # 标记是否需要重载 Xray 配置
@@ -2738,10 +2762,36 @@ sync_all_user_traffic() {
         svc restart vless-reality 2>/dev/null
     fi
 
-    local traffic_sync_time
-    traffic_sync_time=$(date '+%Y-%m-%d %H:%M:%S')
-    _db_apply --arg t "$traffic_sync_time" '.meta.last_traffic_sync = $t' || true
+    mark_traffic_sync_result "ok" "$updated"
     
+    return 0
+}
+
+# 同步所有用户流量到数据库
+# 用法: sync_all_user_traffic [reset]
+sync_all_user_traffic() {
+    local reset="${1:-true}" owner attempt rc
+
+    for attempt in {1..10}; do
+        if mkdir "$TRAFFIC_SYNC_LOCK_DIR" 2>/dev/null; then
+            printf '%s\n' "$$" > "$TRAFFIC_SYNC_LOCK_DIR/pid"
+            _sync_all_user_traffic_unlocked "$reset"
+            rc=$?
+            rm -f "$TRAFFIC_SYNC_LOCK_DIR/pid" 2>/dev/null
+            rmdir "$TRAFFIC_SYNC_LOCK_DIR" 2>/dev/null || true
+            return "$rc"
+        fi
+
+        owner=$(cat "$TRAFFIC_SYNC_LOCK_DIR/pid" 2>/dev/null || true)
+        if [[ -n "$owner" && "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -f "$TRAFFIC_SYNC_LOCK_DIR/pid" 2>/dev/null
+            rmdir "$TRAFFIC_SYNC_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        sleep 1
+    done
+
+    # 另一个同步任务仍在运行；它完成后数据库即为最新，避免再次 reset。
     return 0
 }
 
@@ -2845,10 +2895,55 @@ get_bash_interpreter() {
 
 build_cron_command() {
     local schedule="$1" script_path="$2" subcommand="$3" log_file="$4"
-    local bash_path
+    local bash_path env_path
     bash_path=$(get_bash_interpreter)
+    env_path=$(command -v env 2>/dev/null || true)
+    [[ -x "$env_path" ]] || env_path="/usr/bin/env"
     [[ -z "$bash_path" ]] && return 1
-    printf '%s %q %q %s >> %q 2>&1' "$schedule" "$bash_path" "$script_path" "$subcommand" "$log_file"
+    printf '%s %q PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin %q %q %s >> %q 2>&1' \
+        "$schedule" "$env_path" "$bash_path" "$script_path" "$subcommand" "$log_file"
+}
+
+traffic_cron_entry_exists() {
+    command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'sync-traffic'
+}
+
+tg_user_bot_cron_entry_exists() {
+    command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'tg-user-bot'
+}
+
+cron_service_is_active() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet cron 2>/dev/null && return 0
+        systemctl is-active --quiet crond 2>/dev/null && return 0
+    fi
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service cronie status >/dev/null 2>&1 && return 0
+        rc-service crond status >/dev/null 2>&1 && return 0
+    fi
+    _pgrep crond && return 0
+    _pgrep cron && return 0
+    return 1
+}
+
+ensure_cron_service_running() {
+    cron_service_is_active && return 0
+
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-update add cronie default >/dev/null 2>&1 || rc-update add crond default >/dev/null 2>&1 || true
+        rc-service cronie start >/dev/null 2>&1 || rc-service crond start >/dev/null 2>&1 || true
+    fi
+    if ! cron_service_is_active && command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now cron >/dev/null 2>&1 || systemctl enable --now crond >/dev/null 2>&1 || true
+    fi
+    if ! cron_service_is_active && command -v service >/dev/null 2>&1; then
+        service cron start >/dev/null 2>&1 || service crond start >/dev/null 2>&1 || true
+    fi
+    if ! cron_service_is_active && command -v crond >/dev/null 2>&1; then
+        crond >/dev/null 2>&1 || true
+    fi
+
+    cron_service_is_active
 }
 
 install_cron_entry() {
@@ -2876,6 +2971,7 @@ remove_cron_entry() {
 # 创建流量统计定时任务
 setup_traffic_cron() {
     local interval="${1:-$(get_traffic_interval)}"
+    local silent="${2:-false}"
     local script_path="/usr/local/bin/vless-server.sh"
     [[ -x "$script_path" ]] || script_path=$(readlink -f "$0")
     local bash_path log_file cron_cmd
@@ -2885,20 +2981,17 @@ setup_traffic_cron() {
     log_file="$CFG/traffic-sync.log"
     cron_cmd="$(build_cron_command "*/$interval * * * *" "$script_path" "--sync-traffic" "$log_file") # sync-traffic"
 
-    # 确保 cron 服务已启动
-    if [[ "$DISTRO" == "alpine" ]]; then
-        rc-service cronie start >/dev/null 2>&1 || rc-service crond start >/dev/null 2>&1 || true
-        rc-update add cronie default >/dev/null 2>&1 || rc-update add crond default >/dev/null 2>&1 || true
-    elif command -v systemctl >/dev/null 2>&1; then
-        systemctl enable cron >/dev/null 2>&1 || systemctl enable crond >/dev/null 2>&1 || true
-        systemctl start cron >/dev/null 2>&1 || systemctl start crond >/dev/null 2>&1 || true
-    fi
-
     if install_cron_entry "sync-traffic" "$cron_cmd"; then
         set_traffic_interval "$interval"
-        _ok "已添加流量统计定时任务 (每${interval}分钟)"
-        echo -e "  ${D}日志: $log_file${NC}"
-        echo -e "  ${D}解释器: $bash_path${NC}"
+        if ! ensure_cron_service_running; then
+            [[ "$silent" == "true" ]] || _err "定时规则已写入，但 cron 服务未运行"
+            return 1
+        fi
+        if [[ "$silent" != "true" ]]; then
+            _ok "已添加流量统计定时任务 (每${interval}分钟)"
+            echo -e "  ${D}日志: $log_file${NC}"
+            echo -e "  ${D}解释器: $bash_path${NC}"
+        fi
     else
         _err "流量统计定时任务写入失败"
         echo -e "  ${Y}提示: 可手动执行 ${C}$script_path --sync-traffic${NC} 查看报错${NC}"
@@ -2913,6 +3006,7 @@ remove_traffic_cron() {
 }
 
 setup_tg_user_bot_cron() {
+    local silent="${1:-false}"
     local script_path="/usr/local/bin/vless-server.sh"
     [[ -x "$script_path" ]] || script_path=$(readlink -f "$0")
     local bash_path log_file cron_cmd
@@ -2922,17 +3016,15 @@ setup_tg_user_bot_cron() {
     log_file="$CFG/tg-user-bot.log"
     cron_cmd="$(build_cron_command "* * * * *" "$script_path" "--tg-bot-poll" "$log_file") # tg-user-bot"
 
-    if [[ "$DISTRO" == "alpine" ]]; then
-        rc-service cronie start >/dev/null 2>&1 || rc-service crond start >/dev/null 2>&1 || true
-        rc-update add cronie default >/dev/null 2>&1 || rc-update add crond default >/dev/null 2>&1 || true
-    elif command -v systemctl >/dev/null 2>&1; then
-        systemctl enable cron >/dev/null 2>&1 || systemctl enable crond >/dev/null 2>&1 || true
-        systemctl start cron >/dev/null 2>&1 || systemctl start crond >/dev/null 2>&1 || true
-    fi
-
     if install_cron_entry "tg-user-bot" "$cron_cmd"; then
-        _ok "用户机器人轮询已启用（最长约 1 分钟响应）"
-        echo -e "  ${D}日志: $log_file${NC}"
+        if ! ensure_cron_service_running; then
+            [[ "$silent" == "true" ]] || _err "机器人规则已写入，但 cron 服务未运行"
+            return 1
+        fi
+        if [[ "$silent" != "true" ]]; then
+            _ok "用户机器人轮询已启用（最长约 1 分钟响应）"
+            echo -e "  ${D}日志: $log_file${NC}"
+        fi
         return 0
     fi
     _err "用户机器人定时任务写入失败"
@@ -2941,6 +3033,18 @@ setup_tg_user_bot_cron() {
 
 remove_tg_user_bot_cron() {
     remove_cron_entry "tg-user-bot"
+}
+
+# 升级旧预览版后自动重写 cron 命令（补齐 PATH）并修复守护进程。
+repair_scheduled_jobs() {
+    if traffic_cron_entry_exists; then
+        setup_traffic_cron "$(get_traffic_interval)" "true" || \
+            _log "WARN" "流量同步定时任务自动修复失败"
+    fi
+    if [[ "$(tg_get_config "user_bot_enabled")" == "true" ]]; then
+        setup_tg_user_bot_cron "true" || \
+            _log "WARN" "TG 用户机器人定时任务自动修复失败"
+    fi
 }
 
 get_traffic_monthly_reset_enabled() {
@@ -27453,7 +27557,13 @@ _configure_tg_user_bot() {
         bot_status="${R}○ 未启用${NC}"
         [[ "$enabled" == "true" ]] && bot_status="${G}● 已启用${NC}"
         cron_status="${R}○ 未运行${NC}"
-        crontab -l 2>/dev/null | grep -q "tg-user-bot" && cron_status="${G}● 每分钟轮询${NC}"
+        if tg_user_bot_cron_entry_exists; then
+            if cron_service_is_active; then
+                cron_status="${G}● 每分钟轮询${NC}"
+            else
+                cron_status="${Y}● 规则存在，但 cron 未运行${NC}"
+            fi
+        fi
         binding_count=$(db_list_tg_user_bindings | awk 'NF{n++} END{print n+0}')
 
         _header
@@ -27993,8 +28103,12 @@ _configure_traffic_stats() {
         # 检查定时任务状态
         local cron_status="${R}○ 未启用${NC}"
         local current_interval=$(get_traffic_interval)
-        if crontab -l 2>/dev/null | grep -q "sync-traffic"; then
-            cron_status="${G}● 已启用 (每${current_interval}分钟)${NC}"
+        if traffic_cron_entry_exists; then
+            if cron_service_is_active; then
+                cron_status="${G}● 已启用 (每${current_interval}分钟)${NC}"
+            else
+                cron_status="${Y}● 规则存在，但 cron 未运行${NC}"
+            fi
         fi
         
         local notify_percent=$(tg_get_config "notify_quota_percent")
@@ -28006,6 +28120,17 @@ _configure_traffic_stats() {
         
         echo -e "  自动同步: $cron_status"
         echo -e "  检测间隔: ${G}${current_interval} 分钟${NC}"
+        local last_sync sync_result sync_result_text
+        last_sync=$(jq -r '.meta.last_traffic_sync_attempt // .meta.last_traffic_sync // "尚未同步"' "$DB_FILE" 2>/dev/null)
+        sync_result=$(jq -r '.meta.last_traffic_sync_status // "unknown"' "$DB_FILE" 2>/dev/null)
+        case "$sync_result" in
+            ok) sync_result_text="正常" ;;
+            no_core) sync_result_text="核心未运行" ;;
+            no_stats) sync_result_text="未读取到统计" ;;
+            temp_error) sync_result_text="临时文件错误" ;;
+            *) sync_result_text="暂无状态" ;;
+        esac
+        echo -e "  最后执行: ${G}${last_sync}${NC} (${sync_result_text})"
         echo -e "  告警阈值: ${G}${notify_percent}%${NC}"
         echo -e "  月重置流量: ${monthly_reset_status}"
         _line
@@ -28929,6 +29054,9 @@ main_menu() {
     # 自动更新系统脚本 (确保 vless 命令始终是最新版本)
     _auto_update_system_script
 
+    # 兼容旧定时规则：补齐 cron PATH，并确认守护进程确实运行。
+    repair_scheduled_jobs
+
     # 初始化版本缓存目录
     _init_version_cache
 
@@ -29070,8 +29198,15 @@ case "${1:-}" in
         # 静默模式：用于定时任务
         check_root
         init_db
-        sync_all_user_traffic "true"
-        exit 0
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始同步流量数据"
+        if sync_all_user_traffic "true"; then
+            sync_status=$(jq -r '.meta.last_traffic_sync_status // "unknown"' "$DB_FILE" 2>/dev/null)
+            sync_updates=$(jq -r '.meta.last_traffic_sync_updates // 0' "$DB_FILE" 2>/dev/null)
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 同步结束: status=${sync_status}, updates=${sync_updates}"
+            exit 0
+        fi
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 同步失败" >&2
+        exit 1
         ;;
     --show-traffic)
         # 显示流量统计
