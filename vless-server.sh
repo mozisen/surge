@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.11 [服务端]
+#  多协议代理一键部署脚本 v3.5.12 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.11"
+readonly VERSION="3.5.12"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -6620,10 +6620,25 @@ gen_ss_legacy_link() {
 
 gen_snell_link() {
     local ip="$1" port="$2" psk="$3" version="${4:-4}" country="${5:-}"
+    local mode="${6:-}"
     local ip_suffix=$(get_ip_suffix "$ip")
     local name="${country:+${country}-}Snell-v${version}${ip_suffix:+-${ip_suffix}}"
     # Snell 没有标准URI格式，使用自定义格式
-    printf '%s\n' "snell://${psk}@${ip}:${port}?version=${version}#${name}"
+    local query="version=${version}"
+    if [[ "$version" == "6" ]]; then
+        mode="${mode:-default}"
+        query+="&mode=${mode}"
+    fi
+    printf '%s\n' "snell://${psk}@${ip}:${port}?${query}#${name}"
+}
+
+# 生成 Surge Snell 节点行。Snell v6 的 mode 属于协议握手参数，必须与
+# 服务端配置完全一致；v4/v5 不输出该字段。
+gen_snell_surge_line() {
+    local name="$1" ip="$2" port="$3" psk="$4" version="${5:-4}"
+    local mode="${6:-default}" tfo="${7:-true}" mode_arg=""
+    [[ "$version" == "6" ]] && mode_arg=", mode=${mode}"
+    printf '%s\n' "${name} = snell, ${ip}, ${port}, psk=${psk}, version=${version}${mode_arg}, reuse=true, tfo=${tfo}"
 }
 
 gen_tuic_link() {
@@ -12371,8 +12386,8 @@ gen_snell_v6_server_config() {
     register_protocol "snell-v6" "$(build_config \
         psk "$psk" port "$port" version "$version" \
         dns "$dns_servers" dns_ip_preference "$dns_pref" mode "$mode" tfo "$tfo")"
-    _save_join_info "snell-v6" "SNELL-V6|%s|$port|$psk|$version" \
-        gen_snell_link "%s" "$port" "$psk" "$version" \
+    _save_join_info "snell-v6" "SNELL-V6|%s|$port|$psk|$version|$mode" \
+        gen_snell_link "%s" "$port" "$psk" "$version" "" "$mode" \
         --extra "MODE=$mode" "DNS=${dns_servers:-system}" \
         "DNS_IP_PREFERENCE=$dns_pref" "TFO=$tfo"
     cp "$CFG/snell-v6.join" "$CFG/join.txt" 2>/dev/null
@@ -19115,6 +19130,7 @@ show_all_share_links() {
             local method=$(echo "$cfg" | jq -r '.method // empty')
             local psk=$(echo "$cfg" | jq -r '.psk // empty')
             local version=$(echo "$cfg" | jq -r '.version // empty')
+            local snell_mode=$(echo "$cfg" | jq -r '.mode // "default"')
             local domain=$(echo "$cfg" | jq -r '.domain // empty')
             local stls_password=$(echo "$cfg" | jq -r '.stls_password // empty')
             
@@ -19152,7 +19168,7 @@ show_all_share_links() {
                     trojan-ws) link=$(gen_trojan_ws_link "$ipv4" "$display_port" "$password" "$sni" "$path" "$country_code") ;;
                     snell) link=$(gen_snell_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
                     snell-v5) link=$(gen_snell_v5_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
-                    snell-v6) link=$(gen_snell_link "$ipv4" "$display_port" "$psk" "${version:-6}" "$country_code") ;;
+                    snell-v6) link=$(gen_snell_link "$ipv4" "$display_port" "$psk" "${version:-6}" "$country_code" "$snell_mode") ;;
                     tuic) link=$(gen_tuic_link "$ipv4" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
                     anytls) link=$(gen_anytls_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
                     naive) link=$(gen_naive_link "$domain" "$display_port" "$username" "$password" "$country_code") ;;
@@ -19204,7 +19220,7 @@ show_all_share_links() {
                     trojan-ws) link=$(gen_trojan_ws_link "$ip6" "$display_port" "$password" "$sni" "$path" "$country_code") ;;
                     snell) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
                     snell-v5) link=$(gen_snell_v5_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
-                    snell-v6) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "${version:-6}" "$country_code") ;;
+                    snell-v6) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "${version:-6}" "$country_code" "$snell_mode") ;;
                     tuic) link=$(gen_tuic_link "$ip6" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
                     anytls) link=$(gen_anytls_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
                     naive) ;; # NaïveProxy 使用域名，不需要 IPv6 链接
@@ -19614,7 +19630,7 @@ show_single_protocol_info() {
             fi
             echo ""
             echo -e "  ${Y}Surge 配置 (Snell 为 Surge 专属协议):${NC}"
-            echo -e "  ${C}${country_code}-Snell = snell, ${config_ip}, ${display_port}, psk=${psk}, version=${version}, reuse=true, tfo=${snell_tfo:-true}${NC}"
+            echo -e "  ${C}$(gen_snell_surge_line "${country_code}-Snell" "$config_ip" "$display_port" "$psk" "$version" "${snell_mode:-default}" "${snell_tfo:-true}")${NC}"
             ;;
         tuic)
             echo -e "  UUID: ${G}$uuid${NC}"
@@ -19750,8 +19766,8 @@ show_single_protocol_info() {
                 join_code=$(echo "SNELL-V5|${ip_addr}|${link_port}|${psk}|${version}" | base64 -w 0)
                 ;;
             snell-v6)
-                link=$(gen_snell_link "$ip_addr" "$link_port" "$psk" "${version:-6}" "$country_code")
-                join_code=$(echo "SNELL-V6|${ip_addr}|${link_port}|${psk}|${version:-6}" | base64 -w 0)
+                link=$(gen_snell_link "$ip_addr" "$link_port" "$psk" "${version:-6}" "$country_code" "${snell_mode:-default}")
+                join_code=$(echo "SNELL-V6|${ip_addr}|${link_port}|${psk}|${version:-6}|${snell_mode:-default}" | base64 -w 0)
                 ;;
             snell-shadowtls|snell-v5-shadowtls)
                 local stls_ver="${version:-4}"
@@ -24139,6 +24155,8 @@ gen_surge_sub() {
             local method=$(echo "$cfg" | jq -r '.method // empty')
             local psk=$(echo "$cfg" | jq -r '.psk // empty')
             local version=$(echo "$cfg" | jq -r '.version // empty')
+            local snell_mode=$(echo "$cfg" | jq -r '.mode // "default"')
+            local snell_tfo=$(echo "$cfg" | jq -r '.tfo // "true"')
             
             local name="${country_code}-$(get_protocol_name $protocol)-${ip_suffix}"
             local proxy=""
@@ -24165,6 +24183,10 @@ gen_surge_sub() {
                 snell|snell-v5|snell-shadowtls|snell-v5-shadowtls)
                     # Snell 和 Snell+ShadowTLS 都使用相同的 Surge 配置格式
                     [[ -n "$server_ip" ]] && proxy="$name = snell, $server_ip, $port, psk=$psk, version=${version:-4}"
+                    ;;
+                snell-v6)
+                    # Snell v6 服务端与 Surge 客户端的 mode 必须完全一致。
+                    [[ -n "$server_ip" ]] && proxy=$(gen_snell_surge_line "$name" "$server_ip" "$port" "$psk" "${version:-6}" "${snell_mode:-default}" "${snell_tfo:-true}")
                     ;;
             esac
             
