@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.12 [服务端]
+#  多协议代理一键部署脚本 v3.5.13 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.12"
+readonly VERSION="3.5.13"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -5497,6 +5497,52 @@ get_ipv6() {
     local result=$(curl -6 -sf --connect-timeout 5 https://ip.sb 2>/dev/null || curl -6 -sf --connect-timeout 5 https://ifconfig.me 2>/dev/null)
     [[ -n "$result" ]] && _CACHED_IPV6="$result"
     echo "$result"
+}
+
+# 获取本机接口地址。公网 IP 探测失败时仅用于提示和局域网配置，不能替代
+# 公网地址参与域名解析校验。
+get_local_ipv4() {
+    local result=""
+    if command -v ip >/dev/null 2>&1; then
+        result=$(ip -o -4 addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); if ($4 != "127.0.0.1") {print $4; exit}}')
+    fi
+    if [[ -z "$result" ]] && command -v hostname >/dev/null 2>&1; then
+        result=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $0 != "127.0.0.1" {print; exit}')
+    fi
+    echo "$result"
+}
+
+get_local_ipv6() {
+    local result=""
+    if command -v ip >/dev/null 2>&1; then
+        result=$(ip -o -6 addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); if ($4 !~ /^fe80:/) {print $4; exit}}')
+    fi
+    if [[ -z "$result" ]] && command -v hostname >/dev/null 2>&1; then
+        result=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/:/ && $0 !~ /^fe80:/ {print; exit}')
+    fi
+    echo "$result"
+}
+
+# 公网地址不是安装代理核心的必要条件。无公网服务器仍可通过内网、NAT
+# 端口映射或隧道使用，因此这里只提示网络环境，永不阻断安装。
+show_install_network_environment() {
+    local public_ipv4 public_ipv6 local_ipv4 local_ipv6
+    public_ipv4=$(get_ipv4)
+    public_ipv6=$(get_ipv6)
+
+    echo -e "  公网 IPv4: ${public_ipv4:-${R}无${NC}}"
+    echo -e "  公网 IPv6: ${public_ipv6:-${R}无${NC}}"
+    if [[ -n "$public_ipv4" || -n "$public_ipv6" ]]; then
+        return 0
+    fi
+
+    local_ipv4=$(get_local_ipv4)
+    local_ipv6=$(get_local_ipv6)
+    _warn "未检测到公网 IP，将继续安装"
+    echo -e "  内网 IPv4: ${local_ipv4:-${D}无${NC}}"
+    echo -e "  内网 IPv6: ${local_ipv6:-${D}无${NC}}"
+    echo -e "  ${D}安装完成后，请使用内网地址、NAT 端口映射地址、域名或隧道地址配置客户端。${NC}"
+    return 0
 }
 
 # 获取 IP 地理位置代码 (如 HK, JP, US, SG)
@@ -20861,10 +20907,7 @@ do_install_server() {
     ensure_dual_stack_listen
 
     _info "检测网络环境..."
-    local ipv4=$(get_ipv4) ipv6=$(get_ipv6)
-    echo -e "  IPv4: ${ipv4:-${R}无${NC}}"
-    echo -e "  IPv6: ${ipv6:-${R}无${NC}}"
-    [[ -z "$ipv4" && -z "$ipv6" ]] && { _err "无法获取公网IP"; _pause; return 1; }
+    show_install_network_environment
     echo ""
 
     # === 主协议冲突检测 ===
