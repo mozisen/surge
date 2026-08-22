@@ -3124,8 +3124,9 @@ build_config() {
         fi
     done
     
-    # 自动添加 IP
-    local ipv4=$(get_ipv4) ipv6=$(get_ipv6)
+    # 自动添加客户端连接地址；无公网时保存内网地址，避免后续生成空节点。
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     args+=(--arg "ipv4" "$ipv4" --arg "ipv6" "$ipv6")
     keys+=("ipv4" "ipv6")
     
@@ -3166,9 +3167,11 @@ _save_join_info() {
     done
     : >"$join_file"
 
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     local label ip ipfmt data code link
     for label in V4 V6; do
-        ip=$([[ "$label" == V4 ]] && get_ipv4 || get_ipv6)
+        ip=$([[ "$label" == V4 ]] && printf '%s' "$ipv4" || printf '%s' "$ipv6")
         [[ -z "$ip" ]] && continue
         ipfmt=$ip; [[ "$label" == V6 ]] && ipfmt="[$ip]"
 
@@ -5521,6 +5524,20 @@ get_local_ipv6() {
         result=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/:/ && $0 !~ /^fe80:/ {print; exit}')
     fi
     echo "$result"
+}
+
+# 获取用于客户端配置和分享链接的地址。只要存在任一公网地址，就保持原有
+# 公网优先逻辑；仅在公网 IPv4/IPv6 都不可用时才回落到本机接口地址。
+# 输出格式: ipv4|ipv6
+get_connection_addresses() {
+    local ipv4 ipv6
+    ipv4=$(get_ipv4)
+    ipv6=$(get_ipv6)
+    if [[ -z "$ipv4" && -z "$ipv6" ]]; then
+        ipv4=$(get_local_ipv4)
+        ipv6=$(get_local_ipv6)
+    fi
+    printf '%s|%s\n' "$ipv4" "$ipv6"
 }
 
 # 公网地址不是安装代理核心的必要条件。无公网服务器仍可通过内网、NAT
@@ -12224,7 +12241,8 @@ gen_snell_shadowtls_server_config() {
     local psk="$1" port="$2" sni="${3:-www.microsoft.com}" stls_password="$4" version="${5:-4}" custom_backend_port="${6:-}"
     mkdir -p "$CFG"
     
-    local ipv4=$(get_ipv4) ipv6=$(get_ipv6)
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     local protocol_name="snell-shadowtls"
     local snell_bin="snell-server"
     local snell_conf="snell-shadowtls.conf"
@@ -12322,7 +12340,8 @@ gen_socks_server_config() {
     register_protocol "socks" "$config_json"
 
     # SOCKS5 的 join 信息
-    local ipv4=$(get_ipv4) ipv6=$(get_ipv6)
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     local tls_suffix=""
     [[ "$use_tls" == "true" ]] && tls_suffix="-TLS"
 
@@ -19130,8 +19149,8 @@ show_all_share_links() {
     local has_links=false
     
     # 获取 IP 地址
-    local ipv4=$(get_ipv4)
-    local ipv6=$(get_ipv6)
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     local country_code=$(get_ip_country "$ipv4")
     [[ -z "$country_code" ]] && country_code=$(get_ip_country "$ipv6")
     
@@ -19394,9 +19413,10 @@ show_single_protocol_info() {
     local snell_mode=$(echo "$cfg" | jq -r '.mode // empty')
     local snell_tfo=$(echo "$cfg" | jq -r '.tfo // empty')
     
-    # 重新获取 IP（数据库中的可能是旧的）
-    [[ -z "$ipv4" ]] && ipv4=$(get_ipv4)
-    [[ -z "$ipv6" ]] && ipv6=$(get_ipv6)
+    # 重新获取连接地址（数据库中的可能是旧的或由无公网旧版本写成空值）
+    if [[ -z "$ipv4" && -z "$ipv6" ]]; then
+        IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
+    fi
     
     # 检测是否为回落子协议（WS 在有 TLS 主协议时使用主协议端口）
     # 注意：Reality 不支持 WS 回落，只有 Vision/Trojan 可以
@@ -19439,8 +19459,15 @@ show_single_protocol_info() {
     [[ -z "$country_code" ]] && country_code=$(get_ip_country "$ipv6")
     
     # 确定用于配置显示的 IP 地址：优先 IPv4，纯 IPv6 环境使用 IPv6（带方括号）
-    local config_ip="$ipv4"
-    [[ -z "$config_ip" ]] && config_ip="[$ipv6]"
+    local config_ip=""
+    if [[ -n "$ipv4" ]]; then
+        config_ip="$ipv4"
+    elif [[ -n "$ipv6" ]]; then
+        config_ip="[$ipv6]"
+    else
+        config_ip="请填写服务器地址"
+        _warn "未检测到可用的连接地址，客户端配置中的服务器地址需要手动填写"
+    fi
     
     case "$protocol" in
         vless)
@@ -23774,8 +23801,8 @@ _load_sub_info() {
 gen_v2ray_sub() {
     local installed=$(get_installed_protocols)
     local links=""
-    local ipv4=$(get_ipv4)
-    local ipv6=$(get_ipv6)
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     
     # 获取地区代码
     local country_code=$(get_ip_country "$ipv4")
@@ -23899,8 +23926,8 @@ gen_v2ray_sub() {
 # 生成 Clash 订阅内容
 gen_clash_sub() {
     local installed=$(get_installed_protocols)
-    local ipv4=$(get_ipv4)
-    local ipv6=$(get_ipv6)
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     local proxies=""
     local proxy_names=""
     
@@ -24150,8 +24177,8 @@ EOF
 # 生成 Surge 订阅内容
 gen_surge_sub() {
     local installed=$(get_installed_protocols)
-    local ipv4=$(get_ipv4)
-    local ipv6=$(get_ipv6)
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     local proxies=""
     local proxy_names=""
     
@@ -24403,11 +24430,19 @@ show_sub_links() {
     # 清除变量避免污染
     local sub_uuid="" sub_port="" sub_domain="" sub_https=""
     _load_sub_info "$CFG/sub.info" || { _err "订阅配置格式无效"; return 1; }
-    local ipv4=$(get_ipv4)
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     local protocol="http"
     [[ "$sub_https" == "true" ]] && protocol="https"
-    
-    local base_url="${protocol}://${sub_domain:-$ipv4}:${sub_port}/sub/${sub_uuid}"
+
+    local sub_host="$sub_domain"
+    if [[ -z "$sub_host" && -n "$ipv4" ]]; then
+        sub_host="$ipv4"
+    elif [[ -z "$sub_host" && -n "$ipv6" ]]; then
+        sub_host="[$ipv6]"
+    fi
+    [[ -z "$sub_host" ]] && sub_host="请填写服务器地址"
+    local base_url="${protocol}://${sub_host}:${sub_port}/sub/${sub_uuid}"
     
     _line
     echo -e "  ${W}订阅链接${NC}"
@@ -24593,7 +24628,11 @@ setup_subscription_interactive() {
     # 获取订阅 UUID
     local sub_uuid=$(get_sub_uuid)
     local sub_dir="$CFG/subscription/$sub_uuid"
-    local server_name="${sub_domain:-$(get_ipv4)}"
+    local connection_ipv4 connection_ipv6
+    IFS='|' read -r connection_ipv4 connection_ipv6 <<< "$(get_connection_addresses)"
+    local server_name="$sub_domain"
+    [[ -z "$server_name" ]] && server_name="${connection_ipv4:-$connection_ipv6}"
+    [[ -z "$server_name" ]] && server_name="localhost"
     
     # 配置 Nginx - 根据系统选择正确的配置目录
     local nginx_conf_dir="/etc/nginx/conf.d"
@@ -26478,8 +26517,8 @@ _gen_user_share_link() {
     local domain=$(echo "$cfg" | jq -r '.domain // empty')
     
     # 获取 IP 地址
-    local ipv4=$(get_ipv4)
-    local ipv6=$(get_ipv6)
+    local ipv4 ipv6
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     local country_code=$(get_ip_country "$ipv4")
     [[ -z "$country_code" ]] && country_code=$(get_ip_country "$ipv6")
     
