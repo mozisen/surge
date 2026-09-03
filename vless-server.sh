@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.6.0-preview.1 [服务端]
+#  多协议代理一键部署脚本 v3.6.0-preview.2 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.6.0-preview.1"
+readonly VERSION="3.6.0-preview.2"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -12762,6 +12762,22 @@ COOLDOWN_PERIOD=300      # 冷却期（秒）
 declare -A restart_counts
 declare -A first_restart_time
 
+process_running() {
+    local proc="$1" proc_dir comm cmdline
+    command -v pgrep >/dev/null 2>&1 && { pgrep -x "$proc" >/dev/null 2>&1 || pgrep -f "$proc" >/dev/null 2>&1; } && return 0
+    command -v pidof >/dev/null 2>&1 && pidof "$proc" >/dev/null 2>&1 && return 0
+    for proc_dir in /proc/[0-9]*; do
+        [[ -r "$proc_dir/comm" ]] || continue
+        IFS= read -r comm < "$proc_dir/comm" 2>/dev/null || continue
+        [[ "$comm" == "$proc" ]] && return 0
+        if [[ -r "$proc_dir/cmdline" ]]; then
+            cmdline=$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null)
+            [[ "${cmdline%% *}" == */"$proc" || "${cmdline%% *}" == "$proc" ]] && return 0
+        fi
+    done
+    return 1
+}
+
 log() { 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
     # 日志轮转：超过 2MB 时截断
@@ -12835,22 +12851,9 @@ get_all_services() {
     local xray_protos=$(jq -r '.xray | keys[]' "$DB_FILE" 2>/dev/null)
     [[ -n "$xray_protos" ]] && services+="vless-reality:xray "
     
-    # 检查 Sing-box 协议 (hy2/tuic 由 vless-singbox 统一管理)
+    # 所有 Sing-box 协议都由 vless-singbox 统一管理。
     local singbox_protos=$(jq -r '.singbox | keys[]' "$DB_FILE" 2>/dev/null)
-    local has_singbox=false
-    for proto in $singbox_protos; do
-        case "$proto" in
-            hy2|tuic) has_singbox=true ;;
-            snell) services+="vless-snell:snell-server " ;;
-            snell-v5) services+="vless-snell-v5:snell-server-v5 " ;;
-            snell-v6) services+="vless-snell-v6:snell-server-v6 " ;;
-            anytls) services+="vless-anytls:anytls-server " ;;
-            snell-shadowtls) services+="vless-snell-shadowtls:shadow-tls " ;;
-            snell-v5-shadowtls) services+="vless-snell-v5-shadowtls:shadow-tls " ;;
-            ss2022-shadowtls) services+="vless-ss2022-shadowtls:shadow-tls " ;;
-        esac
-    done
-    [[ "$has_singbox" == "true" ]] && services+="vless-singbox:sing-box "
+    [[ -n "$singbox_protos" ]] && services+="vless-singbox:sing-box "
     
     echo "$services"
 }
@@ -12860,8 +12863,8 @@ log "INFO: Watchdog 启动"
 while true; do
     for svc_info in $(get_all_services); do
         IFS=':' read -r svc_name proc_name <<< "$svc_info"
-        # 多种方式检测进程 (使用兼容函数)
-        if ! _pgrep "$proc_name" && ! pgrep -f "$proc_name" > /dev/null 2>&1; then
+        # 多种方式检测进程，兼容精简 Alpine。
+        if ! process_running "$proc_name"; then
             log "CRITICAL: $proc_name 进程不存在，尝试重启 $svc_name..."
             restart_service "$svc_name"
             sleep 5
@@ -12995,6 +12998,39 @@ EOFSCRIPT
 #═══════════════════════════════════════════════════════════════════════════════
 # 服务管理
 #═══════════════════════════════════════════════════════════════════════════════
+create_watchdog_service() {
+    [[ -x "$CFG/watchdog.sh" ]] || { _warn "Watchdog 脚本不存在，跳过监控服务"; return 1; }
+
+    if [[ "$DISTRO" == "alpine" ]]; then
+        cat > /etc/init.d/vless-watchdog << EOF
+#!/sbin/openrc-run
+name="VLESS Watchdog"
+command="/bin/bash"
+command_args="$CFG/watchdog.sh"
+command_background="yes"
+pidfile="/run/vless-watchdog.pid"
+depend() { need net localmount; after firewall; }
+EOF
+        chmod +x /etc/init.d/vless-watchdog
+    else
+        cat > /etc/systemd/system/vless-watchdog.service << EOF
+[Unit]
+Description=VLESS Watchdog
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash $CFG/watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload 2>/dev/null
+    fi
+}
+
 create_service() {
     local protocol="${1:-$(get_protocol)}"
     local kind="${PROTO_KIND[$protocol]:-}"
@@ -13136,7 +13172,7 @@ EOF
             _write_openrc "${BACKEND_NAME[$protocol]}" "${BACKEND_DESC[$protocol]}" "${BACKEND_EXEC[$protocol]%% *}" "${BACKEND_EXEC[$protocol]#* }" ""
         fi
 
-        _write_openrc "vless-watchdog" "VLESS Watchdog" "/bin/bash" "$CFG/watchdog.sh" ""
+        create_watchdog_service
     else
         local pre="" env="" requires="" after=""
         [[ "$kind" == "hy2" ]] && pre="-/bin/bash $CFG/hy2-nat.sh"
@@ -13155,20 +13191,7 @@ EOF
             _write_systemd "${BACKEND_NAME[$protocol]}" "${BACKEND_DESC[$protocol]}" "${BACKEND_EXEC[$protocol]}" "" "${service_name}.service" ""
         fi
 
-        cat > /etc/systemd/system/vless-watchdog.service << EOF
-[Unit]
-Description=VLESS Watchdog
-After=${service_name}.service
-
-[Service]
-Type=simple
-ExecStart=/bin/bash $CFG/watchdog.sh
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
+        create_watchdog_service
         # 写入 unit 文件后执行 daemon-reload
         systemctl daemon-reload 2>/dev/null
     fi
@@ -13349,9 +13372,14 @@ start_services() {
         fi
     done
     
-    # 启动 Watchdog
-    svc enable vless-watchdog 2>/dev/null
-    svc start vless-watchdog 2>/dev/null
+    # Watchdog 是非关键辅助服务。先确保 unit 存在，避免仅安装 Sing-box 时
+    # systemd 报 “Unit vless-watchdog.service not found”。
+    if create_watchdog_service; then
+        svc enable vless-watchdog >/dev/null 2>&1 || _warn "Watchdog 开机启动设置失败"
+        if ! svc status vless-watchdog >/dev/null 2>&1; then
+            svc start vless-watchdog >/dev/null 2>&1 || _warn "Watchdog 启动失败（不影响代理服务）"
+        fi
+    fi
     
     if [[ ${#failed_services[@]} -gt 0 ]]; then
         _warn "以下服务启动失败: ${failed_services[*]}"
