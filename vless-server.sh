@@ -16,11 +16,11 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.13 [服务端]
+#  多协议代理一键部署脚本 v3.6.0-preview.1 [服务端]
 #  
 #  架构升级:
-#    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
-#    • Sing-box 核心: 处理 UDP/QUIC 协议 (Hysteria2/TUIC) - 低内存高效率
+#    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
+#    • Sing-box 核心: 处理 Hysteria2/TUIC/AnyTLS，并可接管部分通用协议
 #  
 #  支持协议: VLESS+Reality / VLESS+Reality+XHTTP / VLESS+WS / VMess+WS / 
 #           VLESS-XTLS-Vision / SOCKS5 / SS2022 / HY2 / Trojan / 
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.13"
+readonly VERSION="3.6.0-preview.1"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -3580,10 +3580,55 @@ fi
 # 协议分类定义 (重构: Sing-box 接管独立协议)
 SINGBOX_V2RAY_API_PORT="10086"
 XRAY_PROTOCOLS="vless vless-xhttp vless-xhttp-cdn vless-ws vless-ws-notls vmess-ws vless-vision trojan trojan-ws socks ss2022 ss-legacy"
-# Sing-box 管理的协议 (原独立协议，现统一由 Sing-box 处理)
-SINGBOX_PROTOCOLS="hy2 tuic anytls"
+# Sing-box 可管理的协议。首个内核切换预览版开放 VLESS Reality、Trojan
+# 和 Shadowsocks；其他共同协议待兼容性回归完成后再开放。
+SINGBOX_PROTOCOLS="vless trojan ss2022 ss-legacy hy2 tuic anytls"
 # 仍需独立进程的协议 (Snell 等闭源协议)
 STANDALONE_PROTOCOLS="snell snell-v5 snell-v6 snell-shadowtls snell-v5-shadowtls ss2022-shadowtls naive"
+
+# 协议—内核唯一注册表。格式为以空格分隔的可用内核；第一个为自动推荐值。
+declare -A PROTO_SUPPORTED_CORES PROTO_DEFAULT_CORE
+for _p in vless trojan ss2022 ss-legacy; do
+    PROTO_SUPPORTED_CORES[$_p]="xray singbox"
+    PROTO_DEFAULT_CORE[$_p]="xray"
+done
+for _p in vless-xhttp vless-xhttp-cdn vless-ws vless-ws-notls vmess-ws vless-vision trojan-ws socks; do
+    PROTO_SUPPORTED_CORES[$_p]="xray"
+    PROTO_DEFAULT_CORE[$_p]="xray"
+done
+for _p in hy2 tuic anytls; do
+    PROTO_SUPPORTED_CORES[$_p]="singbox"
+    PROTO_DEFAULT_CORE[$_p]="singbox"
+done
+for _p in $STANDALONE_PROTOCOLS; do
+    PROTO_SUPPORTED_CORES[$_p]="standalone"
+    PROTO_DEFAULT_CORE[$_p]="standalone"
+done
+
+get_protocol_supported_cores() {
+    echo "${PROTO_SUPPORTED_CORES[$1]:-standalone}"
+}
+
+get_protocol_default_core() {
+    echo "${PROTO_DEFAULT_CORE[$1]:-standalone}"
+}
+
+protocol_supports_core() {
+    local protocol="$1" core="$2"
+    [[ " $(get_protocol_supported_cores "$protocol") " == *" $core "* ]]
+}
+
+# 已安装协议以数据库位置为准；未安装协议使用注册表推荐内核。
+get_protocol_core() {
+    local protocol="$1"
+    if db_exists "xray" "$protocol"; then
+        echo "xray"
+    elif db_exists "singbox" "$protocol"; then
+        echo "singbox"
+    else
+        get_protocol_default_core "$protocol"
+    fi
+}
 
 #═══════════════════════════════════════════════════════════════════════════════
 #  表驱动元数据 (协议/服务/进程/启动命令)
@@ -3611,7 +3656,6 @@ PROTO_SVC[snell-v5]="vless-snell-v5"; PROTO_EXEC[snell-v5]="/usr/local/bin/snell
 PROTO_SVC[snell-v6]="vless-snell-v6"; PROTO_EXEC[snell-v6]="/usr/local/bin/snell-server-v6 -c $CFG/snell-v6.conf"; PROTO_BIN[snell-v6]="snell-server-v6"; PROTO_KIND[snell-v6]="snell"
 
 # 动态命令：运行时从数据库取参数
-PROTO_SVC[anytls]="vless-anytls"; PROTO_KIND[anytls]="anytls"
 PROTO_SVC[naive]="vless-naive"; PROTO_KIND[naive]="naive"
 
 # ShadowTLS：主服务 shadow-tls + 额外 backend 服务
@@ -3649,16 +3693,18 @@ declare -A SVC_PROC=(
 )
 
 # 注册协议配置到数据库
-# 参数: $1=protocol, $2=config_json
+# 参数: $1=protocol, $2=config_json, $3=core(可选)
 register_protocol() {
     local protocol="$1"
     local config_json="$2"
-    
-    # 确定核心类型
-    local core="xray"
-    if [[ " $SINGBOX_PROTOCOLS " == *" $protocol "* ]]; then
-        core="singbox"
-    fi
+    local core="${3:-${SELECTED_CORE:-}}"
+    [[ -z "$core" ]] && core=$(get_protocol_default_core "$protocol")
+    protocol_supports_core "$protocol" "$core" || {
+        _err "$protocol 不支持 $core 内核"
+        return 1
+    }
+    # 独立协议沿用 xray 数据区保存配置，不代表由 Xray 运行。
+    [[ "$core" == "standalone" ]] && core="xray"
     
     # 获取端口
     local port
@@ -3717,8 +3763,18 @@ filter_installed() { # filter_installed "proto1 proto2 ..."
     done
 }
 
-get_xray_protocols()       { filter_installed "$XRAY_PROTOCOLS"; }
-get_singbox_protocols()    { filter_installed "$SINGBOX_PROTOCOLS"; }
+get_xray_protocols() {
+    local p
+    for p in $(db_list_protocols "xray" 2>/dev/null); do
+        [[ " $XRAY_PROTOCOLS " == *" $p "* ]] && echo "$p"
+    done
+}
+get_singbox_protocols() {
+    local p
+    for p in $(db_list_protocols "singbox" 2>/dev/null); do
+        [[ " $SINGBOX_PROTOCOLS " == *" $p "* ]] && echo "$p"
+    done
+}
 get_standalone_protocols() {
     # 独立协议使用 db_exists 逐个检测，避免 grep 匹配问题
     local p
@@ -5873,10 +5929,9 @@ ask_port() {
         fi
         
         # 确定当前协议的核心类型
-        local current_core="xray"
-        if [[ " $SINGBOX_PROTOCOLS " == *" $protocol "* ]]; then
-            current_core="singbox"
-        fi
+        local current_core="${SELECTED_CORE:-}"
+        [[ -z "$current_core" ]] && current_core=$(get_protocol_core "$protocol")
+        [[ "$current_core" == "standalone" ]] && current_core="xray"
         
         # 检查端口冲突（跨协议检测）
         if ! check_port_conflict "$custom_port" "$protocol" "$current_core"; then
@@ -8089,13 +8144,39 @@ _get_latest_script_version() {
 _version_gt() {
     local v1="$1" v2="$2"
     [[ "$v1" == "$v2" ]] && return 1
+    v1="${v1#v}"
+    v2="${v2#v}"
+
+    local base1 base2 suffix1 suffix2
+    base1=$(echo "$v1" | sed -E 's/^([0-9]+(\.[0-9]+)*).*/\1/')
+    base2=$(echo "$v2" | sed -E 's/^([0-9]+(\.[0-9]+)*).*/\1/')
+    [[ "$base1" =~ ^[0-9]+(\.[0-9]+)*$ && "$base2" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+    suffix1="${v1#"$base1"}"; suffix1="${suffix1#[-._]}"
+    suffix2="${v2#"$base2"}"; suffix2="${suffix2#[-._]}"
+
     local IFS=.
-    local i v1_arr=($v1) v2_arr=($v2)
+    local i v1_arr=($base1) v2_arr=($base2)
     for ((i=0; i<${#v1_arr[@]} || i<${#v2_arr[@]}; i++)); do
         local n1=${v1_arr[i]:-0} n2=${v2_arr[i]:-0}
         ((n1 > n2)) && return 0
         ((n1 < n2)) && return 1
     done
+
+    # 主版本相同时，正式版高于任何预发布版。
+    [[ -z "$suffix1" && -n "$suffix2" ]] && return 0
+    [[ -n "$suffix1" && -z "$suffix2" ]] && return 1
+    [[ -z "$suffix1" ]] && return 1
+
+    local label1 label2 number1 number2 rank1 rank2
+    label1=$(echo "$suffix1" | sed -E 's/^([A-Za-z]+).*/\1/' | tr '[:upper:]' '[:lower:]')
+    label2=$(echo "$suffix2" | sed -E 's/^([A-Za-z]+).*/\1/' | tr '[:upper:]' '[:lower:]')
+    number1=$(echo "$suffix1" | sed -E 's/^[A-Za-z._-]*([0-9]+).*$/\1/'); [[ "$number1" =~ ^[0-9]+$ ]] || number1=0
+    number2=$(echo "$suffix2" | sed -E 's/^[A-Za-z._-]*([0-9]+).*$/\1/'); [[ "$number2" =~ ^[0-9]+$ ]] || number2=0
+    case "$label1" in alpha|a) rank1=1 ;; beta|b) rank1=2 ;; preview|pre) rank1=3 ;; rc) rank1=4 ;; *) rank1=3 ;; esac
+    case "$label2" in alpha|a) rank2=1 ;; beta|b) rank2=2 ;; preview|pre) rank2=3 ;; rc) rank2=4 ;; *) rank2=3 ;; esac
+    ((rank1 > rank2)) && return 0
+    ((rank1 < rank2)) && return 1
+    ((number1 > number2)) && return 0
     return 1
 }
 
@@ -10223,10 +10304,171 @@ _update_core_with_channel_select() {
     esac
 }
 
+_restore_core_switch_backup() {
+    local backup_dir="$1"
+    [[ -f "$backup_dir/db.json" ]] || return 1
+    cp -f "$backup_dir/db.json" "$DB_FILE" || return 1
+    if [[ -f "$backup_dir/config.json" ]]; then
+        cp -f "$backup_dir/config.json" "$CFG/config.json"
+    else
+        rm -f "$CFG/config.json"
+    fi
+    if [[ -f "$backup_dir/singbox.json" ]]; then
+        cp -f "$backup_dir/singbox.json" "$CFG/singbox.json"
+    else
+        rm -f "$CFG/singbox.json"
+    fi
+    create_server_scripts
+    start_services >/dev/null 2>&1 || true
+}
+
+switch_protocol_core() {
+    local protocol="$1" target_core="$2"
+    local source_core
+    source_core=$(get_protocol_core "$protocol")
+    [[ "$source_core" == "$target_core" ]] && { _warn "$protocol 已由 $target_core 运行"; return 1; }
+    protocol_supports_core "$protocol" "$target_core" || { _err "$protocol 不支持 $target_core"; return 1; }
+
+    local cfg
+    cfg=$(db_get "$source_core" "$protocol") || { _err "无法读取 $protocol 配置"; return 1; }
+    if [[ "$protocol" == "vless" ]] && echo "$cfg" | jq -e '
+        if type == "array" then any(.[]; (.security_mode // "reality") != "reality")
+        else (.security_mode // "reality") != "reality" end' >/dev/null 2>&1; then
+        _err "VLESS Encryption 暂不支持切换到 Sing-box"
+        return 1
+    fi
+    if [[ "$target_core" == "singbox" && "$protocol" =~ ^ss ]] && \
+       echo "$cfg" | jq -e '
+           def has_custom_users:
+               . as $cfg |
+               any(($cfg.users // [])[]?;
+                   .name != "default" or .uuid != ($cfg.password // $cfg.uuid));
+           if type == "array" then any(.[]; has_custom_users) else has_custom_users end
+       ' >/dev/null 2>&1; then
+        _err "多用户 Shadowsocks 暂不支持切换到 Sing-box"
+        return 1
+    fi
+
+    case "$target_core" in
+        xray) install_xray || { _err "Xray 安装失败，未执行切换"; return 1; } ;;
+        singbox) install_singbox || { _err "Sing-box 安装失败，未执行切换"; return 1; } ;;
+        *) _err "不支持的目标内核: $target_core"; return 1 ;;
+    esac
+
+    local backup_root="$CFG/backups/core-switch"
+    local timestamp backup_dir
+    timestamp=$(date '+%Y%m%d_%H%M%S')
+    backup_dir="$backup_root/${protocol}_${source_core}_to_${target_core}_${timestamp}"
+    mkdir -p "$backup_dir" || return 1
+    cp -f "$DB_FILE" "$backup_dir/db.json" || return 1
+    [[ -f "$CFG/config.json" ]] && cp -f "$CFG/config.json" "$backup_dir/config.json"
+    [[ -f "$CFG/singbox.json" ]] && cp -f "$CFG/singbox.json" "$backup_dir/singbox.json"
+
+    _info "迁移数据库记录: $source_core → $target_core"
+    if ! _db_apply --arg from "$source_core" --arg to "$target_core" --arg p "$protocol" '
+        .[$to][$p] = .[$from][$p] | del(.[$from][$p])
+    '; then
+        _err "数据库迁移失败"
+        return 1
+    fi
+
+    local failed=""
+    local xray_remaining singbox_remaining
+    xray_remaining=$(get_xray_protocols)
+    singbox_remaining=$(get_singbox_protocols)
+
+    if [[ -n "$xray_remaining" ]]; then
+        generate_xray_config || failed="Xray 配置生成失败"
+        if [[ -z "$failed" ]] && ! /usr/local/bin/xray run -test -c "$CFG/config.json" >/dev/null 2>&1; then
+            failed="Xray 配置校验失败"
+        fi
+    else
+        rm -f "$CFG/config.json"
+        svc stop vless-reality >/dev/null 2>&1 || true
+        svc disable vless-reality >/dev/null 2>&1 || true
+    fi
+    if [[ -z "$failed" && -n "$singbox_remaining" ]]; then
+        generate_singbox_config || failed="Sing-box 配置生成失败"
+        if [[ -z "$failed" ]] && ! /usr/local/bin/sing-box check -c "$CFG/singbox.json" >/dev/null 2>&1; then
+            failed="Sing-box 配置校验失败"
+        fi
+    elif [[ -z "$singbox_remaining" ]]; then
+        rm -f "$CFG/singbox.json"
+        svc stop vless-singbox >/dev/null 2>&1 || true
+        svc disable vless-singbox >/dev/null 2>&1 || true
+    fi
+
+    if [[ -z "$failed" ]]; then
+        create_server_scripts
+        if [[ "$target_core" == "singbox" ]]; then
+            create_singbox_service
+        else
+            create_service "$protocol"
+        fi
+        start_services || failed="目标内核服务启动失败"
+    fi
+
+    local target_service="vless-reality"
+    [[ "$target_core" == "singbox" ]] && target_service="vless-singbox"
+    if [[ -z "$failed" ]] && ! svc status "$target_service" >/dev/null 2>&1; then
+        failed="目标内核服务状态异常"
+    fi
+
+    if [[ -n "$failed" ]]; then
+        _err "$failed，正在自动回滚..."
+        _restore_core_switch_backup "$backup_dir"
+        _warn "已恢复 $protocol 的 $source_core 配置"
+        return 1
+    fi
+
+    [[ -f "$CFG/sub.info" ]] && generate_sub_files
+    _ok "$(get_protocol_name "$protocol") 内核切换完成: $source_core → $target_core"
+    _ok "用户、流量、分流、TG 绑定和订阅配置已保留"
+    echo -e "  ${D}回滚备份: $backup_dir${NC}"
+    return 0
+}
+
+protocol_core_switch_menu() {
+    local candidates=() protocol
+    for protocol in $(get_installed_protocols); do
+        [[ " $(get_protocol_supported_cores "$protocol") " == *" xray "* && \
+           " $(get_protocol_supported_cores "$protocol") " == *" singbox "* ]] && candidates+=("$protocol")
+    done
+    [[ ${#candidates[@]} -eq 0 ]] && { _warn "没有可切换内核的已安装协议"; return; }
+
+    _header
+    echo -e "  ${W}协议运行内核切换${NC}"
+    _line
+    local i=1 current
+    for protocol in "${candidates[@]}"; do
+        current=$(get_protocol_core "$protocol")
+        echo -e "  ${G}$i${NC}) $(get_protocol_name "$protocol") ${D}(当前: $current)${NC}"
+        ((i++))
+    done
+    _item "0" "返回"
+    _line
+    local choice
+    read -rp "  请选择协议 [0-$((i-1))]: " choice
+    [[ "$choice" == "0" ]] && return
+    [[ "$choice" =~ ^[0-9]+$ && "$choice" -ge 1 && "$choice" -lt "$i" ]] || { _err "无效选择"; return 1; }
+
+    protocol="${candidates[$((choice-1))]}"
+    current=$(get_protocol_core "$protocol")
+    local target="xray"
+    [[ "$current" == "xray" ]] && target="singbox"
+    echo ""
+    echo -e "  协议: ${C}$(get_protocol_name "$protocol")${NC}"
+    echo -e "  切换: ${Y}$current${NC} → ${G}$target${NC}"
+    echo -e "  ${D}将先备份并校验目标配置，失败时自动回滚${NC}"
+    read -rp "  确认切换? [y/N]: " confirm
+    [[ "$confirm" =~ ^[yY]$ ]] || return
+    switch_protocol_core "$protocol" "$target"
+}
+
 update_core_menu() {
     while true; do
         _header
-        echo -e "  ${W}核心版本管理 (Xray/Sing-box/Snell v5/Snell v6)${NC}"
+        echo -e "  ${W}核心管理 (版本/运行内核切换)${NC}"
         _line
         _show_core_versions
         _line
@@ -10245,6 +10487,7 @@ update_core_menu() {
         _item "3" "$snellv5_label"
         _item "4" "$snellv6_label"
         _item "5" "重新获取版本"
+        _item "6" "协议运行内核切换 ${D}(预览)${NC}"
         _item "0" "返回"
         _line
         
@@ -10255,6 +10498,7 @@ update_core_menu() {
             3) _update_core_with_channel_select "Snell v5" "surge-networks/snell" "snell-server-v5" "vless-snell-v5" "install_snell_v5" ;;
             4) _update_core_with_channel_select "Snell v6" "$SNELL_V6_REPO" "snell-server-v6" "vless-snell-v6" "install_snell_v6" ;;
             5) _refresh_core_versions_now ;;
+            6) protocol_core_switch_menu ;;
             0) break ;;
             *) _err "无效选择" ;;
         esac
@@ -10494,7 +10738,7 @@ _build_singbox_ruleset_defs() {
     echo "$defs"
 }
 
-# 生成 Sing-box 统一配置 (Hy2 + TUIC 共用一个进程)
+# 生成 Sing-box 统一配置（所有选用 Sing-box 的协议共用一个进程）
 generate_singbox_config() {
     _ensure_singbox_default_users
     local singbox_protocols=$(db_list_protocols "singbox")
@@ -10873,7 +11117,12 @@ generate_singbox_config() {
     local success_count=0
     
     for proto in $singbox_protocols; do
-        local cfg=$(db_get "singbox" "$proto")
+        local protocol_cfg
+        protocol_cfg=$(db_get "singbox" "$proto")
+        [[ -z "$protocol_cfg" ]] && continue
+
+        # 数据库兼容单对象与多端口数组，每个实例生成一个独立 inbound。
+        while IFS= read -r cfg; do
         [[ -z "$cfg" ]] && continue
         
         local port=$(echo "$cfg" | jq -r '.port // empty')
@@ -10882,6 +11131,63 @@ generate_singbox_config() {
         local inbound=""
         
         case "$proto" in
+            vless)
+                local security_mode=$(echo "$cfg" | jq -r '.security_mode // "reality"')
+                [[ "$security_mode" != "reality" ]] && { _warn "Sing-box 暂不接管 VLESS Encryption，已跳过"; continue; }
+                local uuid=$(echo "$cfg" | jq -r '.uuid // empty')
+                local private_key=$(echo "$cfg" | jq -r '.private_key // empty')
+                local short_id=$(echo "$cfg" | jq -r '.short_id // empty')
+                local sni=$(echo "$cfg" | jq -r '.sni // "www.microsoft.com"')
+                local users_json
+                users_json=$(echo "$cfg" | jq --arg uuid "$uuid" '
+                    [(.users // [])[] | select(.enabled // true) |
+                        {name:("vless-" + .name), uuid:.uuid, flow:"xtls-rprx-vision"}] |
+                    if length == 0 then [{name:"vless-default", uuid:$uuid, flow:"xtls-rprx-vision"}] else . end')
+                inbound=$(jq -n \
+                    --argjson port "$port" --argjson users "$users_json" \
+                    --arg private_key "$private_key" --arg short_id "$short_id" \
+                    --arg sni "$sni" --arg listen_addr "$listen_addr" --arg tag "vless-in-${port}" '
+                    {
+                        type:"vless", tag:$tag, listen:$listen_addr,
+                        listen_port:$port, users:$users,
+                        tls:{enabled:true, server_name:$sni, reality:{
+                            enabled:true,
+                            handshake:{server:$sni, server_port:443},
+                            private_key:$private_key,
+                            short_id:[$short_id]
+                        }}
+                    }')
+                ;;
+            trojan)
+                local password=$(echo "$cfg" | jq -r '.password // empty')
+                local sni=$(echo "$cfg" | jq -r '.sni // "bing.com"')
+                local users_json
+                users_json=$(echo "$cfg" | jq --arg password "$password" '
+                    [(.users // [])[] | select(.enabled // true) |
+                        {name:("trojan-" + .name), password:.uuid}] |
+                    if length == 0 then [{name:"trojan-default", password:$password}] else . end')
+                inbound=$(jq -n \
+                    --argjson port "$port" --argjson users "$users_json" \
+                    --arg cert "$CFG/certs/server.crt" --arg key "$CFG/certs/server.key" \
+                    --arg listen_addr "$listen_addr" --arg tag "trojan-in-${port}" '
+                    {
+                        type:"trojan", tag:$tag, listen:$listen_addr,
+                        listen_port:$port, users:$users,
+                        tls:{enabled:true, certificate_path:$cert, key_path:$key}
+                    }')
+                ;;
+            ss2022|ss-legacy)
+                local password=$(echo "$cfg" | jq -r '.password // empty')
+                local method=$(echo "$cfg" | jq -r '.method // empty')
+                inbound=$(jq -n \
+                    --argjson port "$port" --arg method "$method" \
+                    --arg password "$password" --arg tag "${proto}-in-${port}" \
+                    --arg listen_addr "$listen_addr" '
+                    {
+                        type:"shadowsocks", tag:$tag, listen:$listen_addr,
+                        listen_port:$port, method:$method, password:$password
+                    }')
+                ;;
             hy2)
                 local password=$(echo "$cfg" | jq -r '.password // empty')
                 local sni=$(echo "$cfg" | jq -r '.sni // "www.bing.com"')
@@ -10924,10 +11230,11 @@ generate_singbox_config() {
                     --argjson users "$users_json" \
                     --arg cert "$cert_path" \
                     --arg key "$key_path" \
+                    --arg tag "hy2-in-${port}" \
                     --arg listen_addr "$listen_addr" \
                 '{
                     type: "hysteria2",
-                    tag: "hy2-in",
+                    tag: $tag,
                     listen: $listen_addr,
                     listen_port: $port,
                     users: $users,
@@ -10975,10 +11282,11 @@ generate_singbox_config() {
                     --argjson users "$users_json" \
                     --arg cert "$cert_path" \
                     --arg key "$key_path" \
+                    --arg tag "tuic-in-${port}" \
                     --arg listen_addr "$listen_addr" \
                 '{
                     type: "tuic",
-                    tag: "tuic-in",
+                    tag: $tag,
                     listen: $listen_addr,
                     listen_port: $port,
                     users: $users,
@@ -11023,10 +11331,11 @@ generate_singbox_config() {
                     --argjson users "$users_json" \
                     --arg cert "$cert_path" \
                     --arg key "$key_path" \
+                    --arg tag "anytls-in-${port}" \
                     --arg listen_addr "$listen_addr" \
                 '{
                     type: "anytls",
-                    tag: "anytls-in",
+                    tag: $tag,
                     listen: $listen_addr,
                     listen_port: $port,
                     users: $users,
@@ -11037,34 +11346,13 @@ generate_singbox_config() {
                     }
                 }')
                 ;;
-            ss2022|ss-legacy)
-                local password=$(echo "$cfg" | jq -r '.password // empty')
-                local default_method="2022-blake3-aes-128-gcm"
-                [[ "$p" == "ss-legacy" ]] && default_method="aes-256-gcm"
-                local method=$(echo "$cfg" | jq -r '.method // empty')
-                [[ -z "$method" ]] && method="$default_method"
-                
-                inbound=$(jq -n \
-                    --argjson port "$port" \
-                    --arg method "$method" \
-                    --arg password "$password" \
-                    --arg tag "${p}-in" \
-                    --arg listen_addr "$listen_addr" \
-                '{
-                    type: "shadowsocks",
-                    tag: $tag,
-                    listen: $listen_addr,
-                    listen_port: $port,
-                    method: $method,
-                    password: $password
-                }')
-                ;;
         esac
         
         if [[ -n "$inbound" ]]; then
             inbounds=$(echo "$inbounds" | jq --argjson ib "$inbound" '. += [$ib]')
             ((success_count++))
         fi
+        done < <(echo "$protocol_cfg" | jq -c 'if type == "array" then .[] else . end')
     done
     
     if [[ $success_count -eq 0 ]]; then
@@ -11152,9 +11440,9 @@ generate_singbox_config() {
     fi
     
     # 收集可统计的 sing-box 用户标识，用于 V2Ray API 用户级流量统计
-    # HY2 / TUIC / AnyTLS 均使用用户名
+    # 所有 Sing-box 入站统一使用“协议-用户名”作为统计键。
     local stats_users="[]"
-    for proto in hy2 tuic anytls; do
+    for proto in $singbox_protocols; do
         local mappings=$(_get_singbox_stat_user_mappings "$proto")
         [[ -z "$mappings" ]] && continue
         local proto_stats=$(printf '%s\n' "$mappings" | awk -F'|' 'NF>=2 && $2 != "" {print $2}' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
@@ -12998,7 +13286,7 @@ start_services() {
             failed_services+=("vless-reality")
     fi
     
-    # 2. 启动 Sing-box 服务（UDP/QUIC 协议: Hy2/TUIC）
+    # 2. 启动 Sing-box 服务（所有已注册到 Sing-box 的协议）
     local singbox_protocols=$(get_singbox_protocols)
     if [[ -n "$singbox_protocols" ]]; then
         # 确保 Sing-box 已安装
@@ -13176,6 +13464,23 @@ _auto_update_system_script() {
         fi
         
         if [[ "$need_update" == "true" ]]; then
+            # 覆盖快捷命令前保存上一份系统脚本，使手动下载预览版后也能从菜单回退。
+            if [[ -f "$system_script" ]]; then
+                local backup_dir="$CFG/script-backups"
+                local old_version backup_file
+                old_version=$(_extract_script_version "$system_script")
+                old_version="${old_version:-unknown}"
+                backup_file="$backup_dir/vless-server-${old_version}-$(date '+%Y%m%d_%H%M%S').sh"
+                mkdir -p "$backup_dir"
+                if cp "$system_script" "$backup_file" && chmod 700 "$backup_file" && bash -n "$backup_file" 2>/dev/null; then
+                    echo "$backup_file" > "$backup_dir/previous"
+                    _info "已保存上一脚本版本: v${old_version}"
+                else
+                    rm -f "$backup_file"
+                    _err "上一脚本版本备份失败，已取消覆盖快捷命令"
+                    return 1
+                fi
+            fi
             if ! install -m 755 "$real_path" "$system_script" 2>/dev/null; then
                 _warn "系统脚本同步失败，保留现有快捷命令"
                 return 1
@@ -19451,6 +19756,10 @@ show_single_protocol_info() {
     
     [[ -n "$ipv4" ]] && echo -e "  IPv4: ${G}$ipv4${NC}"
     [[ -n "$ipv6" ]] && echo -e "  IPv6: ${G}$ipv6${NC}"
+    local runtime_core_label="Xray"
+    [[ "$core" == "singbox" ]] && runtime_core_label="Sing-box"
+    [[ "$(get_protocol_default_core "$protocol")" == "standalone" ]] && runtime_core_label="独立核心"
+    echo -e "  运行内核: ${G}${runtime_core_label}${NC}"
     echo -e "  端口: ${G}$display_port${NC}"
     [[ "$is_fallback_protocol" == "true" ]] && echo -e "  ${D}(通过 $master_name 主协议回落，内部端口: $port)${NC}"
     
@@ -20160,7 +20469,7 @@ show_services_status() {
         fi
     fi
     
-    # Sing-box 服务状态 (UDP/QUIC 协议)
+    # Sing-box 服务状态
     local singbox_protocols=$(get_singbox_protocols)
     if [[ -n "$singbox_protocols" ]]; then
         if svc status vless-singbox 2>/dev/null; then
@@ -20194,10 +20503,9 @@ select_port_to_uninstall() {
     local protocol="$1"
     
     # 确定核心类型
-    local core="xray"
-    if [[ " $SINGBOX_PROTOCOLS " == *" $protocol "* ]]; then
-        core="singbox"
-    fi
+    local core
+    core=$(get_protocol_core "$protocol")
+    [[ " $(get_protocol_supported_cores "$protocol") " == *" standalone "* ]] && core="xray"
     
     # 获取端口列表
     local ports=$(db_list_ports "$core" "$protocol")
@@ -20280,12 +20588,9 @@ uninstall_specific_protocol() {
     select_port_to_uninstall "$selected_protocol" || return 1
     
     # 确定核心类型
-    local core="xray"
-    if [[ " $SINGBOX_PROTOCOLS " == *" $selected_protocol "* ]]; then
-        core="singbox"
-    elif [[ " $STANDALONE_PROTOCOLS " == *" $selected_protocol "* ]]; then
-        core="standalone"
-    fi
+    local core
+    core=$(get_protocol_core "$selected_protocol")
+    [[ " $(get_protocol_supported_cores "$selected_protocol") " == *" standalone "* ]] && core="standalone"
     
     echo -e "  将卸载: ${R}$(get_protocol_name $selected_protocol)${NC}"
     read -rp "  确认卸载? [y/N]: " confirm
@@ -20294,7 +20599,7 @@ uninstall_specific_protocol() {
     _info "卸载 $selected_protocol..."
     
     # 停止相关服务
-    if [[ " $XRAY_PROTOCOLS " == *" $selected_protocol "* ]]; then
+    if [[ "$core" == "xray" ]]; then
         # Xray 协议：需要重新生成配置
         # 根据选择的端口进行卸载
         if [[ "$SELECTED_PORT" == "all" ]]; then
@@ -20344,7 +20649,7 @@ uninstall_specific_protocol() {
             rm -f "$CFG/config.json"
             _ok "Xray 服务已停止"
         fi
-    elif [[ " $SINGBOX_PROTOCOLS " == *" $selected_protocol "* ]]; then
+    elif [[ "$core" == "singbox" ]]; then
         # Sing-box 协议 (hy2/tuic)：需要重新生成配置
         
         # Hysteria2: 先清理 iptables 端口跳跃规则
@@ -20817,6 +21122,49 @@ select_protocol() {
     done
 }
 
+select_install_core() {
+    local protocol="$1"
+    local supported
+    supported=$(get_protocol_supported_cores "$protocol")
+
+    # VLESS Encryption 为 Xray 专属实现，不参与通用 VLESS Reality 切换。
+    if [[ "$protocol" == "vless" && "${VLESS_SECURITY_MODE:-reality}" == "encryption" ]]; then
+        SELECTED_CORE="xray"
+        echo -e "  运行内核: ${C}Xray${NC} ${D}(VLESS Encryption 专用)${NC}"
+        return 0
+    fi
+
+    if [[ "$supported" != *" "* ]]; then
+        SELECTED_CORE="$supported"
+        local label="$supported"
+        [[ "$supported" == "xray" ]] && label="Xray"
+        [[ "$supported" == "singbox" ]] && label="Sing-box"
+        [[ "$supported" == "standalone" ]] && label="独立核心"
+        echo -e "  运行内核: ${C}${label}${NC} ${D}(此协议固定)${NC}"
+        return 0
+    fi
+
+    echo ""
+    _line
+    echo -e "  ${W}选择运行内核${NC}"
+    _line
+    _item "1" "自动推荐 ${D}(Xray，默认)${NC}"
+    _item "2" "Xray"
+    _item "3" "Sing-box"
+    _item "0" "返回"
+    _line
+    while true; do
+        read -rp "  请选择 [1-3，默认1]: " core_choice
+        core_choice="${core_choice:-1}"
+        case "$core_choice" in
+            1|2) SELECTED_CORE="xray"; return 0 ;;
+            3) SELECTED_CORE="singbox"; return 0 ;;
+            0) SELECTED_CORE=""; return 1 ;;
+            *) _err "无效选择" ;;
+        esac
+    done
+}
+
 # Shadowsocks 版本选择子菜单
 select_ss_version() {
     echo ""
@@ -20851,17 +21199,21 @@ do_install_server() {
     
     # 检查协议是否为空（用户选择返回）
     [[ -z "$protocol" ]] && return 1
+
+    select_install_core "$protocol" || return 1
     
     # 确定核心类型
-    local core="xray"
-    if [[ " $SINGBOX_PROTOCOLS " == *" $protocol "* ]]; then
-        core="singbox"
-    elif [[ " $STANDALONE_PROTOCOLS " == *" $protocol "* ]]; then
-        core="standalone"
-    fi
+    local core="$SELECTED_CORE"
     
     # 检查该协议是否已安装
     if is_protocol_installed "$protocol"; then
+        local existing_core
+        existing_core=$(get_protocol_core "$protocol")
+        if [[ "$core" != "standalone" && "$existing_core" != "$core" ]]; then
+            _warn "$(get_protocol_name "$protocol") 当前由 $existing_core 运行"
+            echo -e "  ${D}请使用「核心管理 → 协议运行内核切换」迁移到 $core${NC}"
+            return 1
+        fi
         # 处理已安装协议的多端口选择
         if [[ "$core" != "standalone" ]]; then
             handle_existing_protocol "$protocol" "$core" || return 1
@@ -21004,14 +21356,13 @@ do_install_server() {
 
     install_deps || { _err "依赖安装失败"; _pause; return 1; }
     
-    # 根据协议安装对应软件
-    case "$protocol" in
-        vless|vless-xhttp|vless-ws|vless-ws-notls|vmess-ws|vless-vision|ss2022|ss-legacy|trojan|socks)
-            install_xray || { _err "Xray 安装失败"; _pause; return 1; }
-            ;;
-        hy2|tuic|anytls)
-            install_singbox || { _err "Sing-box 安装失败"; _pause; return 1; }
-            ;;
+    # 根据用户选择的运行内核安装对应软件
+    if [[ "$core" == "xray" ]]; then
+        install_xray || { _err "Xray 安装失败"; _pause; return 1; }
+    elif [[ "$core" == "singbox" ]]; then
+        install_singbox || { _err "Sing-box 安装失败"; _pause; return 1; }
+    else
+      case "$protocol" in
         snell)
             install_snell || { _err "Snell 安装失败"; _pause; return 1; }
             ;;
@@ -21039,7 +21390,8 @@ do_install_server() {
         naive)
             install_naive || { _err "NaïveProxy 安装失败"; _pause; return 1; }
             ;;
-    esac
+      esac
+    fi
 
     _info "生成配置参数..."
     
@@ -21097,7 +21449,12 @@ do_install_server() {
                 gen_vless_encryption_server_config "$uuid" "$port" "$decryption_config" "$encryption_config"
             else
                 local uuid=$(gen_uuid) sid=$(gen_sid)
-                local keys=$(xray x25519 2>/dev/null)
+                local keys=""
+                if [[ "$core" == "singbox" ]]; then
+                    keys=$(sing-box generate reality-keypair 2>/dev/null)
+                else
+                    keys=$(xray x25519 2>/dev/null)
+                fi
                 [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
                 local privkey=$(echo "$keys" | grep "PrivateKey:" | awk '{print $2}')
                 local pubkey=$(echo "$keys" | awk -F': *' '/Password( \(PublicKey\))?:|PublicKey:/ {print $2; exit}')
@@ -22242,7 +22599,11 @@ do_install_server() {
     
     _info "创建服务..."
     create_server_scripts  # 生成服务端辅助脚本（watchdog、hy2-nat、tuic-nat）
-    create_service "$protocol"
+    if [[ "$core" == "singbox" ]]; then
+        create_singbox_service
+    else
+        create_service "$protocol"
+    fi
     _info "启动服务..."
     
     # 保存当前安装的协议名（防止被后续函数中的循环变量覆盖）
@@ -22272,7 +22633,7 @@ do_install_server() {
         create_shortcut   # 安装成功才创建快捷命令
 
         # 对 Sing-box 协议做一次显式重建与校验，避免交互安装后配置未完全落盘
-        if [[ "${PROTO_KIND[$current_protocol]}" == "singbox" ]]; then
+        if [[ "$core" == "singbox" ]]; then
             generate_singbox_config || { _err "Sing-box 配置重建失败"; _pause; return 1; }
             create_server_scripts
             create_singbox_service
@@ -22286,7 +22647,7 @@ do_install_server() {
         fi
 
         # 已启用 TG 通知且当前安装的是 Xray 协议时，自动补齐流量统计定时任务
-        if [[ "${PROTO_KIND[$current_protocol]}" == "xray" ]]; then
+        if [[ "$core" == "xray" ]]; then
             local tg_enabled=$(tg_get_config "enabled")
             if [[ "$tg_enabled" == "true" ]] && ! crontab -l 2>/dev/null | grep -q "sync-traffic"; then
                 setup_traffic_cron "$(get_traffic_interval)"
@@ -22301,6 +22662,7 @@ do_install_server() {
         _dline
         _ok "服务端安装完成! 快捷命令: vless"
         _ok "协议: $(get_protocol_name $current_protocol)"
+        _ok "运行内核: $([[ "$core" == "xray" ]] && echo Xray || { [[ "$core" == "singbox" ]] && echo Sing-box || echo 独立核心; })"
         _dline
         
         # UDP协议提示开放防火墙
@@ -22358,7 +22720,11 @@ do_install_server() {
                 fi
             elif db_exists "singbox" "$current_protocol"; then
                 local cfg=$(db_get "singbox" "$current_protocol")
-                installed_port=$(echo "$cfg" | jq -r '.port')
+                if echo "$cfg" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                    installed_port=$(echo "$cfg" | jq -r '.[-1].port')
+                else
+                    installed_port=$(echo "$cfg" | jq -r '.port')
+                fi
             fi
         fi
 
@@ -26289,7 +26655,7 @@ show_service_logs() {
     # Sing-box 协议组 (hy2/tuic)
     local singbox_protocols=$(get_singbox_protocols)
     if [[ -n "$singbox_protocols" ]]; then
-        echo -e "  ${G}$idx${NC}) Sing-box 服务日志 (hy2/tuic)"
+        echo -e "  ${G}$idx${NC}) Sing-box 服务日志"
         proto_array+=("singbox")
         ((idx++))
     fi
@@ -27295,14 +27661,33 @@ _regenerate_config() {
     local core="$1" proto="$2"
     local config_file=""
     local service_name=""
+
+    # Sing-box 使用统一生成器维护所有入站、分流和统计设置，不能套用
+    # Xray 的局部 jq 更新逻辑。完整重建也可正确处理切换后的共同协议。
+    if [[ "$core" == "singbox" ]]; then
+        config_file="$CFG/singbox.json"
+        service_name="vless-singbox"
+        if ! generate_singbox_config; then
+            _err "Sing-box 配置重建失败，用户信息已保存在数据库"
+            return 1
+        fi
+        if ! /usr/local/bin/sing-box check -c "$config_file" >/dev/null 2>&1; then
+            _err "Sing-box 配置校验失败，服务未重启"
+            return 1
+        fi
+        if svc status "$service_name" >/dev/null 2>&1; then
+            svc restart "$service_name" || { _err "Sing-box 服务重启失败"; return 1; }
+        else
+            svc start "$service_name" || { _err "Sing-box 服务启动失败"; return 1; }
+        fi
+        _ok "Sing-box 用户配置已重建并生效"
+        return 0
+    fi
     
     # 确定配置文件路径和服务名称
     if [[ "$core" == "xray" ]]; then
         config_file="$CFG/config.json"
         service_name="vless-reality"
-    elif [[ "$core" == "singbox" ]]; then
-        config_file="$CFG/singbox/config.json"
-        service_name="vless-singbox"
     fi
     
     # 检查配置文件是否存在
@@ -29065,7 +29450,7 @@ manage_port_forwarding_backends() {
 # 脚本更新与主入口
 #═══════════════════════════════════════════════════════════════════════════════
 
-do_update() {
+perform_script_update() {
     _header
     echo -e "  ${W}脚本更新${NC}"
     _line
@@ -29121,11 +29506,20 @@ do_update() {
     # 系统目录的脚本路径
     local system_script="/usr/local/bin/vless-server.sh"
     
-    # 备份当前脚本
-    cp "$script_path" "${script_path}.bak" 2>/dev/null
+    # 保存可回退的中央备份；无论当前从下载目录还是快捷命令运行，都能找到。
+    local backup_dir="$CFG/script-backups"
+    local backup_file="$backup_dir/vless-server-${VERSION}-$(date '+%Y%m%d_%H%M%S').sh"
+    mkdir -p "$backup_dir" || { rm -f "$tmp_file"; _err "无法创建脚本备份目录"; return 1; }
+    if ! cp "$script_path" "$backup_file" || ! chmod 700 "$backup_file"; then
+        rm -f "$tmp_file" "$backup_file"
+        _err "当前脚本备份失败，已取消更新"
+        return 1
+    fi
+    bash -n "$backup_file" 2>/dev/null || { rm -f "$tmp_file" "$backup_file"; _err "当前脚本备份校验失败"; return 1; }
     
     # 替换当前运行的脚本
     if mv "$tmp_file" "$script_path" && chmod +x "$script_path"; then
+        echo "$backup_file" > "$backup_dir/previous"
         # 如果当前脚本不是系统目录的脚本，也更新系统目录
         if [[ "$script_path" != "$system_script" && -f "$system_script" ]]; then
             cp -f "$script_path" "$system_script" 2>/dev/null
@@ -29136,16 +29530,84 @@ do_update() {
         _ok "更新成功! v${VERSION} -> v${remote_ver}"
         echo ""
         echo -e "  ${C}请重新运行脚本以使用新版本${NC}"
-        echo -e "  ${D}备份文件: ${script_path}.bak${NC}"
+        echo -e "  ${D}上一版本备份: ${backup_file}${NC}"
         _line
         exit 0
     else
         # 恢复备份
-        [[ -f "${script_path}.bak" ]] && mv "${script_path}.bak" "$script_path"
+        cp -f "$backup_file" "$script_path" 2>/dev/null
         rm -f "$tmp_file"
         _err "更新失败"
         return 1
     fi
+}
+
+rollback_script_version() {
+    local backup_dir="$CFG/script-backups"
+    local pointer="$backup_dir/previous"
+    [[ -s "$pointer" ]] || { _warn "没有可回退的上一版本"; return 1; }
+
+    local backup_file
+    backup_file=$(cat "$pointer" 2>/dev/null)
+    [[ -f "$backup_file" ]] || { _err "上一版本备份不存在: $backup_file"; return 1; }
+    bash -n "$backup_file" 2>/dev/null || { _err "上一版本备份语法校验失败，已拒绝回退"; return 1; }
+
+    local previous_ver current_path system_script
+    previous_ver=$(_extract_script_version "$backup_file")
+    current_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
+    system_script="/usr/local/bin/vless-server.sh"
+    [[ -f "$current_path" ]] || { _err "无法确定当前脚本路径"; return 1; }
+    [[ -n "$previous_ver" ]] || { _err "无法识别上一版本号"; return 1; }
+
+    echo -e "  当前版本: ${Y}v${VERSION}${NC}"
+    echo -e "  回退版本: ${G}v${previous_ver}${NC}"
+    read -rp "  确认退回上一版本? [y/N]: " confirm
+    [[ "$confirm" =~ ^[yY]$ ]] || return 0
+
+    local swap_file
+    swap_file=$(mktemp "$backup_dir/current.XXXXXX") || return 1
+    cp "$current_path" "$swap_file" && chmod 700 "$swap_file" || { rm -f "$swap_file"; return 1; }
+
+    if install -m 755 "$backup_file" "$current_path"; then
+        # 从非系统路径运行时同步快捷命令实际使用的脚本。
+        if [[ "$current_path" != "$system_script" && -f "$system_script" ]]; then
+            install -m 755 "$backup_file" "$system_script" || {
+                install -m 755 "$swap_file" "$current_path"
+                rm -f "$swap_file"
+                _err "系统脚本同步失败，已恢复当前版本"
+                return 1
+            }
+        fi
+        mv "$swap_file" "$backup_file"
+        _ok "脚本已回退: v${VERSION} → v${previous_ver}"
+        echo -e "  ${C}请重新运行 vless 使用回退版本${NC}"
+        exit 0
+    fi
+
+    rm -f "$swap_file"
+    _err "脚本回退失败，当前版本未改变"
+    return 1
+}
+
+do_update() {
+    while true; do
+        _header
+        echo -e "  ${W}脚本版本管理${NC}"
+        _line
+        echo -e "  当前版本: ${G}v${VERSION}${NC}"
+        _item "1" "检查并更新脚本"
+        _item "2" "退回上一个版本"
+        _item "0" "返回"
+        _line
+        local choice
+        read -rp "  请选择 [0-2]: " choice
+        case "$choice" in
+            1) perform_script_update; _pause ;;
+            2) rollback_script_version; _pause ;;
+            0) return ;;
+            *) _err "无效选择" ;;
+        esac
+    done
 }
 
 main_menu() {
@@ -29227,7 +29689,7 @@ main_menu() {
         if [[ -n "$installed" ]]; then
             # 多协议服务端菜单
             _item "1" "安装新协议 (多协议共存)"
-            _item "2" "核心版本管理 (Xray/Sing-box/Snell v5/Snell v6)"
+            _item "2" "核心管理 (版本/运行内核切换)"
             _item "3" "卸载指定协议"
             _item "4" "用户管理 (多用户/流量/通知)"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
