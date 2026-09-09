@@ -8104,6 +8104,49 @@ _download_script_to() {
     return 1
 }
 
+# 获取低于当前版本的最新正式 Release。只接受纯数字语义化
+# 版本标签，因此 preview/beta/rc 以及 GitHub 标记的预发布版都会被排除。
+# 输出: version|tag
+_get_previous_stable_script_release() {
+    local current="${1#v}" releases tag version best_version="" best_tag=""
+    releases=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${SCRIPT_REPO}/releases?per_page=100" 2>/dev/null) || return 1
+
+    while IFS= read -r tag; do
+        [[ -n "$tag" ]] || continue
+        version="${tag#v}"
+        [[ "$version" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] || continue
+        _version_gt "$current" "$version" || continue
+        if [[ -z "$best_version" ]] || _version_gt "$version" "$best_version"; then
+            best_version="$version"
+            best_tag="$tag"
+        fi
+    done <<< "$(echo "$releases" | jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name // empty' 2>/dev/null)"
+
+    [[ -n "$best_version" && -n "$best_tag" ]] || return 1
+    printf '%s|%s\n' "$best_version" "$best_tag"
+}
+
+# 从指定正式 Release 标签下载脚本，并使用 GitHub blob SHA
+# 和 Bash 语法检查双重校验，防止下载错误页面或损坏文件。
+_fetch_script_release_tmp() {
+    local tag="$1" tmp_file url
+    [[ "$tag" =~ ^v?[0-9]+(\.[0-9]+){1,2}$ ]] || return 1
+    tmp_file=$(mktemp 2>/dev/null) || return 1
+    url="https://raw.githubusercontent.com/${SCRIPT_SOURCE_REPO}/${tag}/${SCRIPT_SOURCE_PATH}"
+
+    if ! curl -fsSL --connect-timeout 10 --max-time 60 -o "$tmp_file" "$url"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if ! _verify_github_blob "$SCRIPT_SOURCE_REPO" "$tag" "$SCRIPT_SOURCE_PATH" "$tmp_file" || \
+       ! bash -n "$tmp_file" 2>/dev/null; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    printf '%s\n' "$tmp_file"
+}
+
 # 获取最新标签版本号（无缓存）
 _get_latest_tag_version() {
     local repo="$1"
@@ -29622,47 +29665,66 @@ perform_script_update() {
 
 rollback_script_version() {
     local backup_dir="$CFG/script-backups"
-    local pointer="$backup_dir/previous"
-    [[ -s "$pointer" ]] || { _warn "没有可回退的上一版本"; return 1; }
+    local release_info previous_ver previous_tag rollback_file
+    _info "正在从 GitHub 查找上一个正式版本..."
+    release_info=$(_get_previous_stable_script_release "$VERSION") || {
+        _err "无法从 GitHub 获取低于 v${VERSION} 的正式版本"
+        return 1
+    }
+    IFS='|' read -r previous_ver previous_tag <<< "$release_info"
 
-    local backup_file
-    backup_file=$(cat "$pointer" 2>/dev/null)
-    [[ -f "$backup_file" ]] || { _err "上一版本备份不存在: $backup_file"; return 1; }
-    bash -n "$backup_file" 2>/dev/null || { _err "上一版本备份语法校验失败，已拒绝回退"; return 1; }
+    _info "下载 GitHub Release ${previous_tag}..."
+    rollback_file=$(_fetch_script_release_tmp "$previous_tag") || {
+        _err "${previous_tag} 下载或完整性校验失败"
+        return 1
+    }
+    local downloaded_ver
+    downloaded_ver=$(_extract_script_version "$rollback_file")
+    if [[ "$downloaded_ver" != "$previous_ver" || ! "$downloaded_ver" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+        rm -f "$rollback_file"
+        _err "Release 脚本版本与标签不一致，已拒绝回退"
+        return 1
+    fi
 
-    local previous_ver current_path system_script
-    previous_ver=$(_extract_script_version "$backup_file")
+    local current_path system_script
     current_path=$(readlink -f "$0" 2>/dev/null || echo "$0")
     system_script="/usr/local/bin/vless-server.sh"
-    [[ -f "$current_path" ]] || { _err "无法确定当前脚本路径"; return 1; }
-    [[ -n "$previous_ver" ]] || { _err "无法识别上一版本号"; return 1; }
+    [[ -f "$current_path" ]] || { rm -f "$rollback_file"; _err "无法确定当前脚本路径"; return 1; }
 
     echo -e "  当前版本: ${Y}v${VERSION}${NC}"
-    echo -e "  回退版本: ${G}v${previous_ver}${NC}"
-    read -rp "  确认退回上一版本? [y/N]: " confirm
-    [[ "$confirm" =~ ^[yY]$ ]] || return 0
+    echo -e "  GitHub 上一正式版: ${G}v${previous_ver}${NC}"
+    read -rp "  确认从 GitHub 退回到 v${previous_ver}? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[yY]$ ]]; then
+        rm -f "$rollback_file"
+        return 0
+    fi
 
     local swap_file
-    swap_file=$(mktemp "$backup_dir/current.XXXXXX") || return 1
-    cp "$current_path" "$swap_file" && chmod 700 "$swap_file" || { rm -f "$swap_file"; return 1; }
+    mkdir -p "$backup_dir" || { rm -f "$rollback_file"; return 1; }
+    swap_file=$(mktemp "$backup_dir/current.XXXXXX") || { rm -f "$rollback_file"; return 1; }
+    cp "$current_path" "$swap_file" && chmod 700 "$swap_file" || { rm -f "$swap_file" "$rollback_file"; return 1; }
 
-    if install -m 755 "$backup_file" "$current_path"; then
+    if install -m 755 "$rollback_file" "$current_path"; then
         # 从非系统路径运行时同步快捷命令实际使用的脚本。
         if [[ "$current_path" != "$system_script" && -f "$system_script" ]]; then
-            install -m 755 "$backup_file" "$system_script" || {
+            install -m 755 "$rollback_file" "$system_script" || {
                 install -m 755 "$swap_file" "$current_path"
-                rm -f "$swap_file"
+                rm -f "$swap_file" "$rollback_file"
                 _err "系统脚本同步失败，已恢复当前版本"
                 return 1
             }
         fi
-        mv "$swap_file" "$backup_file"
+        local saved_current="$backup_dir/vless-server-${VERSION}-$(date '+%Y%m%d_%H%M%S').sh"
+        mv "$swap_file" "$saved_current"
+        echo "$saved_current" > "$backup_dir/previous"
+        rm -f "$rollback_file"
         _ok "脚本已回退: v${VERSION} → v${previous_ver}"
+        echo -e "  ${D}来源: GitHub Release ${previous_tag}${NC}"
         echo -e "  ${C}请重新运行 vless 使用回退版本${NC}"
         exit 0
     fi
 
-    rm -f "$swap_file"
+    rm -f "$swap_file" "$rollback_file"
     _err "脚本回退失败，当前版本未改变"
     return 1
 }
@@ -29674,7 +29736,7 @@ do_update() {
         _line
         echo -e "  当前版本: ${G}v${VERSION}${NC}"
         _item "1" "检查并更新脚本"
-        _item "2" "退回上一个版本"
+        _item "2" "从 GitHub 退回上一正式版本"
         _item "0" "返回"
         _line
         local choice
