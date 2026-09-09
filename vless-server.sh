@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.6.0-preview.3 [服务端]
+#  多协议代理一键部署脚本 v3.6.0 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.6.0-preview.3"
+readonly VERSION="3.6.0"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -5545,15 +5545,39 @@ sync_time() {
 #═══════════════════════════════════════════════════════════════════════════════
 # 网络工具
 #═══════════════════════════════════════════════════════════════════════════════
+# 指定地址族探测公网 IP，并严格校验返回值的地址类型。
+# DNS64/NAT64 可能让 curl -6 连接成功，但探测站返回 NAT64
+# 出口的 IPv4；此时必须拒绝该结果，否则会生成 [1.2.3.4] 这类无效地址。
+_probe_public_ip() {
+    local family="$1" endpoint result
+    for endpoint in "https://ip.sb" "https://ifconfig.me"; do
+        result=$(curl "-$family" -sf --connect-timeout 5 --max-time 8 "$endpoint" 2>/dev/null) || continue
+        result=$(printf '%s' "$result" | tr -d '[:space:]')
+        result="${result#[}"
+        result="${result%]}"
+
+        if [[ "$family" == "4" ]]; then
+            _is_valid_ipv4_literal "$result" || continue
+        else
+            _is_valid_ipv6_literal "$result" || continue
+        fi
+        printf '%s\n' "$result"
+        return 0
+    done
+    return 1
+}
+
 get_ipv4() {
     [[ -n "$_CACHED_IPV4" ]] && { echo "$_CACHED_IPV4"; return; }
-    local result=$(curl -4 -sf --connect-timeout 5 https://ip.sb 2>/dev/null || curl -4 -sf --connect-timeout 5 https://ifconfig.me 2>/dev/null)
+    local result=""
+    result=$(_probe_public_ip 4) || result=""
     [[ -n "$result" ]] && _CACHED_IPV4="$result"
     echo "$result"
 }
 get_ipv6() {
     [[ -n "$_CACHED_IPV6" ]] && { echo "$_CACHED_IPV6"; return; }
-    local result=$(curl -6 -sf --connect-timeout 5 https://ip.sb 2>/dev/null || curl -6 -sf --connect-timeout 5 https://ifconfig.me 2>/dev/null)
+    local result=""
+    result=$(_probe_public_ip 6) || result=""
     [[ -n "$result" ]] && _CACHED_IPV6="$result"
     echo "$result"
 }
