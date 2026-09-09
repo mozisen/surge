@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.6.0 [服务端]
+#  多协议代理一键部署脚本 v3.7.0-preview.1 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.6.0"
+readonly VERSION="3.7.0-preview.1"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -390,6 +390,13 @@ db_update_port() {
 
 # 删除协议
 db_del() { # db_del core proto
+    if [[ "$1" == xray ]] && _snell_managed "$2"; then
+        local name
+        while IFS= read -r name; do
+            _snell_delete_user "$2" "$name" || return 1
+        done < <(db_list_users xray "$2")
+        _db_apply --arg p "$2" 'del(.meta.snell_users[$p])' || return 1
+    fi
     _db_apply --arg p "$2" "del(.${1}[\$p])"
 }
 
@@ -890,6 +897,10 @@ db_add_user() {
 # 用法: db_del_user "xray" "vless" "用户名"
 db_del_user() {
     local core="$1" proto="$2" name="$3"
+    if _snell_managed "$proto"; then
+        _snell_delete_user "$proto" "$name"
+        return $?
+    fi
     [[ ! -f "$DB_FILE" ]] && return 1
     
     _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" '
@@ -1212,6 +1223,17 @@ db_set_user_quota() {
 db_set_user_enabled() {
     local core="$1" proto="$2" name="$3" enabled="$4"
     [[ ! -f "$DB_FILE" ]] && return 1
+    if _snell_managed "$proto" && [[ "$enabled" == true ]]; then
+        local snell_user
+        snell_user=$(db_get_user "$core" "$proto" "$name")
+        if ! jq -e --arg today "$(date +%F)" '
+            ((.quota // 0) == 0 or (.used // 0) < .quota) and
+            ((.expire_date // "") == "" or .expire_date >= $today)
+        ' <<< "$snell_user" >/dev/null; then
+            _err "用户仍然超额或已到期，请先调整配额、重置流量或延长到期日期"
+            return 1
+        fi
+    fi
     
     _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --argjson e "$enabled" '
         .[$c][$p] as $cfg |
@@ -1223,7 +1245,11 @@ db_set_user_enabled() {
     ' || return 1
     
     # 自动重建配置
-    [[ "$core" == "xray" ]] && rebuild_and_reload_xray "silent"
+    if _snell_managed "$proto"; then
+        _snell_apply_users "$proto" "$name"
+    elif [[ "$core" == "xray" ]]; then
+        rebuild_and_reload_xray "silent"
+    fi
 }
 
 # 检查用户是否超限 (支持多端口数组格式)
@@ -2601,6 +2627,7 @@ _sync_all_user_traffic_unlocked() {
     
     # 月重置（仅重置数据库累计值，不影响实时计数器）
     check_monthly_traffic_reset
+    _snell_sync_traffic || { mark_traffic_sync_result "snell_error" 0; return 1; }
     
     # 检查是否需要发送每日报告
     check_daily_report
@@ -2611,7 +2638,11 @@ _sync_all_user_traffic_unlocked() {
     _pgrep sing-box && has_singbox=true
 
     if [[ "$has_xray" == "false" && "$has_singbox" == "false" ]]; then
-        mark_traffic_sync_result "no_core" 0
+        if _snell_any_managed; then
+            mark_traffic_sync_result "ok" 0
+        else
+            mark_traffic_sync_result "no_core" 0
+        fi
         return 0
     fi
     
@@ -2800,6 +2831,7 @@ sync_all_user_traffic() {
 # 支持 Xray + Sing-box（当前已接入 HY2 / TUIC / AnyTLS 的用户级统计）
 get_all_traffic_stats() {
     [[ ! -f "$DB_FILE" ]] && return 1
+    _snell_live_stats
     _ensure_singbox_default_users
 
     # 使用临时文件存储，避免大变量导致内存问题
@@ -13100,6 +13132,10 @@ EOF
 
 create_service() {
     local protocol="${1:-$(get_protocol)}"
+    if _snell_managed "$protocol"; then
+        _snell_apply_users "$protocol"
+        return $?
+    fi
     local kind="${PROTO_KIND[$protocol]:-}"
     local service_name="${PROTO_SVC[$protocol]:-}"
     local exec_cmd="${PROTO_EXEC[$protocol]:-}"
@@ -13268,6 +13304,10 @@ EOF
 
 svc() { # svc action service_name
     local action="$1" name="$2"
+    if [[ "${SNELL_RAW_SERVICE:-0}" != 1 ]] && _snell_managed "${name#vless-}"; then
+        _snell_group_service "$action" "${name#vless-}"
+        return $?
+    fi
     _svc_try() {
         local err
         err=$(mktemp "${TMPDIR:-/tmp}/vless-svc.XXXXXX") || return 1
@@ -20945,6 +20985,10 @@ do_uninstall() {
     check_installed || { _warn "未安装"; return; }
     read -rp "  确认卸载? [y/N]: " confirm
     [[ ! "$confirm" =~ ^[yY]$ ]] && return
+    local snell_proto
+    for snell_proto in snell snell-v5 snell-v6; do
+        _snell_managed "$snell_proto" && db_del xray "$snell_proto"
+    done
 
     local installed_protocols=""
     installed_protocols=$(get_installed_protocols 2>/dev/null || true)
@@ -21291,6 +21335,11 @@ do_install_server() {
     # 选择协议
     select_protocol || return 1
     local protocol="$SELECTED_PROTOCOL"
+    if _snell_managed "$protocol"; then
+        _info "该 Snell 协议已启用多用户，新增端口将作为独立用户创建"
+        _snell_add_user "$protocol"
+        return $?
+    fi
     
     # 检查协议是否为空（用户选择返回）
     [[ -z "$protocol" ]] && return 1
@@ -26956,6 +27005,10 @@ _show_users_list() {
 # 多端口配置不会错误地套用第一个实例的 SNI、密钥或端口。
 _gen_user_share_link() {
     local core="$1" proto="$2" credential="$3" user_name="$4" user_port="${5:-}"
+    if _is_snell_users_protocol "$proto"; then
+        _snell_user_share "$proto" "$user_name" "$user_port"
+        return $?
+    fi
     local all_cfg cfg
     all_cfg=$(db_get "$core" "$proto")
     [[ -z "$all_cfg" || "$all_cfg" == "null" ]] && return 1
@@ -27258,6 +27311,10 @@ _select_user_routing() {
 
 # 修改用户路由
 _set_user_routing() {
+    if _is_snell_users_protocol "$2"; then
+        _info "官方 Snell 实例不使用 Xray/Sing-box 用户路由，请使用 Snell 实例设置"
+        return 0
+    fi
     local core="$1" proto="$2"
     local proto_name=$(get_protocol_name "$proto")
     
@@ -27308,6 +27365,10 @@ _set_user_routing() {
 # 添加用户
 _add_user() {
     local core="$1" proto="$2"
+    if _is_snell_users_protocol "$proto"; then
+        _snell_add_user "$proto"
+        return $?
+    fi
     local proto_name=$(get_protocol_name "$proto")
     
     # 检查是否为独立协议（不支持多用户）
@@ -27780,6 +27841,10 @@ _set_user_expire_date() {
 # 更新 Xray/Sing-box 配置文件中的用户列表、用户级路由规则、链式代理和负载均衡并重载服务
 _regenerate_config() {
     local core="$1" proto="$2"
+    if _snell_managed "$proto"; then
+        # Snell 数据库操作已处理对应实例，不能顺便启动其他手动停止的用户。
+        return 0
+    fi
     local config_file=""
     local service_name=""
 
@@ -28567,7 +28632,7 @@ _show_realtime_traffic() {
         has_singbox=true
     fi
     
-    if [[ "$has_xray" == "false" && "$has_singbox" == "false" ]]; then
+    if [[ "$has_xray" == "false" && "$has_singbox" == "false" ]] && ! _snell_any_managed; then
         echo ""
         _warn "未检测到运行中的代理核心"
         echo ""
@@ -28617,7 +28682,7 @@ _sync_traffic_now() {
         has_singbox=true
     fi
     
-    if [[ "$has_xray" == "false" && "$has_singbox" == "false" ]]; then
+    if [[ "$has_xray" == "false" && "$has_singbox" == "false" ]] && ! _snell_any_managed; then
         echo ""
         _warn "未检测到运行中的代理核心"
         echo ""
@@ -28856,6 +28921,7 @@ manage_users() {
         _item "e" "设置到期日期"
         _item "r" "修改用户路由"
         _item "s" "查看用户分享链接"
+        _item "p" "Snell 用户实例设置 (端口/密钥/DNS/模式)"
         _line
         _item "7" "实时流量统计"
         _item "8" "同步流量数据"
@@ -28929,6 +28995,12 @@ manage_users() {
             s|S)
                 if _select_protocol_for_users; then
                     _show_user_share_links "$SELECTED_CORE" "$SELECTED_PROTO"
+                fi
+                ;;
+            p|P)
+                if _select_protocol_for_users; then
+                    _snell_edit_user "$SELECTED_PROTO"
+                    _pause
                 fi
                 ;;
             t|T)
@@ -29664,6 +29736,10 @@ perform_script_update() {
 }
 
 rollback_script_version() {
+    if _snell_any_managed; then
+        _err "Snell 多用户服务依赖本版启动接口，请先迁移或卸载这些实例后再回退旧脚本"
+        return 1
+    fi
     local backup_dir="$CFG/script-backups"
     local release_info previous_ver previous_tag rollback_file
     _info "正在从 GitHub 查找上一个正式版本..."
@@ -29898,8 +29974,483 @@ main_menu() {
     done
 }
 
+# Snell 多用户实例。沿用 xray 数据区存储，仍由官方 Snell 二进制运行。
+_is_snell_users_protocol() {
+    [[ "$1" == snell || "$1" == snell-v5 || "$1" == snell-v6 ]]
+}
+
+_snell_managed() {
+    _is_snell_users_protocol "$1" || return 1
+    jq -e --arg p "$1" '.meta.snell_users[$p] == true' "$DB_FILE" >/dev/null 2>&1
+}
+
+_snell_any_managed() {
+    jq -e '.meta.snell_users // {} | any(. == true)' "$DB_FILE" >/dev/null 2>&1
+}
+
+_snell_rows() {
+    jq -c --arg p "$1" '.xray[$p] // empty |
+        if type == "array" then .[] else . end' "$DB_FILE"
+}
+
+_snell_binary() {
+    case "$1" in
+        snell) echo /usr/local/bin/snell-server ;;
+        snell-v5) echo /usr/local/bin/snell-server-v5 ;;
+        snell-v6) echo /usr/local/bin/snell-server-v6 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 预览版迁移为一端口一用户。固定 id 用于服务与计数器，不依赖显示名称。
+_snell_migrate() {
+    local proto="$1" backup row id port template count
+    _snell_managed "$proto" && return 0
+    _is_snell_users_protocol "$proto" || return 1
+    mkdir -p "$CFG/snell-users" || return 1
+    chmod 700 "$CFG/snell-users"
+    backup=$(mktemp "$CFG/snell-users/pre-migration.XXXXXX") || return 1
+    SNELL_MIGRATION_BACKUP="$backup"
+    cp "$DB_FILE" "$backup" && chmod 600 "$backup" || return 1
+    # 保留原始手工配置（含 obfs/DNS），避免迁移改变默认节点行为。
+    template="$CFG/$proto.conf"
+    [[ -f "$template" ]] || { _err "缺少原始 Snell 配置: $template"; return 1; }
+    count=$(_snell_rows "$proto" | jq -s length)
+    if (( count != 1 )) || _snell_rows "$proto" | jq -e '(.users // [] | length) > 1' >/dev/null; then
+        _err "检测到旧版多端口 Snell 配置，请先分别确认对应原始配置文件再迁移"
+        return 1
+    fi
+    while IFS= read -r row; do
+        port=$(jq -r '.port' <<< "$row")
+        _is_valid_port "$port" || return 1
+        id=$(openssl rand -hex 12) || return 1
+        cp "$template" "$CFG/snell-users/$id.conf" || return 1
+        chmod 600 "$CFG/snell-users/$id.conf"
+        _db_apply --arg p "$proto" --arg id "$id" --argjson port "$port" '
+            .xray[$p] |= (if type == "array" then . else [.] end) |
+            .xray[$p] |= map(if .port == $port then
+                .psk as $psk | .snell_id = $id |
+                .users = [((.users // [])[0] // {name: "default", used: 0, quota: 0, enabled: true}) |
+                    .id = $id | .uuid = $psk]
+            else . end)
+        ' && {
+            # 凭证来自端口配置，旧用户记录的统计和 TG 绑定保持不变。
+            _db_apply --arg p "$proto" --arg id "$id" '
+                .xray[$p] |= map(if .snell_id == $id then
+                    .psk as $psk | .users[0].uuid = $psk
+                else . end)'
+        } || { cp "$backup" "$DB_FILE"; return 1; }
+    done <<< "$(_snell_rows "$proto")"
+    _db_apply --arg p "$proto" '.meta.snell_users[$p] = true' || return 1
+    _info "旧配置已保留，迁移备份: $backup"
+}
+
+_snell_nft_ready() {
+    command -v nft >/dev/null 2>&1 || {
+        _err "Snell 流量统计需要 nftables，请先安装 nftables 软件包"
+        return 1
+    }
+    nft list table inet vless_snell_users >/dev/null 2>&1 && return 0
+    if nft -f - <<'NFT'
+add table inet vless_snell_users
+add chain inet vless_snell_users input { type filter hook input priority -10; policy accept; }
+add chain inet vless_snell_users output { type filter hook output priority -10; policy accept; }
+NFT
+    then return 0; fi
+    nft list table inet vless_snell_users >/dev/null 2>&1
+}
+
+_snell_counter_prepare() {
+    local id="$1" port="$2" generation
+    [[ "$id" =~ ^[0-9a-f]{24}$ ]] && _is_valid_port "$port" || return 1
+    _snell_nft_ready || return 1
+    nft list counter inet vless_snell_users "u_$id" >/dev/null 2>&1 && return 0
+    generation=$(openssl rand -hex 12) || return 1
+    # 独立命名计数器统计客户端侧 TCP/UDP；inet 同时覆盖 IPv4/IPv6。
+    nft -f - <<NFT
+add counter inet vless_snell_users u_$id { comment "$generation"; }
+add counter inet vless_snell_users d_$id
+add rule inet vless_snell_users input meta l4proto { tcp, udp } th dport $port counter name u_$id comment "$id"
+add rule inet vless_snell_users output meta l4proto { tcp, udp } th sport $port counter name d_$id comment "$id"
+NFT
+}
+
+_snell_write_service() {
+    local proto="$1" id="$2" bin service conf
+    [[ "$id" =~ ^[0-9a-f]{24}$ ]] || return 1
+    bin=$(_snell_binary "$proto") || return 1
+    service="vless-snellu-$id"
+    conf="$CFG/snell-users/$id.conf"
+    if [[ "$DISTRO" == alpine ]]; then
+        cat > "/etc/init.d/$service" <<EOF
+#!/sbin/openrc-run
+name="$service"
+supervisor="supervise-daemon"
+command="$bin"
+command_args="-c $conf"
+output_log="$CFG/snell-users/$id.log"
+error_log="$CFG/snell-users/$id.log"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+depend() { need net; after firewall; }
+start_pre() { /usr/local/bin/vless-server.sh --snell-prepare $proto $id; }
+EOF
+        chmod 755 "/etc/init.d/$service"
+    else
+        cat > "/etc/systemd/system/$service.service" <<EOF
+[Unit]
+Description=Snell user $id
+After=network-online.target
+[Service]
+ExecStartPre=/usr/local/bin/vless-server.sh --snell-prepare $proto $id
+ExecStart=$bin -c $conf
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=51200
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload || return 1
+    fi
+}
+
+_snell_prepare_user() {
+    local proto="$1" id="$2" row enabled quota used expire
+    _snell_managed "$proto" || return 1
+    row=$(_snell_rows "$proto" | jq -c --arg id "$id" 'select(.snell_id == $id)')
+    [[ -n "$row" ]] || return 1
+    enabled=$(jq -r '.users[0].enabled' <<< "$row")
+    quota=$(jq -r '.users[0].quota // 0' <<< "$row")
+    used=$(jq -r '.users[0].used // 0' <<< "$row")
+    expire=$(jq -r '.users[0].expire_date // ""' <<< "$row")
+    [[ "$enabled" == true ]] || return 2
+    (( quota == 0 || used < quota )) || return 2
+    [[ -z "$expire" || "$expire" > "$(date +%F)" || "$expire" == "$(date +%F)" ]] || return 2
+    _snell_counter_prepare "$id" "$(jq -r .port <<< "$row")"
+}
+
+_snell_apply_users() {
+    local proto="$1" row id port psk file staged service failed=0
+    local only_name="${2:-}"
+    _snell_managed "$proto" || return 1
+    while IFS= read -r row; do
+        [[ -z "$only_name" || "$(jq -r '.users[0].name' <<< "$row")" == "$only_name" ]] || continue
+        id=$(jq -r .snell_id <<< "$row")
+        [[ "$id" =~ ^[0-9a-f]{24}$ ]] || return 1
+        port=$(jq -r .port <<< "$row"); psk=$(jq -r .psk <<< "$row")
+        _is_valid_port "$port" && [[ "$psk" =~ ^[A-Za-z0-9_+/=-]+$ ]] || return 1
+        file="$CFG/snell-users/$id.conf"; service="vless-snellu-$id"
+        [[ -f "$file" ]] || return 1
+        staged=$(mktemp "$file.XXXXXX") || return 1
+        awk -v listen="$(_fmt_hostport "$(_listen_addr)" "$port")" -v psk="$psk" '
+            /^[[:space:]]*listen[[:space:]]*=/ { print; next }
+            /^[[:space:]]*psk[[:space:]]*=/ { print "psk = " psk; next }
+            { print }
+        ' "$file" > "$staged"
+        local changed=false
+        cmp -s "$file" "$staged" || changed=true
+        chmod 600 "$staged" && mv "$staged" "$file" || return 1
+        _snell_write_service "$proto" "$id" || return 1
+        if _snell_prepare_user "$proto" "$id"; then
+            svc enable "$service" || return 1
+            if svc status "$service"; then
+                [[ "$changed" == false ]] || svc restart "$service" || failed=1
+            else
+                svc start "$service" || failed=1
+                sleep 1
+                svc status "$service" || { _err "Snell 用户实例启动后退出: $service"; failed=1; }
+            fi
+        else
+            local prepare_status=$?
+            [[ "$prepare_status" == 2 ]] || { _err "用户 $id 计数规则准备失败"; return 1; }
+            svc stop "$service" || true
+            svc disable "$service" || true
+        fi
+    done <<< "$(_snell_rows "$proto")"
+    return "$failed"
+}
+
+_snell_group_service() {
+    local action="$1" proto="$2" row id result=0 active=1
+    while IFS= read -r row; do
+        id=$(jq -r .snell_id <<< "$row")
+        [[ "$id" =~ ^[0-9a-f]{24}$ ]] || return 1
+        case "$action" in
+            start|restart|enable|reload)
+                _snell_prepare_user "$proto" "$id" || continue ;;
+        esac
+        if svc "$action" "vless-snellu-$id"; then active=0; else result=1; fi
+    done <<< "$(_snell_rows "$proto")"
+    [[ "$action" == status ]] && return "$active"
+    return "$result"
+}
+
+_snell_sync_traffic() {
+    local proto row id snapshot up down generation
+    _snell_any_managed || return 0
+    _snell_nft_ready || return 1
+    snapshot=$(nft -j list table inet vless_snell_users) || return 1
+    jq -e '.nftables | type == "array"' <<< "$snapshot" >/dev/null || return 1
+    for proto in snell snell-v5 snell-v6; do
+        _snell_managed "$proto" || continue
+        while IFS= read -r row; do
+            id=$(jq -r .snell_id <<< "$row")
+            up=$(jq -r --arg n "u_$id" '[.nftables[].counter? | select(.name == $n)][0].bytes // 0' <<< "$snapshot")
+            down=$(jq -r --arg n "d_$id" '[.nftables[].counter? | select(.name == $n)][0].bytes // 0' <<< "$snapshot")
+            generation=$(jq -r --arg n "u_$id" '[.nftables[].counter? | select(.name == $n)][0].comment // ""' <<< "$snapshot")
+            [[ -n "$generation" ]] || continue
+            # 累计值与基线在同一个数据库事务中提交。重启/规则重建后 generation
+            # 改变，新计数从零累计；从不 reset 内核计数器，避免读取窗口丢流量。
+            _db_apply --arg p "$proto" --arg id "$id" --arg g "$generation" --argjson up "$up" --argjson down "$down" '
+                .xray[$p] |= map(if .snell_id == $id then
+                    .users[0] |= (
+                        (if .counter_generation == $g then (.counter_up // 0) else 0 end) as $u |
+                        (if .counter_generation == $g then (.counter_down // 0) else 0 end) as $d |
+                        .used = ((.used // 0) + ([$up - $u, 0]|max) + ([$down - $d, 0]|max)) |
+                        .counter_up = $up | .counter_down = $down | .counter_generation = $g
+                    ) else . end)' || return 1
+        done <<< "$(_snell_rows "$proto")"
+        while IFS= read -r row; do
+            local name used quota enabled expire
+            name=$(jq -r '.users[0].name' <<< "$row")
+            used=$(jq -r '.users[0].used // 0' <<< "$row")
+            quota=$(jq -r '.users[0].quota // 0' <<< "$row")
+            enabled=$(jq -r '.users[0].enabled' <<< "$row")
+            expire=$(jq -r '.users[0].expire_date // ""' <<< "$row")
+            if [[ "$enabled" == true ]] && { (( quota > 0 && used >= quota )) || [[ -n "$expire" && "$expire" < "$(date +%F)" ]]; }; then
+                db_set_user_enabled xray "$proto" "$name" false || return 1
+                if (( quota > 0 && used >= quota )); then
+                    tg_send_over_quota "$name" "$proto" "$used" "$quota" xray
+                else
+                    send_tg_expired_notice "$name" "$proto" "$expire" xray
+                fi
+            elif [[ "$enabled" == true ]] && (( quota > 0 )) && (( used * 100 / quota >= 80 )); then
+                if [[ "$(db_get_user_alert_state xray "$proto" "$name" last_alert_percent)" != 80 ]]; then
+                    tg_send_quota_alert "$name" "$proto" "$used" "$quota" "$((used * 100 / quota))" xray
+                    db_set_user_alert_state xray "$proto" "$name" last_alert_percent 80
+                fi
+            fi
+        done <<< "$(_snell_rows "$proto")"
+    done
+}
+
+_snell_delete_user() {
+    local proto="$1" name="$2" id
+    id=$(db_get_user_field xray "$proto" "$name" id)
+    [[ "$id" =~ ^[0-9a-f]{24}$ ]] || return 1
+    if ! svc stop "vless-snellu-$id" && svc status "vless-snellu-$id"; then
+        _err "用户实例未能停止，已取消删除"
+        return 1
+    fi
+    svc disable "vless-snellu-$id" || true
+    _db_apply --arg p "$proto" --arg id "$id" '.xray[$p] |= map(select(.snell_id != $id))' || return 1
+    rm -f "$CFG/snell-users/$id.conf" "/etc/init.d/vless-snellu-$id" "/etc/systemd/system/vless-snellu-$id.service"
+    [[ "$DISTRO" == alpine ]] || systemctl daemon-reload
+    # 删除该 id 的规则和计数器，不能清空其他用户或端口转发表。
+    local chain handle
+    for chain in input output; do
+        while read -r handle; do
+            [[ "$handle" =~ ^[0-9]+$ ]] && nft delete rule inet vless_snell_users "$chain" handle "$handle"
+        done < <(nft -j list chain inet vless_snell_users "$chain" | jq -r --arg id "$id" '.nftables[].rule? | select(.comment == $id) | .handle')
+    done
+    nft delete counter inet vless_snell_users "u_$id" 2>/dev/null || true
+    nft delete counter inet vless_snell_users "d_$id" 2>/dev/null || true
+}
+
+_snell_add_user() {
+    local proto="$1" name port psk quota days expiry="" id template row managed=false
+    if ! command -v nft >/dev/null 2>&1; then
+        _info "安装 Snell 用户流量统计依赖 nftables..."
+        case "$DISTRO" in
+            alpine) apk add --no-cache nftables || return 1 ;;
+            debian|ubuntu) apt-get update -qq && apt-get install -y nftables || return 1 ;;
+            centos) yum install -y nftables || return 1 ;;
+            *) _err "请先安装 nftables"; return 1 ;;
+        esac
+    fi
+    _snell_nft_ready || return 1
+    read -rp "  Snell 用户名 (字母/数字/_/-): " name
+    [[ "$name" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || { _err "用户名无效"; return 1; }
+    [[ "$name" != default ]] || { _err "default 为原始用户保留名称"; return 1; }
+    [[ -z "$(db_get_user xray "$proto" "$name")" ]] || { _err "用户名已存在"; return 1; }
+    port=$(ask_port "$proto") || return 1
+    psk=$(openssl rand -hex 16) || return 1
+    read -rp "  配额 GB [0=无限]: " quota; quota="${quota:-0}"
+    [[ "$quota" =~ ^[0-9]{1,6}$ ]] || return 1
+    read -rp "  有效天数 [留空=永不过期]: " days
+    if [[ -n "$days" ]]; then
+        [[ "$days" =~ ^[0-9]{1,5}$ ]] || return 1
+        expiry=$(date -d "+$days days" +%F) || return 1
+    fi
+    _info "$name / $proto / 端口 $port / 配额 ${quota}GB / 到期 ${expiry:-永不过期}"
+    _warn "流量按客户端端口网络字节统计，含协议开销；配额每分钟检查"
+    read -rp "  确认创建独立用户实例? [y/N]: " confirm
+    [[ "$confirm" =~ ^[yY]$ ]] || return 0
+    _snell_managed "$proto" && managed=true
+    # 必须先安装当前脚本，保证服务开机准备命令存在。
+    create_shortcut || return 1
+    _snell_migrate "$proto" || return 1
+    if [[ "$managed" == false ]]; then
+        # 原服务与新 default 实例使用相同端口，迁移时仅短暂重启。
+        SNELL_RAW_SERVICE=1 svc stop "vless-$proto" || true
+        SNELL_RAW_SERVICE=1 svc disable "vless-$proto" || true
+        if ! _snell_apply_users "$proto"; then
+            _snell_group_service stop "$proto" || true
+            _snell_group_service disable "$proto" || true
+            local old_cfg
+            old_cfg=$(jq -c --arg p "$proto" '.xray[$p]' "$SNELL_MIGRATION_BACKUP") || return 1
+            _db_apply --arg p "$proto" --argjson old "$old_cfg" '.xray[$p]=$old | del(.meta.snell_users[$p])' || return 1
+            SNELL_RAW_SERVICE=1 svc enable "vless-$proto"
+            SNELL_RAW_SERVICE=1 svc start "vless-$proto"
+            _err "迁移服务失败，已恢复原 Snell 服务；备份位于 snell-users"
+            return 1
+        fi
+    fi
+    id=$(openssl rand -hex 12) || return 1
+    template=$(_snell_rows "$proto" | head -n1)
+    awk -v listen="$(_fmt_hostport "$(_listen_addr)" "$port")" '
+        /^[[:space:]]*listen[[:space:]]*=/ {print "listen = " listen; next} {print}
+    ' "$CFG/snell-users/$(jq -r .snell_id <<< "$template").conf" > "$CFG/snell-users/$id.conf" || return 1
+    row=$(jq -c --arg id "$id" --arg name "$name" --arg psk "$psk" --arg exp "$expiry" --argjson port "$port" --argjson quota "$((10#$quota * 1073741824))" '
+        .port=$port | .psk=$psk | .snell_id=$id |
+        .users=[{id:$id,name:$name,uuid:$psk,used:0,quota:$quota,enabled:true,expire_date:$exp}]' <<< "$template") || return 1
+    _db_apply --arg p "$proto" --argjson row "$row" '.xray[$p] += [$row]' || return 1
+    if ! _snell_apply_users "$proto" "$name"; then
+        _snell_delete_user "$proto" "$name"
+        _err "新增实例启动失败，已撤销新增用户"
+        return 1
+    fi
+    setup_traffic_cron 1 || return 1
+    _ok "Snell 用户已创建，可在用户管理中设置配额、到期与 TG 绑定"
+    _info "请在云安全组/防火墙放行端口 $port；v5 需要 TCP 和 UDP"
+    _snell_user_share "$proto" "$name" "$port"
+}
+
+_snell_user_share() {
+    local proto="$1" name="$2" port="$3" row ipv4 ipv6 address version
+    row=$(_snell_rows "$proto" | jq -c --arg port "$port" --arg name "$name" '
+        select((.port|tostring) == $port or any(.users[]?; .name == $name))' | head -n1)
+    [[ -n "$row" ]] || return 1
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
+    address="$ipv4"; [[ -n "$address" ]] || address="${ipv6:+[$ipv6]}"
+    [[ -n "$address" ]] || return 1
+    case "$proto" in snell) version=4 ;; snell-v5) version=5 ;; snell-v6) version=6 ;; esac
+    local line conf obfs host id
+    line=$(gen_snell_surge_line "$name" "$address" "$(jq -r .port <<< "$row")" "$(jq -r .psk <<< "$row")" "$version" "$(jq -r '.mode // "default"' <<< "$row")" "$(jq -r '.tfo // "true"' <<< "$row")")
+    id=$(jq -r '.snell_id // empty' <<< "$row")
+    conf="$CFG/$proto.conf"
+    [[ -z "$id" ]] || conf="$CFG/snell-users/$id.conf"
+    if [[ "$version" != 6 && -f "$conf" ]]; then
+        obfs=$(awk -F= '/^[[:space:]]*obfs[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2; exit}' "$conf")
+        [[ "$obfs" != http ]] || line="$line, obfs=http"
+    fi
+    printf '%s\n' "$line"
+}
+
+_snell_live_stats() {
+    _snell_any_managed || return 0
+    local snapshot proto row id up down name
+    snapshot=$(nft -j list table inet vless_snell_users 2>/dev/null) || return 1
+    for proto in snell snell-v5 snell-v6; do
+        _snell_managed "$proto" || continue
+        while IFS= read -r row; do
+            id=$(jq -r .snell_id <<< "$row")
+            name=$(jq -r '.users[0].name' <<< "$row")
+            up=$(jq -r --arg n "u_$id" '[.nftables[].counter? | select(.name == $n)][0].bytes // 0' <<< "$snapshot")
+            down=$(jq -r --arg n "d_$id" '[.nftables[].counter? | select(.name == $n)][0].bytes // 0' <<< "$snapshot")
+            printf '%s|%s|%s|%s|%s\n' "$proto" "$name" "$up" "$down" "$((up + down))"
+        done <<< "$(_snell_rows "$proto")"
+    done
+}
+
+_snell_update_counter_port() {
+    local id="$1" port="$2" ih oh
+    _snell_counter_prepare "$id" "$port" || return 1
+    ih=$(nft -j list chain inet vless_snell_users input | jq -r --arg id "$id" '.nftables[].rule? | select(.comment == $id) | .handle')
+    oh=$(nft -j list chain inet vless_snell_users output | jq -r --arg id "$id" '.nftables[].rule? | select(.comment == $id) | .handle')
+    [[ "$ih" =~ ^[0-9]+$ && "$oh" =~ ^[0-9]+$ ]] || return 1
+    nft -f - <<NFT
+replace rule inet vless_snell_users input handle $ih meta l4proto { tcp, udp } th dport $port counter name u_$id comment "$id"
+replace rule inet vless_snell_users output handle $oh meta l4proto { tcp, udp } th sport $port counter name d_$id comment "$id"
+NFT
+}
+
+_snell_edit_user() {
+    local proto="$1" name row id port psk dns mode="" tfo staged oldfile updated confirm
+    _snell_managed "$proto" || { _err "请先通过添加用户启用 Snell 多用户"; return 1; }
+    _show_users_list xray "$proto"
+    read -rp "  输入要修改的用户名 (留空返回): " name
+    [[ -n "$name" ]] || return 0
+    row=$(_snell_rows "$proto" | jq -c --arg name "$name" 'select(.users[0].name == $name)')
+    [[ -n "$row" ]] || { _err "用户不存在"; return 1; }
+    id=$(jq -r .snell_id <<< "$row")
+    if [[ "$DISTRO" == alpine ]]; then
+        _info "实例日志: $CFG/snell-users/$id.log"
+    else
+        _info "实例日志: journalctl -u vless-snellu-$id"
+    fi
+    port=$(jq -r .port <<< "$row")
+    read -rp "  当前端口 $port，修改端口? [y/N]: " confirm
+    if [[ "$confirm" =~ ^[yY]$ ]]; then port=$(ask_port "$proto") || return 1; fi
+    psk=$(jq -r .psk <<< "$row")
+    read -rp "  重新生成 PSK? [y/N]: " confirm
+    [[ "$confirm" =~ ^[yY]$ ]] && psk=$(openssl rand -hex 16)
+    read -rp "  DNS (留空保留，system 使用系统 DNS): " dns
+    [[ "$dns" == system ]] || _is_valid_dns_server_list "$dns" || { _err "DNS 无效"; return 1; }
+    tfo=$(jq -r '.tfo // "true"' <<< "$row")
+    if [[ "$proto" == snell-v6 ]]; then
+        read -rp "  模式 default/unshaped (留空保留): " mode
+        [[ -z "$mode" || "$mode" == default || "$mode" == unshaped ]] || return 1
+    fi
+    read -rp "  保存并重启该用户实例? [y/N]: " confirm
+    [[ "$confirm" =~ ^[yY]$ ]] || return 0
+    sync_all_user_traffic true || return 1
+    oldfile=$(mktemp "$CFG/snell-users/$id.backup.XXXXXX") || return 1
+    cp "$CFG/snell-users/$id.conf" "$oldfile" && chmod 600 "$oldfile" || return 1
+    staged=$(mktemp "$CFG/snell-users/$id.edit.XXXXXX") || return 1
+    awk -v listen="$(_fmt_hostport "$(_listen_addr)" "$port")" -v psk="$psk" -v dns="$dns" -v mode="$mode" '
+        /^[[:space:]]*listen[[:space:]]*=/ {print "listen = " listen; next}
+        /^[[:space:]]*psk[[:space:]]*=/ {print "psk = " psk; next}
+        /^[[:space:]]*dns[[:space:]]*=/ && dns != "" {next}
+        /^[[:space:]]*mode[[:space:]]*=/ && mode != "" {next}
+        {print}
+        END {if (dns != "" && dns != "system") print "dns = " dns; if (mode != "") print "mode = " mode}
+    ' "$oldfile" > "$staged"
+    chmod 600 "$staged"
+    if svc status "vless-snellu-$id"; then
+        svc stop "vless-snellu-$id" || { rm -f "$staged"; _err "无法停止用户实例"; return 1; }
+    fi
+    if _snell_update_counter_port "$id" "$port" &&
+       _db_apply --arg p "$proto" --arg id "$id" --arg psk "$psk" --arg mode "$mode" --arg dns "$dns" --argjson port "$port" '
+        .xray[$p] |= map(if .snell_id == $id then .port=$port | .psk=$psk | .users[0].uuid=$psk |
+            (if $mode != "" then .mode=$mode else . end) |
+            (if $dns != "" then .dns=(if $dns=="system" then "" else $dns end) else . end)
+            else . end)' &&
+       mv "$staged" "$CFG/snell-users/$id.conf" && _snell_apply_users "$proto" "$name"; then
+        _ok "用户 $name 配置已更新 (端口 $port)，请更新客户端节点"
+        _snell_user_share "$proto" "$name" "$port"
+        return 0
+    fi
+    # 只还原本用户的连接参数，保留同步后的统计与 TG 数据。
+    _db_apply --arg p "$proto" --arg id "$id" --argjson old "$row" '
+        .xray[$p] |= map(if .snell_id == $id then .users as $users |
+            $old | .users=$users | .users[0].uuid=$old.psk else . end)'
+    cp "$oldfile" "$CFG/snell-users/$id.conf"
+    _snell_update_counter_port "$id" "$(jq -r .port <<< "$row")" || true
+    _snell_apply_users "$proto" "$name" || true
+    rm -f "$staged"
+    _err "修改失败，已尝试恢复原配置；备份: $oldfile"
+    return 1
+}
+
 # 命令行参数处理
 case "${1:-}" in
+    --snell-prepare)
+        check_root
+        _snell_prepare_user "${2:-}" "${3:-}"
+        exit $?
+        ;;
     --sync-traffic)
         # 静默模式：用于定时任务
         check_root
