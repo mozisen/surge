@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.6.0-preview.2 [服务端]
+#  多协议代理一键部署脚本 v3.6.0-preview.3 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.6.0-preview.2"
+readonly VERSION="3.6.0-preview.3"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -26885,95 +26885,113 @@ _show_users_list() {
     _line
 }
 
-# 生成用户的分享链接（根据协议类型）
+# 生成用户的分享链接（根据协议类型）。第 5 参数为用户所在端口，确保
+# 多端口配置不会错误地套用第一个实例的 SNI、密钥或端口。
 _gen_user_share_link() {
-    local core="$1" proto="$2" uuid="$3" user_name="$4"
-    
-    # 获取协议配置
-    local cfg=$(db_get "$core" "$proto")
-    [[ -z "$cfg" || "$cfg" == "null" ]] && return
-    
-    # 检查是否为多端口数组格式
-    local is_array=false
-    if echo "$cfg" | jq -e 'type == "array"' >/dev/null 2>&1; then
-        is_array=true
-        # 多端口：从第一个端口实例获取配置
-        cfg=$(echo "$cfg" | jq '.[0]')
-    fi
-    
-    # 提取配置字段
-    local port=$(echo "$cfg" | jq -r '.port // empty')
-    local sni=$(echo "$cfg" | jq -r '.sni // empty')
-    local short_id=$(echo "$cfg" | jq -r '.short_id // empty')
-    local public_key=$(echo "$cfg" | jq -r '.public_key // empty')
-    local path=$(echo "$cfg" | jq -r '.path // empty')
-    local method=$(echo "$cfg" | jq -r '.method // empty')
-    local domain=$(echo "$cfg" | jq -r '.domain // empty')
-    
-    # 获取 IP 地址
-    local ipv4 ipv6
-    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
-    local country_code=$(get_ip_country "$ipv4")
-    [[ -z "$country_code" ]] && country_code=$(get_ip_country "$ipv6")
-    
-    # 检测回落协议端口
-    local display_port="$port"
-    if [[ "$proto" == "vless-ws" || "$proto" == "vmess-ws" ]]; then
-        if db_exists "xray" "vless-vision"; then
-            local vision_cfg=$(db_get "xray" "vless-vision")
-            if echo "$vision_cfg" | jq -e 'type == "array"' >/dev/null 2>&1; then
-                display_port=$(echo "$vision_cfg" | jq -r '.[0].port // empty')
-            else
-                display_port=$(echo "$vision_cfg" | jq -r '.port // empty')
-            fi
-        elif db_exists "xray" "trojan"; then
-            local trojan_cfg=$(db_get "xray" "trojan")
-            if echo "$trojan_cfg" | jq -e 'type == "array"' >/dev/null 2>&1; then
-                display_port=$(echo "$trojan_cfg" | jq -r '.[0].port // empty')
-            else
-                display_port=$(echo "$trojan_cfg" | jq -r '.port // empty')
-            fi
-        elif db_exists "xray" "vless"; then
-            local vless_cfg=$(db_get "xray" "vless")
-            if echo "$vless_cfg" | jq -e 'type == "array"' >/dev/null 2>&1; then
-                display_port=$(echo "$vless_cfg" | jq -r '.[0].port // empty')
-            else
-                display_port=$(echo "$vless_cfg" | jq -r '.port // empty')
-            fi
+    local core="$1" proto="$2" credential="$3" user_name="$4" user_port="${5:-}"
+    local all_cfg cfg
+    all_cfg=$(db_get "$core" "$proto")
+    [[ -z "$all_cfg" || "$all_cfg" == "null" ]] && return 1
+
+    if echo "$all_cfg" | jq -e 'type == "array"' >/dev/null 2>&1; then
+        if [[ -n "$user_port" ]]; then
+            cfg=$(echo "$all_cfg" | jq -c --arg port "$user_port" \
+                '[.[] | select((.port | tostring) == $port)][0] // empty')
         fi
-        [[ -z "$display_port" ]] && display_port="$port"
+        [[ -z "$cfg" || "$cfg" == "null" ]] && cfg=$(echo "$all_cfg" | jq -c '.[0] // empty')
+    else
+        cfg="$all_cfg"
     fi
-    
-    local remark="${country_code}-${user_name}"
-    
-    # 生成 IPv4 链接
+    [[ -z "$cfg" || "$cfg" == "null" ]] && return 1
+
+    local port sni short_id public_key path method domain host password username
+    local security_mode encryption use_tls socks_sni
+    port=$(echo "$cfg" | jq -r '.port // empty')
+    sni=$(echo "$cfg" | jq -r '.sni // empty')
+    short_id=$(echo "$cfg" | jq -r '.short_id // empty')
+    public_key=$(echo "$cfg" | jq -r '.public_key // empty')
+    path=$(echo "$cfg" | jq -r '.path // empty')
+    method=$(echo "$cfg" | jq -r '.method // empty')
+    domain=$(echo "$cfg" | jq -r '.domain // empty')
+    host=$(echo "$cfg" | jq -r '.host // empty')
+    password=$(echo "$cfg" | jq -r '.password // empty')
+    username=$(echo "$cfg" | jq -r '.username // empty')
+    use_tls=$(echo "$cfg" | jq -r '.tls // "false"')
+    socks_sni=$(echo "$cfg" | jq -r '.sni // empty')
+    [[ -n "$port" ]] || return 1
+
+    # 优先公网 IPv4，其次 IPv6（URI 必须加方括号），再回落到配置域名。
+    local ipv4 ipv6 server_addr country_ip country_code remark
+    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     if [[ -n "$ipv4" ]]; then
-        local link=""
-        case "$proto" in
-            vless)
-                local security_mode=$(echo "$cfg" | jq -r '.security_mode // "reality"')
-                if [[ "$security_mode" == "encryption" ]]; then
-                    local encryption=$(echo "$cfg" | jq -r '.encryption // empty')
-                    link=$(gen_vless_encryption_link "$ipv4" "$display_port" "$uuid" "$encryption" "$remark")
-                else
-                    link=$(gen_vless_link "$ipv4" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$remark")
-                fi
-                ;;
-            vless-xhttp) link=$(gen_vless_xhttp_link "$ipv4" "$display_port" "$uuid" "$public_key" "$short_id" "$sni" "$path" "$remark") ;;
-            vless-vision) link=$(gen_vless_vision_link "$ipv4" "$display_port" "$uuid" "$sni" "$remark") ;;
-            vless-ws) link=$(gen_vless_ws_link "$ipv4" "$display_port" "$uuid" "$sni" "$path" "$remark") ;;
-            vmess-ws) link=$(gen_vmess_ws_link "$ipv4" "$display_port" "$uuid" "$sni" "$path" "$remark") ;;
-            ss2022) link=$(gen_ss2022_link "$ipv4" "$display_port" "$method" "$uuid" "$remark") ;;
-            hy2) link=$(gen_hy2_link "$ipv4" "$display_port" "$uuid" "$sni" "$remark") ;;
-            trojan) link=$(gen_trojan_link "$ipv4" "$display_port" "$uuid" "$sni" "$remark") ;;
-            tuic) 
-                local password=$(echo "$cfg" | jq -r '.password // empty')
-                link=$(gen_tuic_link "$ipv4" "$display_port" "$uuid" "$password" "$sni" "$remark") 
-                ;;
-            socks) link=$(gen_socks_link "$ipv4" "$display_port" "$user_name" "$uuid" "$remark") ;;
-        esac
-        [[ -n "$link" ]] && echo "$link"
+        server_addr="$ipv4"
+        country_ip="$ipv4"
+    elif [[ -n "$ipv6" ]]; then
+        country_ip="${ipv6#[}"; country_ip="${country_ip%]}"
+        server_addr="[$country_ip]"
+    elif [[ -n "$domain" ]]; then
+        server_addr="$domain"
+    else
+        return 1
     fi
+    country_code=$(get_ip_country "$country_ip")
+    remark="${country_code:+${country_code}-}${user_name}"
+
+    # 检测 WS 回落协议实际对外端口。
+    local display_port="$port" master_cfg
+    if [[ "$proto" == "vless-ws" || "$proto" == "vmess-ws" || "$proto" == "trojan-ws" ]]; then
+        local master_proto
+        for master_proto in vless-vision trojan vless; do
+            db_exists "xray" "$master_proto" || continue
+            master_cfg=$(db_get "xray" "$master_proto")
+            display_port=$(echo "$master_cfg" | jq -r \
+                'if type == "array" then .[0].port // empty else .port // empty end')
+            [[ -n "$display_port" ]] && break
+        done
+        [[ -n "$display_port" ]] || display_port="$port"
+    fi
+
+    local link=""
+    case "$proto" in
+        vless)
+            security_mode=$(echo "$cfg" | jq -r '.security_mode // "reality"')
+            if [[ "$security_mode" == "encryption" ]]; then
+                encryption=$(echo "$cfg" | jq -r '.encryption // empty')
+                link=$(gen_vless_encryption_link "$server_addr" "$display_port" "$credential" "$encryption" "$remark")
+            else
+                link=$(gen_vless_link "$server_addr" "$display_port" "$credential" "$public_key" "$short_id" "$sni" "$remark")
+            fi
+            ;;
+        vless-xhttp) link=$(gen_vless_xhttp_link "$server_addr" "$display_port" "$credential" "$public_key" "$short_id" "$sni" "$path" "$remark") ;;
+        vless-xhttp-cdn)
+            [[ -n "$domain" ]] || return 1
+            link=$(gen_vless_xhttp_cdn_link "$domain" "443" "$credential" "$path" "$remark")
+            ;;
+        vless-vision) link=$(gen_vless_vision_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
+        vless-ws) link=$(gen_vless_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
+        vless-ws-notls) link=$(gen_vless_ws_notls_link "$server_addr" "$display_port" "$credential" "$path" "$host" "$remark") ;;
+        vmess-ws) link=$(gen_vmess_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
+        ss2022) link=$(gen_ss2022_link "$server_addr" "$display_port" "$method" "$credential" "$remark") ;;
+        ss-legacy) link=$(gen_ss_legacy_link "$server_addr" "$display_port" "$method" "$credential" "$remark") ;;
+        hy2) link=$(gen_hy2_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
+        trojan) link=$(gen_trojan_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
+        trojan-ws) link=$(gen_trojan_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
+        tuic) link=$(gen_tuic_link "$server_addr" "$display_port" "$credential" "$password" "$sni" "$remark") ;;
+        anytls) link=$(gen_anytls_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
+        socks)
+            # 旧数据库中默认 SOCKS 账号没有 users 数组，用配置内的
+            # username；后续添加的多用户则使用用户名单中的名称。
+            local socks_username="$user_name"
+            [[ "$user_name" == "default" && -n "$username" ]] && socks_username="$username"
+            if [[ "$use_tls" == "true" ]]; then
+                link="socks5://${socks_username}:${credential}@${server_addr}:${display_port}?tls=true&sni=${socks_sni}#${remark}"
+            else
+                link=$(gen_socks_link "$server_addr" "$display_port" "$socks_username" "$credential" "$remark")
+            fi
+            ;;
+    esac
+    [[ -n "$link" ]] || return 1
+    printf '%s\n' "$link"
 }
 
 # 显示用户分享链接菜单
@@ -26997,13 +27015,15 @@ _show_user_share_links() {
         # 显示用户列表
         local users=()
         local uuids=()
+        local ports=()
         local idx=1
         
-        while IFS='|' read -r name uuid used quota enabled port routing; do
+        while IFS='|' read -r name uuid used quota enabled port routing expire_date; do
             [[ -z "$name" ]] && continue
             users+=("$name")
             uuids+=("$uuid")
-            echo -e "  ${G}$idx${NC}) $name"
+            ports+=("$port")
+            echo -e "  ${G}$idx${NC}) $name${port:+ ${D}(端口: $port)${NC}}"
             ((idx++))
         done <<< "$stats"
         
@@ -27027,9 +27047,14 @@ _show_user_share_links() {
             for i in "${!users[@]}"; do
                 local user="${users[$i]}"
                 local uuid="${uuids[$i]}"
+                local port="${ports[$i]}"
                 echo -e "  ${Y}$user:${NC}"
-                local link=$(_gen_user_share_link "$core" "$proto" "$uuid" "$user")
-                [[ -n "$link" ]] && echo -e "  ${C}$link${NC}"
+                local link=$(_gen_user_share_link "$core" "$proto" "$uuid" "$user" "$port")
+                if [[ -n "$link" ]]; then
+                    echo -e "  ${C}$link${NC}"
+                else
+                    echo -e "  ${R}无法生成链接，请检查服务器地址和协议配置${NC}"
+                fi
                 echo ""
             done
             
@@ -27039,13 +27064,14 @@ _show_user_share_links() {
             # 显示单个用户链接
             local user="${users[$((choice-1))]}"
             local uuid="${uuids[$((choice-1))]}"
+            local port="${ports[$((choice-1))]}"
             
             echo ""
             _dline
             echo -e "  ${W}$user 分享链接${NC}"
             _dline
             
-            local link=$(_gen_user_share_link "$core" "$proto" "$uuid" "$user")
+            local link=$(_gen_user_share_link "$core" "$proto" "$uuid" "$user" "$port")
             if [[ -n "$link" ]]; then
                 echo -e "  ${C}$link${NC}"
                 echo ""
@@ -27056,7 +27082,7 @@ _show_user_share_links() {
                     qrencode -t ANSIUTF8 "$link" 2>/dev/null
                 fi
             else
-                echo -e "  ${D}无法生成链接${NC}"
+                echo -e "  ${R}无法生成链接，请检查服务器地址和协议配置${NC}"
             fi
             
             _line
@@ -27264,7 +27290,7 @@ _add_user() {
     # 生成 UUID/密码
     local uuid
     case "$proto" in
-        vless|vless-xhttp|vless-ws|vless-vision|tuic)
+        vless|vless-xhttp|vless-xhttp-cdn|vless-ws|vless-ws-notls|vless-vision|vmess-ws|tuic)
             uuid=$(gen_uuid)
             ;;
         ss2022)
