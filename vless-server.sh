@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0-preview.7 [服务端]
+#  多协议代理一键部署脚本 v3.7.0-preview.8 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0-preview.7"
+readonly VERSION="3.7.0-preview.8"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -28976,8 +28976,8 @@ _sync_traffic_now() {
         echo -e "  ${W}用户流量统计:${NC}"
         _line
         
-        # 显示 Xray 协议流量
-        if [[ "$has_xray" == "true" ]]; then
+        # 展示数据库累计值，不按进程过滤：Snell 独立进程也保存在 xray 分组。
+        if [[ -f "$DB_FILE" ]]; then
             for proto in $(db_list_protocols "xray"); do
                 local proto_name=$(get_protocol_name "$proto")
                 local users=$(db_get_users_stats "xray" "$proto")
@@ -29007,8 +29007,8 @@ _sync_traffic_now() {
             done
         fi
 
-        # 显示 Sing-box 协议流量
-        if [[ "$has_singbox" == "true" ]]; then
+        # 停止的协议仍应展示已保存的历史用量。
+        if [[ -f "$DB_FILE" ]]; then
             for proto in $(db_list_protocols "singbox"); do
                 local proto_name=$(get_protocol_name "$proto")
                 local users=$(db_get_users_stats "singbox" "$proto")
