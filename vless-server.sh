@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0-preview.3 [服务端]
+#  多协议代理一键部署脚本 v3.7.0-preview.4 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0-preview.3"
+readonly VERSION="3.7.0-preview.4"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2424,28 +2424,145 @@ xray_api_query() {
     "${cmd[@]}" 2>/dev/null
 }
 
-# 查询 Sing-box V2Ray Stats API（通过本地 gRPC helper）
+# 查询 Sing-box V2Ray Stats API（grpcurl + 内置官方协议定义）
 # 用法: singbox_api_query "user>>>user1>>>traffic>>>downlink" [reset]
 singbox_api_query() {
     local pattern="$1"
-    local reset="${2:-false}"
-    local helper="/usr/local/bin/singbox-v2ray-client"
+    local reset="${2:-false}" proto_file request response rc
+    command -v grpcurl >/dev/null 2>&1 || return 1
+    [[ "$reset" == reset ]] && reset=true
+    [[ "$reset" == true || "$reset" == false ]] || return 1
+    proto_file=$(mktemp) || return 1
+    _singbox_stats_proto > "$proto_file"
+    request=$(jq -nc --arg p "$pattern" --argjson r "$reset" '{pattern:$p,patterns:[$p],reset:$r}')
+    response=$(grpcurl -plaintext -max-time 10 -import-path "$(dirname "$proto_file")" \
+        -proto "$(basename "$proto_file")" -d "$request" \
+        "127.0.0.1:${SINGBOX_V2RAY_API_PORT}" v2ray.core.app.stats.command.StatsService/QueryStats 2>/dev/null)
+    rc=$?
+    rm -f "$proto_file"
+    [[ "$rc" == 0 ]] || return 1
+    printf '%s\n' "$response" | jq -er '
+        if type != "object" then error("invalid response") else
+        (.stat // []) | map(
+            if (.name|type) != "string" or ((.value // 0 | tostring) | test("^[0-9]+$") | not)
+            then error("invalid counter") else "\(.name) \(.value // 0)" end
+        ) | join("\n") end'
+}
 
-    [[ -x "$helper" ]] || return 1
+_singbox_stats_proto() {
+    printf '%s\n' 'syntax = "proto3";
+package v2ray.core.app.stats.command;
+message QueryStatsRequest { string pattern = 1; bool reset = 2; repeated string patterns = 3; bool regexp = 4; }
+message Stat { string name = 1; int64 value = 2; }
+message QueryStatsResponse { repeated Stat stat = 1; }
+service StatsService { rpc QueryStats(QueryStatsRequest) returns (QueryStatsResponse); }'
+}
 
-    if [[ "$reset" == "true" ]]; then
-        "$helper" "127.0.0.1:${SINGBOX_V2RAY_API_PORT}" "$pattern" reset 2>/dev/null
-    else
-        "$helper" "127.0.0.1:${SINGBOX_V2RAY_API_PORT}" "$pattern" 2>/dev/null
-    fi
+install_singbox_stats_client() {
+    local sarch
+    sarch=$(_map_arch "x86_64:arm64:armv7") || return 1
+    _install_binary grpcurl fullstorydev/grpcurl \
+        'https://github.com/fullstorydev/grpcurl/releases/download/v${version}/grpcurl_${version}_linux_${sarch}.tar.gz' \
+        grpcurl stable false 1.9.4
 }
 
 singbox_stats_available() {
     command -v sing-box &>/dev/null || return 1
-    [[ -x /usr/local/bin/singbox-v2ray-client ]] || return 1
+    command -v grpcurl &>/dev/null || return 1
     sing-box version 2>/dev/null | grep -q 'with_v2ray_api' || return 1
     return 0
 }
+
+_prepare_singbox_stats_interactive() {
+    _pgrep sing-box &>/dev/null || return 0
+    if ! sing-box version 2>/dev/null | grep -q with_v2ray_api; then
+        _warn "当前核心不含用户统计接口。可从官方源码构建同版本统计核心（需要较多磁盘/内存及下载时间），备份后重启服务。"
+        local build_answer
+        read -rp "  是否构建并启用统计核心? [y/N]: " build_answer
+        [[ "$build_answer" =~ ^[yY]$ ]] || return 1
+        _build_singbox_stats_core || return 1
+    fi
+    if ! command -v grpcurl >/dev/null 2>&1; then
+        _info "安装 Sing-box 流量查询依赖 grpcurl..."
+        install_singbox_stats_client || return 1
+    fi
+    if ! _singbox_stats_config_ready || ! singbox_api_query "user>>>" false >/dev/null; then
+        _warn "Sing-box 统计接口不可用，可重建配置并重启服务启用统计（现有连接会中断）"
+        local answer
+        read -rp "  是否重建并重启? [y/N]: " answer
+        [[ "$answer" =~ ^[yY]$ ]] || return 1
+        rebuild_and_reload_singbox || return 1
+        singbox_api_query "user>>>" false >/dev/null || { _err "统计接口仍不可用，请检查 Sing-box 服务日志"; return 1; }
+    fi
+}
+
+_singbox_stats_config_ready() {
+    [[ -f "$CFG/singbox.json" ]] || return 1
+    local proto mappings name key keys="[]"
+    for proto in vless trojan hy2 tuic anytls; do
+        mappings=$(_get_singbox_stat_user_mappings "$proto")
+        [[ -n "$mappings" ]] || continue
+        while IFS='|' read -r name key; do
+            [[ -n "$key" ]] || continue
+            keys=$(jq -c --arg k "$key" '. + [$k]' <<< "$keys")
+        done <<< "$mappings"
+    done
+    jq -e --argjson keys "$keys" '
+        .experimental.v2ray_api as $api |
+        $api.stats.enabled == true and ($api.listen // "") != "" and
+        (($keys - ($api.stats.users // [])) | length == 0)
+    ' "$CFG/singbox.json" >/dev/null
+}
+
+_build_singbox_stats_core() (
+    # 子 shell 隔离临时目录清理和构建环境，构建期间不停止现有服务。
+    local version work arch manifest filename checksum backup tags
+    version=$(sing-box version | awk '/^sing-box version / {print $3; exit}')
+    [[ "$version" =~ ^1\.(1[0-3])\.[0-9]+$ ]] || { _err "自动构建仅支持 1.10-1.13 正式版本；其他版本请手动安装带 with_v2ray_api 的核心"; return 1; }
+    arch=$(_map_arch "amd64:arm64:armv6l") || return 1
+    work=$(mktemp -d) || return 1
+    trap 'rm -rf "$work"' EXIT
+    _info "下载并校验官方 Go 1.25.7 构建工具..."
+    manifest=$(curl -fsSL --connect-timeout 15 --max-time 60 'https://go.dev/dl/?mode=json&include=all') || return 1
+    filename=$(jq -r --arg arch "$arch" '[.[] | select(.version == "go1.25.7") | .files[] | select(.os == "linux" and .arch == $arch and .kind == "archive")][0].filename // empty' <<< "$manifest")
+    checksum=$(jq -r --arg f "$filename" '[.[].files[] | select(.filename == $f)][0].sha256 // empty' <<< "$manifest")
+    [[ "$filename" =~ ^go1\.25\.7\.linux-[a-z0-9]+\.tar\.gz$ && "$checksum" =~ ^[a-f0-9]{64}$ ]] || return 1
+    curl -fL --connect-timeout 30 --max-time 600 "https://go.dev/dl/$filename" -o "$work/go.tar.gz" || return 1
+    [[ "$(sha256sum "$work/go.tar.gz" | awk '{print $1}')" == "$checksum" ]] || { _err "Go 校验失败"; return 1; }
+    tar -xzf "$work/go.tar.gz" -C "$work" || return 1
+    tags=with_gvisor,with_quic,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api
+    _info "构建 Sing-box $version（原服务保持运行；失败时不会替换）..."
+    env GOTOOLCHAIN=auto GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+        GONOSUMDB= GONOPROXY= GOPRIVATE= GOFLAGS= CGO_ENABLED=0 \
+        GOPATH="$work/gopath" GOCACHE="$work/cache" GOBIN="$work/bin" \
+        "$work/go/bin/go" install -p 1 -tags "$tags" \
+        -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=$version" \
+        "github.com/sagernet/sing-box/cmd/sing-box@v$version" || { _err "构建失败，原核心未更换"; return 1; }
+    "$work/bin/sing-box" version | grep -q with_v2ray_api || return 1
+    "$work/bin/sing-box" check -c "$CFG/singbox.json" || { _err "新核心不兼容现有配置，已取消替换"; return 1; }
+    install_singbox_stats_client || return 1
+    backup=$(mktemp -d "$CFG/singbox-stats-backup.XXXXXX") || return 1
+    chmod 700 "$backup"
+    cp -p /usr/local/bin/sing-box "$backup/sing-box" && cp -p "$CFG/singbox.json" "$backup/singbox.json" || return 1
+    # 安装暂存文件后 rename，避免覆盖正在执行的二进制。
+    install -m 755 "$work/bin/sing-box" /usr/local/bin/sing-box.stats-new &&
+        mv -f /usr/local/bin/sing-box.stats-new /usr/local/bin/sing-box || return 1
+    if generate_singbox_config && /usr/local/bin/sing-box check -c "$CFG/singbox.json" && svc restart vless-singbox; then
+        local attempt
+        for attempt in 1 2 3 4 5; do
+            if singbox_api_query 'user>>>' false >/dev/null; then
+                _ok "同版本统计核心已启用；备份: $backup。请让客户端重新连接后测试流量。"
+                return 0
+            fi
+            sleep 1
+        done
+    fi
+    install -m 755 "$backup/sing-box" /usr/local/bin/sing-box.stats-restore && mv -f /usr/local/bin/sing-box.stats-restore /usr/local/bin/sing-box
+    cp -p "$backup/singbox.json" "$CFG/singbox.json"
+    svc restart vless-singbox || true
+    _err "统计核心启动验证失败，已尝试恢复原核心及配置；备份: $backup"
+    return 1
+)
 
 # 确保 Sing-box 协议的默认用户落入 users[]，便于统计 / 限额 / 到期统一处理
 _ensure_singbox_default_users() {
@@ -2464,7 +2581,7 @@ data = json.loads(path.read_text())
 changed = [False]
 singbox = data.get('singbox') or {}
 
-for proto in ('hy2', 'tuic', 'anytls'):
+for proto in ('vless', 'trojan', 'hy2', 'tuic', 'anytls'):
     cfg = singbox.get(proto)
     if cfg is None:
         continue
@@ -2660,15 +2777,20 @@ _sync_all_user_traffic_unlocked() {
             jq -r '.stat[]? | "\(.name // .Name) \(.value // .Value // 0)"' >> "$tmp_stats" 2>/dev/null || true
     fi
 
-    if [[ "$has_singbox" == "true" ]] && singbox_stats_available; then
-        if [[ "$reset" == "true" ]]; then
-            singbox_api_query "user>>>" reset >> "$tmp_stats" 2>/dev/null || true
-        else
-            singbox_api_query "user>>>" >> "$tmp_stats" 2>/dev/null || true
+    local singbox_failed=false
+    if [[ "$has_singbox" == "true" ]]; then
+        if ! singbox_stats_available || ! singbox_api_query "user>>>" "$reset" >> "$tmp_stats"; then
+            singbox_failed=true
+            _warn "Sing-box 流量读取失败，本次未同步其用户流量" >&2
         fi
     fi
     
-    [[ ! -s "$tmp_stats" ]] && { rm -f "$tmp_stats"; mark_traffic_sync_result "no_stats" 0; return 0; }
+    if [[ ! -s "$tmp_stats" ]]; then
+        rm -f "$tmp_stats"
+        if [[ "$singbox_failed" == true ]]; then mark_traffic_sync_result "singbox_error" 0; return 1; fi
+        mark_traffic_sync_result "no_stats" 0
+        return 0
+    fi
     
     local updated=0
     local need_reload=false  # 标记是否需要重载 Xray 配置
@@ -2730,9 +2852,9 @@ _sync_all_user_traffic_unlocked() {
         done
     done
 
-    # 遍历所有 Sing-box 协议（当前已接入 HY2 / TUIC / AnyTLS 用户级统计）
-    if [[ "$has_singbox" == "true" ]] && singbox_stats_available; then
-        for proto in hy2 tuic anytls; do
+    # 所有支持命名用户计数的 Sing-box 协议。
+    if [[ "$has_singbox" == "true" && "$singbox_failed" == false ]]; then
+        for proto in vless trojan hy2 tuic anytls; do
             db_exists "singbox" "$proto" || continue
             local mappings=$(_get_singbox_stat_user_mappings "$proto")
             [[ -z "$mappings" ]] && continue
@@ -2793,6 +2915,10 @@ _sync_all_user_traffic_unlocked() {
         svc restart vless-reality 2>/dev/null
     fi
 
+    if [[ "$singbox_failed" == true ]]; then
+        mark_traffic_sync_result "partial_singbox_error" "$updated"
+        return 1
+    fi
     mark_traffic_sync_result "ok" "$updated"
     
     return 0
@@ -9189,6 +9315,11 @@ _install_binary() {
             install -m 755 "$singbox_bin" /usr/local/bin/sing-box &&
             install_ok=true
             ;;
+        grpcurl)
+            _archive_paths_safe "$tmp/pkg" tar.gz &&
+            tar -xzf "$tmp/pkg" -C "$tmp/" &&
+            install -m 755 "$tmp/grpcurl" /usr/local/bin/grpcurl && install_ok=true
+            ;;
         anytls)
             _archive_paths_safe "$tmp/pkg" zip &&
             unzip -oq "$tmp/pkg" -d "$tmp/" &&
@@ -9245,7 +9376,8 @@ install_singbox() {
     _install_binary "sing-box" "SagerNet/sing-box" \
         'https://github.com/SagerNet/sing-box/releases/download/v$version/sing-box-$version-linux-${sarch}.tar.gz' \
         singbox \
-        "$channel" "$force" "$version_override"
+        "$channel" "$force" "$version_override" || return 1
+    install_singbox_stats_client || _warn "统计依赖安装失败；协议可运行，但用户流量暂不可用"
 }
 
 #═══════════════════════════════════════════════════════════════════════════════
@@ -28667,6 +28799,7 @@ _detect_current_core() {
 
 # 显示实时流量统计
 _show_realtime_traffic() {
+    _prepare_singbox_stats_interactive || true
     _header
     echo -e "  ${W}实时流量统计${NC}"
     _dline
@@ -28721,6 +28854,7 @@ _show_realtime_traffic() {
 
 # 立即同步流量数据
 _sync_traffic_now() {
+    _prepare_singbox_stats_interactive || true
     _header
     echo -e "  ${W}同步流量数据${NC}"
     _dline
