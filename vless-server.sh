@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0-preview.1 [服务端]
+#  多协议代理一键部署脚本 v3.7.0-preview.2 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0-preview.1"
+readonly VERSION="3.7.0-preview.2"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -27216,6 +27216,50 @@ _show_user_share_links() {
 # 用户路由选择函数
 # 用法: _select_user_routing [当前路由值]
 # 设置全局变量 SELECTED_ROUTING 为选择的路由值
+_select_user_socks5_routing() {
+    local nodes=() node choice name server port username password node_json
+    SELECTED_ROUTING=""
+    _line
+    echo "  SOCKS5 用户路由（仅影响所选用户，不修改全局规则）"
+    while IFS= read -r node; do
+        [[ -n "$node" ]] || continue
+        nodes+=("$node")
+        echo "  ${#nodes[@]}) $node"
+    done < <(jq -r '.chain_proxy.nodes[]? | select(.type == "socks") | .name' "$DB_FILE")
+    echo "  n) 新增 SOCKS5 节点"
+    echo "  0) 取消"
+    read -rp "  请选择: " choice || return 1
+    [[ "$choice" == "0" ]] && return 1
+    if [[ "$choice" =~ ^[1-9][0-9]{0,3}$ ]] && ((choice <= ${#nodes[@]})); then
+        SELECTED_ROUTING="chain:${nodes[$((choice-1))]}"
+        return 0
+    fi
+    [[ "$choice" == "n" || "$choice" == "N" ]] || { _err "无效选择"; return 1; }
+    read -rp "  节点名称（字母/数字/下划线/短横线，0 取消）: " name || return 1
+    [[ "$name" == "0" ]] && return 1
+    [[ "$name" =~ ^[a-zA-Z0-9_-]{1,64}$ ]] || { _err "节点名称格式无效"; return 1; }
+    db_chain_node_exists "$name" && { _err "节点名称已存在，请选择已有节点或使用其他名称"; return 1; }
+    read -rp "  SOCKS5 地址（IP 或域名，不含协议和端口）: " server || return 1
+    server="${server#[}"; server="${server%]}"
+    [[ -n "$server" ]] && _is_valid_domain_or_ip "$server" || { _err "地址格式无效"; return 1; }
+    read -rp "  SOCKS5 端口: " port || return 1
+    _is_valid_port "$port" || { _err "端口必须为 1-65535"; return 1; }
+    port=$((10#$port))
+    read -rp "  用户名（留空表示无需认证）: " username || return 1
+    password=""
+    if [[ -n "$username" ]]; then
+        read -rsp "  密码: " password || return 1
+        echo ""
+        [[ -n "$password" ]] || { _err "认证密码不能为空"; return 1; }
+    fi
+    node_json=$(jq -n --arg name "$name" --arg server "$server" --argjson port "$port" \
+        --arg username "$username" --arg password "$password" \
+        '{name:$name,type:"socks",server:$server,port:$port,username:$username,password:$password}') || return 1
+    db_add_chain_node "$node_json" || { _err "节点保存失败"; return 1; }
+    SELECTED_ROUTING="chain:$name"
+    _ok "SOCKS5 节点已保存，可在链式代理节点管理中维护"
+}
+
 _select_user_routing() {
     local current_routing="${1:-}"
     SELECTED_ROUTING=""
@@ -27246,6 +27290,10 @@ _select_user_routing() {
         ((idx++))
     fi
     
+    echo -e "  ${G}$idx${NC}) SOCKS5 代理（选择/新增节点）"
+    options+=("socks5-select")
+    ((idx++))
+
     # 选项N: 链式代理节点
     if [[ -f "$DB_FILE" ]]; then
         local chain_nodes=$(jq -r '.chain_proxy.nodes[]?.name // empty' "$DB_FILE" 2>/dev/null)
@@ -27284,6 +27332,10 @@ _select_user_routing() {
         
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$max" ]]; then
             SELECTED_ROUTING="${options[$((choice-1))]}"
+            if [[ "$SELECTED_ROUTING" == "socks5-select" ]]; then
+                _select_user_socks5_routing
+                return $?
+            fi
             
             # 如果选择 WARP 但未安装，提示安装
             if [[ "$SELECTED_ROUTING" == "warp" ]]; then
