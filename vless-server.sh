@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0-preview.4 [服务端]
+#  多协议代理一键部署脚本 v3.7.0-preview.5 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0-preview.4"
+readonly VERSION="3.7.0-preview.5"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2474,7 +2474,40 @@ singbox_stats_available() {
 }
 
 _prepare_singbox_stats_interactive() {
+    local force="${1:-false}" state_file="$CFG/singbox-stats-repair.state" log_file="$CFG/singbox-stats-repair.log" repair_rc
     _pgrep sing-box &>/dev/null || return 0
+    if singbox_stats_available && _singbox_stats_config_ready && singbox_api_query 'user>>>' false >/dev/null; then
+        printf '%s\n' ready > "$state_file"
+        return 0
+    fi
+    if [[ "$force" != true && -f "$state_file" ]]; then
+        _warn "Sing-box 统计尚未就绪，已停止重复询问或自动构建。"
+        _info "请在用户管理选择 f（统计诊断/重试）；上次日志: $log_file"
+        return 1
+    fi
+    mkdir -p "$CFG" || return 1
+    printf '\n=== %s Sing-box 统计修复 ===\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$log_file"
+    chmod 600 "$log_file"
+    printf '%s\n' attempted > "$state_file"
+    if _repair_singbox_stats_interactive 2>&1 | tee -a "$log_file"; then
+        repair_rc=${PIPESTATUS[0]}
+    else
+        repair_rc=${PIPESTATUS[0]}
+    fi
+    if [[ "$repair_rc" == 0 ]]; then
+        if singbox_stats_available && _singbox_stats_config_ready && singbox_api_query 'user>>>' false >/dev/null; then
+            printf '%s\n' ready > "$state_file"
+            _ok "Sing-box 统计接口验证通过"
+            return 0
+        fi
+    fi
+    printf '%s\n' failed_or_cancelled > "$state_file"
+    _err "统计修复未完成或已取消，不会标记成功；请查看日志: $log_file"
+    _info "再次尝试请在用户管理选择 f；退出重进也不会重复构建。"
+    return 1
+}
+
+_repair_singbox_stats_interactive() {
     if ! sing-box version 2>/dev/null | grep -q with_v2ray_api; then
         _warn "当前核心不含用户统计接口。可从官方源码构建同版本统计核心（需要较多磁盘/内存及下载时间），备份后重启服务。"
         local build_answer
@@ -2516,21 +2549,24 @@ _singbox_stats_config_ready() {
 
 _build_singbox_stats_core() (
     # 子 shell 隔离临时目录清理和构建环境，构建期间不停止现有服务。
-    local version work arch manifest filename checksum backup tags
+    local version work arch manifest filename checksum backup tags stage rc
     version=$(sing-box version | awk '/^sing-box version / {print $3; exit}')
     [[ "$version" =~ ^1\.(1[0-3])\.[0-9]+$ ]] || { _err "自动构建仅支持 1.10-1.13 正式版本；其他版本请手动安装带 with_v2ray_api 的核心"; return 1; }
-    arch=$(_map_arch "amd64:arm64:armv6l") || return 1
-    work=$(mktemp -d) || return 1
-    trap 'rm -rf "$work"' EXIT
+    arch=$(_map_arch "amd64:arm64:armv6l") || { _err "构建架构不支持: $(uname -m)"; return 1; }
+    work=$(mktemp -d) || { _err "无法创建构建临时目录，请检查磁盘空间/权限"; return 1; }
+    stage="获取 Go 下载清单"
+    trap 'rc=$?; if [[ $rc != 0 ]]; then _err "统计核心修复失败，阶段: $stage，退出码: $rc"; fi; rm -rf "$work"; exit "$rc"' EXIT
     _info "下载并校验官方 Go 1.25.7 构建工具..."
     manifest=$(curl -fsSL --connect-timeout 15 --max-time 60 'https://go.dev/dl/?mode=json&include=all') || return 1
     filename=$(jq -r --arg arch "$arch" '[.[] | select(.version == "go1.25.7") | .files[] | select(.os == "linux" and .arch == $arch and .kind == "archive")][0].filename // empty' <<< "$manifest")
     checksum=$(jq -r --arg f "$filename" '[.[].files[] | select(.filename == $f)][0].sha256 // empty' <<< "$manifest")
-    [[ "$filename" =~ ^go1\.25\.7\.linux-[a-z0-9]+\.tar\.gz$ && "$checksum" =~ ^[a-f0-9]{64}$ ]] || return 1
+    [[ "$filename" =~ ^go1\.25\.7\.linux-[a-z0-9]+\.tar\.gz$ && "$checksum" =~ ^[a-f0-9]{64}$ ]] || { _err "Go 清单中没有有效的 linux/$arch 下载地址或校验值"; return 1; }
+    stage="下载/校验 Go 工具链"
     curl -fL --connect-timeout 30 --max-time 600 "https://go.dev/dl/$filename" -o "$work/go.tar.gz" || return 1
-    [[ "$(sha256sum "$work/go.tar.gz" | awk '{print $1}')" == "$checksum" ]] || { _err "Go 校验失败"; return 1; }
+    [[ "$(_sha256_file "$work/go.tar.gz")" == "$checksum" ]] || { _err "Go 校验失败"; return 1; }
     tar -xzf "$work/go.tar.gz" -C "$work" || return 1
     tags=with_gvisor,with_quic,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api
+    stage="编译 Sing-box $version（请检查前面的 Go 错误、网络、内存和磁盘空间）"
     _info "构建 Sing-box $version（原服务保持运行；失败时不会替换）..."
     env GOTOOLCHAIN=auto GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
         GONOSUMDB= GONOPROXY= GOPRIVATE= GOFLAGS= CGO_ENABLED=0 \
@@ -2538,15 +2574,19 @@ _build_singbox_stats_core() (
         "$work/go/bin/go" install -p 1 -tags "$tags" \
         -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=$version" \
         "github.com/sagernet/sing-box/cmd/sing-box@v$version" || { _err "构建失败，原核心未更换"; return 1; }
+    stage="验证新核心及现有配置"
     "$work/bin/sing-box" version | grep -q with_v2ray_api || return 1
     "$work/bin/sing-box" check -c "$CFG/singbox.json" || { _err "新核心不兼容现有配置，已取消替换"; return 1; }
+    stage="安装 grpcurl 查询工具"
     install_singbox_stats_client || return 1
+    stage="备份并替换核心"
     backup=$(mktemp -d "$CFG/singbox-stats-backup.XXXXXX") || return 1
     chmod 700 "$backup"
     cp -p /usr/local/bin/sing-box "$backup/sing-box" && cp -p "$CFG/singbox.json" "$backup/singbox.json" || return 1
     # 安装暂存文件后 rename，避免覆盖正在执行的二进制。
     install -m 755 "$work/bin/sing-box" /usr/local/bin/sing-box.stats-new &&
         mv -f /usr/local/bin/sing-box.stats-new /usr/local/bin/sing-box || return 1
+    stage="重建配置/重启服务/验证统计接口"
     if generate_singbox_config && /usr/local/bin/sing-box check -c "$CFG/singbox.json" && svc restart vless-singbox; then
         local attempt
         for attempt in 1 2 3 4 5; do
@@ -28799,8 +28839,8 @@ _detect_current_core() {
 
 # 显示实时流量统计
 _show_realtime_traffic() {
-    _prepare_singbox_stats_interactive || true
     _header
+    _prepare_singbox_stats_interactive || true
     echo -e "  ${W}实时流量统计${NC}"
     _dline
     
@@ -28854,8 +28894,8 @@ _show_realtime_traffic() {
 
 # 立即同步流量数据
 _sync_traffic_now() {
-    _prepare_singbox_stats_interactive || true
     _header
+    _prepare_singbox_stats_interactive || { _err "Sing-box 统计修复尚未完成，本次不执行手动同步。请先选择 f 诊断/重试。"; return 1; }
     echo -e "  ${W}同步流量数据${NC}"
     _dline
     
@@ -29112,6 +29152,7 @@ manage_users() {
         _item "p" "Snell 用户实例设置 (端口/密钥/DNS/模式)"
         _line
         _item "7" "实时流量统计"
+        _item "f" "Sing-box 统计诊断/重试（查看失败日志）"
         _item "8" "同步流量数据"
         _item "9" "流量统计设置"
         _line
@@ -29168,6 +29209,15 @@ manage_users() {
                     _set_user_routing "$SELECTED_CORE" "$SELECTED_PROTO"
                     _pause
                 fi
+                ;;
+            f|F)
+                _header
+                if [[ -f "$CFG/singbox-stats-repair.log" ]]; then
+                    _info "上次修复日志（最后 40 行）:"
+                    tail -n 40 "$CFG/singbox-stats-repair.log"
+                fi
+                _prepare_singbox_stats_interactive true
+                _pause
                 ;;
             7)
                 _show_realtime_traffic
