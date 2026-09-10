@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0-preview.2 [服务端]
+#  多协议代理一键部署脚本 v3.7.0-preview.3 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0-preview.2"
+readonly VERSION="3.7.0-preview.3"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2827,77 +2827,75 @@ sync_all_user_traffic() {
 }
 
 # 获取所有用户流量统计 (用于显示)
-# 输出格式: proto|user|uplink|downlink|total
-# 支持 Xray + Sing-box（当前已接入 HY2 / TUIC / AnyTLS 的用户级统计）
+# 输出格式: proto|user|uplink|downlink|total|status（不可用时计数留空）
+# 按数据库枚举用户；支持 Xray、Sing-box 命名用户和 Snell 防火墙计数。
 get_all_traffic_stats() {
-    [[ ! -f "$DB_FILE" ]] && return 1
-    _snell_live_stats
-    _ensure_singbox_default_users
-
-    # 使用临时文件存储，避免大变量导致内存问题
-    local tmp_stats=$(mktemp)
-    trap "rm -f '$tmp_stats'" RETURN
-    : > "$tmp_stats"
-
-    # === Xray 流量统计 ===
-    if _pgrep xray &>/dev/null; then
-        xray api statsquery --server=127.0.0.1:${XRAY_API_PORT} 2>/dev/null | \
-            jq -r '.stat[]? | "\(.name // .Name) \(.value // .Value // 0)"' >> "$tmp_stats" 2>/dev/null || true
+    [[ -f "$DB_FILE" ]] || return 1
+    local core proto user key raw parsed snapshot row up down status supported
+    local xray_stats="" singbox_stats="" xray_ok=false singbox_ok=false
+    if _pgrep xray &>/dev/null && raw=$(xray_api_query "user>>>" false); then
+        if parsed=$(printf '%s\n' "$raw" | jq -er '
+            if type != "object" then error("invalid stats") else
+            (.stat // .Stat // []) | map(
+                {name:(.name // .Name), value:(.value // .Value // 0)} |
+                if (.name | type) != "string" or ((.value | tostring) | test("^[0-9]+$") | not)
+                then error("invalid counter") else "\(.name) \(.value)" end
+            ) | join("\n") end' 2>/dev/null); then
+            xray_stats="$parsed"; xray_ok=true
+        fi
     fi
-
-    # === Sing-box 流量统计 ===
-    if _pgrep sing-box &>/dev/null && singbox_stats_available; then
-        singbox_api_query "user>>>" >> "$tmp_stats" 2>/dev/null || true
+    if _pgrep sing-box &>/dev/null && singbox_stats_available &&
+        raw=$(singbox_api_query "user>>>" false); then
+        if printf '%s\n' "$raw" | awk 'NF && (NF != 2 || $1 !~ /^user>>>/ || $2 !~ /^[0-9]+$/) {bad=1} END {exit bad}'; then
+            singbox_stats="$raw"; singbox_ok=true
+        fi
     fi
-
-    [[ ! -s "$tmp_stats" ]] && { rm -f "$tmp_stats"; return 0; }
-
-    # 遍历 Xray 用户
-    for proto in $(db_list_protocols "xray"); do
-        local users=$(db_list_users "xray" "$proto")
-        [[ -z "$users" ]] && continue
-
-        for user in $users; do
-            local email="${user}@${proto}"
-
-            local uplink=$(grep -F "user>>>${email}>>>traffic>>>uplink " "$tmp_stats" 2>/dev/null | awk '{print $NF}')
-            local downlink=$(grep -F "user>>>${email}>>>traffic>>>downlink " "$tmp_stats" 2>/dev/null | awk '{print $NF}')
-
-            uplink=${uplink:-0}
-            downlink=${downlink:-0}
-
-            local total=$((uplink + downlink))
-            if [[ "$total" -gt 0 ]]; then
-                echo "${proto}|${user}|${uplink}|${downlink}|${total}"
+    for core in xray singbox; do
+        for proto in $(db_list_protocols "$core"); do
+            if _is_snell_users_protocol "$proto"; then
+                snapshot=""
+                if _snell_managed "$proto"; then
+                    snapshot=$(nft -j list table inet vless_snell_users 2>/dev/null) || snapshot=""
+                fi
+                while IFS= read -r user; do
+                    [[ -n "$user" ]] || continue
+                    row=$(_snell_rows "$proto" | jq -sc --arg u "$user" '[.[] | select(.users[0].name == $u)][0]')
+                    key=$(jq -r '.snell_id // empty' <<< "$row")
+                    if [[ -n "$key" ]] && parsed=$(jq -er --arg u "u_$key" --arg d "d_$key" '
+                        [.nftables[].counter? | select(. != null)] as $c |
+                        [$c[] | select(.name == $u) | .bytes][0] as $up |
+                        [$c[] | select(.name == $d) | .bytes][0] as $down |
+                        if ($up|type) == "number" and ($down|type) == "number"
+                        then "\($up)|\($down)|\($up+$down)" else error("missing counter") end' <<< "$snapshot" 2>/dev/null); then
+                        printf '%s|%s|%s|ok\n' "$proto" "$user" "$parsed"
+                    else
+                        printf '%s|%s||||统计不可用\n' "$proto" "$user"
+                    fi
+                done <<< "$(db_list_users "$core" "$proto")"
+                continue
             fi
+            while IFS= read -r user; do
+                [[ -n "$user" ]] || continue
+                status=ok; supported=true
+                if [[ "$core" == xray ]]; then
+                    key="${user}@${proto}"; raw="$xray_stats"
+                    [[ "$xray_ok" == true ]] || status="统计不可用"
+                else
+                    key=$(_singbox_stat_key_for_user "$proto" "$user"); raw="$singbox_stats"
+                    case "$proto" in vless|trojan|hy2|tuic|anytls) ;; *) supported=false ;; esac
+                    [[ "$singbox_ok" == true ]] || status="统计不可用"
+                    [[ "$supported" == true ]] || status="统计不可用（未接入用户计数）"
+                fi
+                if [[ "$status" != ok ]]; then
+                    printf '%s|%s||||%s\n' "$proto" "$user" "$status"
+                    continue
+                fi
+                up=$(awk -v k="user>>>${key}>>>traffic>>>uplink" '$1==k {n+=$2} END {printf "%.0f",n}' <<< "$raw")
+                down=$(awk -v k="user>>>${key}>>>traffic>>>downlink" '$1==k {n+=$2} END {printf "%.0f",n}' <<< "$raw")
+                printf '%s|%s|%s|%s|%s|ok\n' "$proto" "$user" "$up" "$down" "$((up+down))"
+            done <<< "$(db_list_users "$core" "$proto")"
         done
     done
-
-    # 遍历 Sing-box 用户（HY2 / TUIC / AnyTLS）
-    if _pgrep sing-box &>/dev/null && singbox_stats_available; then
-        for proto in hy2 tuic anytls; do
-            db_exists "singbox" "$proto" || continue
-            local mappings=$(_get_singbox_stat_user_mappings "$proto")
-            [[ -z "$mappings" ]] && continue
-
-            while IFS='|' read -r user stat_key; do
-                [[ -z "$user" || -z "$stat_key" ]] && continue
-
-                local uplink=$(grep -F "user>>>${stat_key}>>>traffic>>>uplink " "$tmp_stats" 2>/dev/null | awk '{print $NF}')
-                local downlink=$(grep -F "user>>>${stat_key}>>>traffic>>>downlink " "$tmp_stats" 2>/dev/null | awk '{print $NF}')
-
-                uplink=${uplink:-0}
-                downlink=${downlink:-0}
-
-                local total=$((uplink + downlink))
-                if [[ "$total" -gt 0 ]]; then
-                    echo "${proto}|${user}|${uplink}|${downlink}|${total}"
-                fi
-            done <<< "$mappings"
-        done
-    fi
-
-    rm -f "$tmp_stats"
 }
 
 # 获取流量检测间隔 (分钟)
@@ -28686,10 +28684,9 @@ _show_realtime_traffic() {
     
     if [[ "$has_xray" == "false" && "$has_singbox" == "false" ]] && ! _snell_any_managed; then
         echo ""
-        _warn "未检测到运行中的代理核心"
+        _warn "未检测到运行中的代理核心；已安装用户将显示统计不可用"
         echo ""
-        echo -e "  ${D}请先安装并启动 Xray 或 Sing-box 核心的协议。${NC}"
-        return
+        echo -e "  ${D}请先安装并启动对应核心。${NC}"
     fi
     
     echo ""
@@ -28700,9 +28697,13 @@ _show_realtime_traffic() {
     if [[ -z "$stats" ]]; then
         echo -e "  ${D}暂无流量数据${NC}"
     else
-        while IFS='|' read -r proto user uplink downlink total; do
+        while IFS='|' read -r proto user uplink downlink total status; do
             [[ -z "$proto" ]] && continue
             local proto_name=$(get_protocol_name "$proto")
+            if [[ "$status" != "ok" ]]; then
+                printf '  %-12s %-12s %s\n' "$proto_name" "$user" "$status"
+                continue
+            fi
             local up_fmt=$(format_bytes "$uplink")
             local down_fmt=$(format_bytes "$downlink")
             local total_fmt=$(format_bytes "$total")
@@ -28714,7 +28715,8 @@ _show_realtime_traffic() {
     echo ""
     
     # 显示提示
-    echo -e "  ${D}提示: 此为核心 API 启动后的累计流量；执行同步后会写入数据库并重置本次计数${NC}"
+    echo -e "  ${D}提示: Xray/Sing-box 为自启动或上次同步重置后的计数；Snell 为防火墙计数器累计值。${NC}"
+    echo -e "  ${D}0 B 表示当前计数为零；统计不可用不代表流量为零，也不代表历史流量丢失。${NC}"
 }
 
 # 立即同步流量数据
