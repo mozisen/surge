@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0-preview.5 [服务端]
+#  多协议代理一键部署脚本 v3.7.0-preview.6 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0-preview.5"
+readonly VERSION="3.7.0-preview.6"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2547,11 +2547,17 @@ _singbox_stats_config_ready() {
     ' "$CFG/singbox.json" >/dev/null
 }
 
+_singbox_stats_build_version() {
+    local version="${1#v}"
+    [[ "$version" =~ ^1\.(1[0-4])\.(0|[1-9][0-9]*)$ ]] || return 1
+    printf '%s\n' "$version"
+}
+
 _build_singbox_stats_core() (
     # 子 shell 隔离临时目录清理和构建环境，构建期间不停止现有服务。
     local version work arch manifest filename checksum backup tags stage rc
     version=$(sing-box version | awk '/^sing-box version / {print $3; exit}')
-    [[ "$version" =~ ^1\.(1[0-3])\.[0-9]+$ ]] || { _err "自动构建仅支持 1.10-1.13 正式版本；其他版本请手动安装带 with_v2ray_api 的核心"; return 1; }
+    version=$(_singbox_stats_build_version "$version") || { _err "自动构建支持 1.10-1.14 正式版本；当前输出: $(sing-box version | head -n 1)。未更换原核心。"; return 1; }
     arch=$(_map_arch "amd64:arm64:armv6l") || { _err "构建架构不支持: $(uname -m)"; return 1; }
     work=$(mktemp -d) || { _err "无法创建构建临时目录，请检查磁盘空间/权限"; return 1; }
     stage="获取 Go 下载清单"

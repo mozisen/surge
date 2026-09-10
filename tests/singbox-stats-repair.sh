@@ -4,6 +4,14 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 CFG="$fixture"
+eval "$(awk 'index($0,"_singbox_stats_build_version() {")==1 {on=1} on {print} on && $0=="}" {exit}' "$repo/vless-server.sh")"
+[[ "$(_singbox_stats_build_version v1.14.0)" == 1.14.0 ]]
+[[ "$(_singbox_stats_build_version 1.14.0)" == 1.14.0 ]]
+[[ "$(_singbox_stats_build_version 1.13.18)" == 1.13.18 ]]
+for invalid in 1.14 1.14.0-alpha.1 1.15.0 1.14.00 '1.14.0;echo bad'; do
+    if _singbox_stats_build_version "$invalid"; then exit 1; fi
+done
+echo 'PASS 1.14 stable accepted without downgrade; preview, malformed and untested versions rejected'
 eval "$(awk 'index($0,"_prepare_singbox_stats_interactive() {")==1 {on=1} on {print} on && $0=="}" {exit}' "$repo/vless-server.sh")"
 _pgrep() { return 0; }
 _warn() { echo "$*"; }
