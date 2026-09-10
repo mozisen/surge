@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0-preview.6 [服务端]
+#  多协议代理一键部署脚本 v3.7.0-preview.7 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0-preview.6"
+readonly VERSION="3.7.0-preview.7"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2481,9 +2481,11 @@ _prepare_singbox_stats_interactive() {
         return 0
     fi
     if [[ "$force" != true && -f "$state_file" ]]; then
-        _warn "Sing-box 统计尚未就绪，已停止重复询问或自动构建。"
+        _warn "Sing-box 统计尚未就绪，上次修复未完成。"
         _info "请在用户管理选择 f（统计诊断/重试）；上次日志: $log_file"
-        return 1
+        local retry
+        read -rp "  是否现在重试修复? [y/N]: " retry || return 1
+        [[ "$retry" =~ ^[yY]$ ]] || return 1
     fi
     mkdir -p "$CFG" || return 1
     printf '\n=== %s Sing-box 统计修复 ===\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$log_file"
@@ -2549,15 +2551,16 @@ _singbox_stats_config_ready() {
 
 _singbox_stats_build_version() {
     local version="${1#v}"
-    [[ "$version" =~ ^1\.(1[0-4])\.(0|[1-9][0-9]*)$ ]] || return 1
+    # 稳定版本仅做安全的语义版本格式检查；兼容性由实际构建/check/API 决定。
+    [[ "$version" =~ ^[1-9][0-9]*\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
     printf '%s\n' "$version"
 }
 
 _build_singbox_stats_core() (
     # 子 shell 隔离临时目录清理和构建环境，构建期间不停止现有服务。
     local version work arch manifest filename checksum backup tags stage rc
-    version=$(sing-box version | awk '/^sing-box version / {print $3; exit}')
-    version=$(_singbox_stats_build_version "$version") || { _err "自动构建支持 1.10-1.14 正式版本；当前输出: $(sing-box version | head -n 1)。未更换原核心。"; return 1; }
+    version="${1:-$(sing-box version | awk '/^sing-box version / {print $3; exit}')}"
+    version=$(_singbox_stats_build_version "$version") || { _err "自动统计构建仅接受完整稳定版本号；目标格式无效，未更换原核心。"; return 1; }
     arch=$(_map_arch "amd64:arm64:armv6l") || { _err "构建架构不支持: $(uname -m)"; return 1; }
     work=$(mktemp -d) || { _err "无法创建构建临时目录，请检查磁盘空间/权限"; return 1; }
     stage="获取 Go 下载清单"
@@ -2582,6 +2585,7 @@ _build_singbox_stats_core() (
         "github.com/sagernet/sing-box/cmd/sing-box@v$version" || { _err "构建失败，原核心未更换"; return 1; }
     stage="验证新核心及现有配置"
     "$work/bin/sing-box" version | grep -q with_v2ray_api || return 1
+    [[ "$("$work/bin/sing-box" version | awk '/^sing-box version / {print $3; exit}')" == "$version" ]] || { _err "构建输出版本与目标不一致"; return 1; }
     "$work/bin/sing-box" check -c "$CFG/singbox.json" || { _err "新核心不兼容现有配置，已取消替换"; return 1; }
     stage="安装 grpcurl 查询工具"
     install_singbox_stats_client || return 1
@@ -2593,22 +2597,48 @@ _build_singbox_stats_core() (
     install -m 755 "$work/bin/sing-box" /usr/local/bin/sing-box.stats-new &&
         mv -f /usr/local/bin/sing-box.stats-new /usr/local/bin/sing-box || return 1
     stage="重建配置/重启服务/验证统计接口"
-    if generate_singbox_config && /usr/local/bin/sing-box check -c "$CFG/singbox.json" && svc restart vless-singbox; then
+    # 更新时不重写已验证配置，避免新版本配置变化导致无意丢失现有设置。
+    if { [[ -n "${1:-}" ]] || generate_singbox_config; } && /usr/local/bin/sing-box check -c "$CFG/singbox.json" && svc restart vless-singbox; then
         local attempt
         for attempt in 1 2 3 4 5; do
             if singbox_api_query 'user>>>' false >/dev/null; then
-                _ok "同版本统计核心已启用；备份: $backup。请让客户端重新连接后测试流量。"
+                _ok "Sing-box v$version 统计核心已启用；备份: $backup。请让客户端重新连接后测试流量。"
                 return 0
             fi
             sleep 1
         done
     fi
-    install -m 755 "$backup/sing-box" /usr/local/bin/sing-box.stats-restore && mv -f /usr/local/bin/sing-box.stats-restore /usr/local/bin/sing-box
-    cp -p "$backup/singbox.json" "$CFG/singbox.json"
-    svc restart vless-singbox || true
-    _err "统计核心启动验证失败，已尝试恢复原核心及配置；备份: $backup"
+    if install -m 755 "$backup/sing-box" /usr/local/bin/sing-box.stats-restore &&
+        mv -f /usr/local/bin/sing-box.stats-restore /usr/local/bin/sing-box &&
+        cp -p "$backup/singbox.json" "$CFG/singbox.json" && svc restart vless-singbox; then
+        _err "统计核心启动验证失败，已恢复原核心及配置；备份: $backup"
+    else
+        _err "自动恢复失败，请使用备份手动恢复: $backup"
+    fi
     return 1
 )
+
+_singbox_stats_enabled() {
+    sing-box version 2>/dev/null | grep -q with_v2ray_api ||
+        jq -e '.experimental.v2ray_api.stats.enabled == true' "$CFG/singbox.json" >/dev/null 2>&1
+}
+
+_update_singbox_preserving_stats() {
+    local channel="${1:-stable}" target="${2:-}" running=false update_rc
+    if [[ -z "$target" ]]; then
+        [[ "$channel" == stable || -z "$channel" ]] || { _err "统计保留更新暂不接受预发布通道，请选择稳定版"; return 1; }
+        target=$(_get_latest_version SagerNet/sing-box true) || return 1
+    fi
+    target=$(_singbox_stats_build_version "$target") || { _err "目标不是稳定版本，未更新核心"; return 1; }
+    svc status vless-singbox >/dev/null 2>&1 && running=true
+    _info "保留用户统计，先构建并检查目标 v$target，再备份、替换、验证；失败恢复。"
+    if _build_singbox_stats_core "$target"; then update_rc=0; else update_rc=$?; fi
+    # 若更新前服务停止，只为 API 验证临时启动，结束后恢复停止状态。
+    if [[ "$running" == false ]]; then
+        svc stop vless-singbox || { _err "无法恢复更新前的停止状态"; return 1; }
+    fi
+    return "$update_rc"
+}
 
 # 确保 Sing-box 协议的默认用户落入 users[]，便于统计 / 限额 / 到期统一处理
 _ensure_singbox_default_users() {
@@ -9414,6 +9444,10 @@ install_singbox() {
     local channel="${1:-stable}"
     local force="${2:-false}"
     local version_override="${3:-}"
+    if [[ "$force" == true ]] && _singbox_stats_enabled; then
+        _update_singbox_preserving_stats "$channel" "$version_override"
+        return $?
+    fi
     local sarch=$(_map_arch "amd64:arm64:armv7") || { _err "不支持的架构"; return 1; }
     # Alpine 需要安装 gcompat 兼容层来运行 glibc 编译的二进制
     if [[ "$DISTRO" == "alpine" ]]; then
@@ -9811,6 +9845,10 @@ _update_core_to_version() {
     local core="$1" channel="$2" version="$3" service="$4" install_func="$5"
     _check_core_update_deps || return 1
     _confirm_core_update_version "$core" "$channel" "$version" || return 1
+    if [[ "$core" == Sing-box ]] && _singbox_stats_enabled; then
+        _update_singbox_preserving_stats "$channel" "$version"
+        return $?
+    fi
 
     local binary_name
     case "$core" in
@@ -10221,6 +10259,10 @@ update_singbox_core() {
     local channel="${1:-stable}"
     _check_core_update_deps || return 1
     _confirm_core_update "Sing-box" "$channel" || return 1
+    if _singbox_stats_enabled; then
+        _update_singbox_preserving_stats "$channel"
+        return $?
+    fi
 
     local is_new_install=false
     if ! check_cmd sing-box; then
