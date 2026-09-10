@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0-preview.8 [服务端]
+#  多协议代理一键部署脚本 v3.7.0 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0-preview.8"
+readonly VERSION="3.7.0"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2482,7 +2482,7 @@ _prepare_singbox_stats_interactive() {
     fi
     if [[ "$force" != true && -f "$state_file" ]]; then
         _warn "Sing-box 统计尚未就绪，上次修复未完成。"
-        _info "请在用户管理选择 f（统计诊断/重试）；上次日志: $log_file"
+        _info "可在此处选择重试；上次日志: $log_file"
         local retry
         read -rp "  是否现在重试修复? [y/N]: " retry || return 1
         [[ "$retry" =~ ^[yY]$ ]] || return 1
@@ -2505,7 +2505,7 @@ _prepare_singbox_stats_interactive() {
     fi
     printf '%s\n' failed_or_cancelled > "$state_file"
     _err "统计修复未完成或已取消，不会标记成功；请查看日志: $log_file"
-    _info "再次尝试请在用户管理选择 f；退出重进也不会重复构建。"
+    _info "再次进入实时流量统计或同步流量数据即可选择重试；未经确认不会自动构建。"
     return 1
 }
 
@@ -10804,7 +10804,7 @@ update_core_menu() {
         _item "3" "$snellv5_label"
         _item "4" "$snellv6_label"
         _item "5" "重新获取版本"
-        _item "6" "协议运行内核切换 ${D}(预览)${NC}"
+        _item "6" "协议运行内核切换"
         _item "0" "返回"
         _line
         
@@ -27112,7 +27112,12 @@ show_service_logs() {
 
 # 选择协议 (用于用户管理)
 _select_protocol_for_users() {
+    local filter="${1:-all}"
     local protocols=$(db_get_all_protocols)
+    if [[ "$filter" == snell ]]; then
+        protocols=$(printf '%s\n' "$protocols" | grep -E '^(snell|snell-v5|snell-v6)$')
+        [[ -n "$protocols" ]] || { _err "没有已安装的 Snell 协议"; return 1; }
+    fi
     [[ -z "$protocols" ]] && { _err "没有已安装的协议"; return 1; }
     
     echo ""
@@ -28943,7 +28948,7 @@ _show_realtime_traffic() {
 # 立即同步流量数据
 _sync_traffic_now() {
     _header
-    _prepare_singbox_stats_interactive || { _err "Sing-box 统计修复尚未完成，本次不执行手动同步。请先选择 f 诊断/重试。"; return 1; }
+    _prepare_singbox_stats_interactive || { _err "Sing-box 统计修复尚未完成，本次不执行手动同步。再次进入本页可选择重试。"; return 1; }
     echo -e "  ${W}同步流量数据${NC}"
     _dline
     
@@ -29200,7 +29205,6 @@ manage_users() {
         _item "p" "Snell 用户实例设置 (端口/密钥/DNS/模式)"
         _line
         _item "7" "实时流量统计"
-        _item "f" "Sing-box 统计诊断/重试（查看失败日志）"
         _item "8" "同步流量数据"
         _item "9" "流量统计设置"
         _line
@@ -29258,15 +29262,6 @@ manage_users() {
                     _pause
                 fi
                 ;;
-            f|F)
-                _header
-                if [[ -f "$CFG/singbox-stats-repair.log" ]]; then
-                    _info "上次修复日志（最后 40 行）:"
-                    tail -n 40 "$CFG/singbox-stats-repair.log"
-                fi
-                _prepare_singbox_stats_interactive true
-                _pause
-                ;;
             7)
                 _show_realtime_traffic
                 _pause
@@ -29284,7 +29279,7 @@ manage_users() {
                 fi
                 ;;
             p|P)
-                if _select_protocol_for_users; then
+                if _select_protocol_for_users snell; then
                     _snell_edit_user "$SELECTED_PROTO"
                     _pause
                 fi
