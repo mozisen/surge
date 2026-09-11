@@ -1,0 +1,93 @@
+name: Build precompiled Sing-box statistics cores
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Official stable Sing-box version (without v)
+        required: true
+        default: '1.14.0'
+        type: string
+  push:
+    branches: [codex/singbox-prebuilt-stats]
+    paths: ['.github/workflows/singbox-stats.yml', 'scripts/build-singbox-stats.sh']
+permissions:
+  contents: read
+concurrency:
+  group: singbox-stats-publish
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.7'
+          cache: false
+      - name: Build and test native core
+        env:
+          CORE_VERSION: ${{ inputs.version || '1.14.0' }}
+          CORE_ARCH: ${{ matrix.arch }}
+        run: bash scripts/build-singbox-stats.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Publish immutable version directories (no GitHub Release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_VERSION: ${{ inputs.version || '1.14.0' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CORE_VERSION" =~ ^[1-9][0-9]*\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          gh auth setup-git
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code "$remote" refs/heads/singbox-stats-binaries >/dev/null; then
+            git clone --depth 1 --single-branch --branch singbox-stats-binaries "$remote" published
+          else
+            mkdir published
+            git -C published init -b singbox-stats-binaries
+            git -C published remote add origin "$remote"
+          fi
+          # Never silently replace a previously published version.
+          if [[ -e "published/v$CORE_VERSION" ]]; then
+            echo 'Version already published; keeping existing immutable packages.'
+            exit 0
+          fi
+          for arch in amd64 arm64; do
+            test -s "packages/v$CORE_VERSION/linux-$arch/manifest.json"
+            test -s "packages/v$CORE_VERSION/linux-$arch/sing-box.tar.gz"
+          done
+          cp -R "packages/v$CORE_VERSION" published/
+          git -C published config user.name github-actions[bot]
+          git -C published config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C published add "v$CORE_VERSION"
+          git -C published commit -m "Publish verified Sing-box $CORE_VERSION statistics cores"
+          git -C published push origin HEAD:singbox-stats-binaries
