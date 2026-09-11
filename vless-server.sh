@@ -16,7 +16,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1) ))
     exit 1
 fi
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.7.0 [服务端]
+#  多协议代理一键部署脚本 v3.7.1-preview.1 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 默认处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.0"
+readonly VERSION="3.7.1-preview.1"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2505,15 +2505,15 @@ _prepare_singbox_stats_interactive() {
     fi
     printf '%s\n' failed_or_cancelled > "$state_file"
     _err "统计修复未完成或已取消，不会标记成功；请查看日志: $log_file"
-    _info "再次进入实时流量统计或同步流量数据即可选择重试；未经确认不会自动构建。"
+    _info "再次进入实时流量统计或同步流量数据即可选择重试；未经确认不会替换核心。"
     return 1
 }
 
 _repair_singbox_stats_interactive() {
     if ! sing-box version 2>/dev/null | grep -q with_v2ray_api; then
-        _warn "当前核心不含用户统计接口。可从官方源码构建同版本统计核心（需要较多磁盘/内存及下载时间），备份后重启服务。"
+        _warn "当前核心不含用户统计接口。可下载项目 CI 从官方源码构建的同版本统计核心，校验、备份后重启；服务器不再现场编译。"
         local build_answer
-        read -rp "  是否构建并启用统计核心? [y/N]: " build_answer
+        read -rp "  是否下载并启用统计核心? [y/N]: " build_answer
         [[ "$build_answer" =~ ^[yY]$ ]] || return 1
         _build_singbox_stats_core || return 1
     fi
@@ -2556,33 +2556,42 @@ _singbox_stats_build_version() {
     printf '%s\n' "$version"
 }
 
+_download_singbox_stats_core() {
+    local version="$1" arch="$2" work="$3" base expected binary_sha
+    version=$(_singbox_stats_build_version "$version") || return 1
+    [[ "$arch" == amd64 || "$arch" == arm64 ]] || return 1
+    base="https://raw.githubusercontent.com/mozisen/surge/singbox-stats-binaries/v${version}/linux-${arch}"
+    if ! curl -fsSL --connect-timeout 15 --max-time 60 "$base/manifest.json" -o "$work/manifest.json"; then
+        _err "暂无 v$version linux/$arch 预编译统计包（或网络不可用），原核心保留；请等待项目 CI 构建，不会自动编译或降级。"
+        return 1
+    fi
+    jq -e --arg v "$version" --arg a "$arch" '
+        .version == $v and .arch == $a and .os == "linux" and .profile == "stats-v1" and
+        (.archive_sha256 | test("^[a-f0-9]{64}$")) and (.binary_sha256 | test("^[a-f0-9]{64}$"))
+    ' "$work/manifest.json" >/dev/null || { _err "预编译包清单校验失败"; return 1; }
+    expected=$(jq -r .archive_sha256 "$work/manifest.json")
+    binary_sha=$(jq -r .binary_sha256 "$work/manifest.json")
+    curl -fL --connect-timeout 30 --max-time 300 "$base/sing-box.tar.gz" -o "$work/pkg.tar.gz" || return 1
+    [[ "$(_sha256_file "$work/pkg.tar.gz")" == "$expected" ]] || { _err "预编译包 SHA-256 不匹配，拒绝安装"; return 1; }
+    [[ "$(tar -tzf "$work/pkg.tar.gz")" == sing-box ]] || { _err "预编译包内容异常"; return 1; }
+    mkdir -p "$work/bin" || return 1
+    tar -xzf "$work/pkg.tar.gz" -C "$work/bin" || return 1
+    [[ -f "$work/bin/sing-box" && ! -L "$work/bin/sing-box" ]] || return 1
+    [[ "$(_sha256_file "$work/bin/sing-box")" == "$binary_sha" ]] || return 1
+    chmod 755 "$work/bin/sing-box"
+}
+
 _build_singbox_stats_core() (
-    # 子 shell 隔离临时目录清理和构建环境，构建期间不停止现有服务。
-    local version work arch manifest filename checksum backup tags stage rc
+    # 保留函数名兼容现有调用；只下载已验证的预编译包，绝不在服务器编译。
+    local version work arch backup stage rc
     version="${1:-$(sing-box version | awk '/^sing-box version / {print $3; exit}')}"
-    version=$(_singbox_stats_build_version "$version") || { _err "自动统计构建仅接受完整稳定版本号；目标格式无效，未更换原核心。"; return 1; }
-    arch=$(_map_arch "amd64:arm64:armv6l") || { _err "构建架构不支持: $(uname -m)"; return 1; }
-    work=$(mktemp -d) || { _err "无法创建构建临时目录，请检查磁盘空间/权限"; return 1; }
-    stage="获取 Go 下载清单"
-    trap 'rc=$?; if [[ $rc != 0 ]]; then _err "统计核心修复失败，阶段: $stage，退出码: $rc"; fi; rm -rf "$work"; exit "$rc"' EXIT
-    _info "下载并校验官方 Go 1.25.7 构建工具..."
-    manifest=$(curl -fsSL --connect-timeout 15 --max-time 60 'https://go.dev/dl/?mode=json&include=all') || return 1
-    filename=$(jq -r --arg arch "$arch" '[.[] | select(.version == "go1.25.7") | .files[] | select(.os == "linux" and .arch == $arch and .kind == "archive")][0].filename // empty' <<< "$manifest")
-    checksum=$(jq -r --arg f "$filename" '[.[].files[] | select(.filename == $f)][0].sha256 // empty' <<< "$manifest")
-    [[ "$filename" =~ ^go1\.25\.7\.linux-[a-z0-9]+\.tar\.gz$ && "$checksum" =~ ^[a-f0-9]{64}$ ]] || { _err "Go 清单中没有有效的 linux/$arch 下载地址或校验值"; return 1; }
-    stage="下载/校验 Go 工具链"
-    curl -fL --connect-timeout 30 --max-time 600 "https://go.dev/dl/$filename" -o "$work/go.tar.gz" || return 1
-    [[ "$(_sha256_file "$work/go.tar.gz")" == "$checksum" ]] || { _err "Go 校验失败"; return 1; }
-    tar -xzf "$work/go.tar.gz" -C "$work" || return 1
-    tags=with_gvisor,with_quic,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api
-    stage="编译 Sing-box $version（请检查前面的 Go 错误、网络、内存和磁盘空间）"
-    _info "构建 Sing-box $version（原服务保持运行；失败时不会替换）..."
-    env GOTOOLCHAIN=auto GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
-        GONOSUMDB= GONOPROXY= GOPRIVATE= GOFLAGS= CGO_ENABLED=0 \
-        GOPATH="$work/gopath" GOCACHE="$work/cache" GOBIN="$work/bin" \
-        "$work/go/bin/go" install -p 1 -tags "$tags" \
-        -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=$version" \
-        "github.com/sagernet/sing-box/cmd/sing-box@v$version" || { _err "构建失败，原核心未更换"; return 1; }
+    version=$(_singbox_stats_build_version "$version") || { _err "预编译统计核心仅接受完整稳定版本号；目标格式无效，未更换原核心。"; return 1; }
+    arch=$(_map_arch "amd64:arm64:unsupported") || return 1
+    [[ "$arch" == amd64 || "$arch" == arm64 ]] || { _err "暂无此架构预编译包，原核心保留"; return 1; }
+    work=$(mktemp -d) || { _err "无法创建下载临时目录，请检查磁盘空间/权限"; return 1; }
+    stage="下载预编译统计核心"
+    trap 'rc=$?; if [[ $rc != 0 ]]; then _err "统计核心安装失败，阶段: $stage，退出码: $rc"; fi; rm -rf "$work"; exit "$rc"' EXIT
+    _download_singbox_stats_core "$version" "$arch" "$work" || return 1
     stage="验证新核心及现有配置"
     "$work/bin/sing-box" version | grep -q with_v2ray_api || return 1
     [[ "$("$work/bin/sing-box" version | awk '/^sing-box version / {print $3; exit}')" == "$version" ]] || { _err "构建输出版本与目标不一致"; return 1; }
@@ -2631,7 +2640,7 @@ _update_singbox_preserving_stats() {
     fi
     target=$(_singbox_stats_build_version "$target") || { _err "目标不是稳定版本，未更新核心"; return 1; }
     svc status vless-singbox >/dev/null 2>&1 && running=true
-    _info "保留用户统计，先构建并检查目标 v$target，再备份、替换、验证；失败恢复。"
+    _info "保留用户统计，先下载校验目标 v$target，再备份、替换、验证；无包或失败时保留/恢复原核心。"
     if _build_singbox_stats_core "$target"; then update_rc=0; else update_rc=$?; fi
     # 若更新前服务停止，只为 API 验证临时启动，结束后恢复停止状态。
     if [[ "$running" == false ]]; then
