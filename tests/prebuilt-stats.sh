@@ -7,7 +7,7 @@ for fn in _download_singbox_stats_core _singbox_stats_build_version _sha256_file
     eval "$(awk -v fn="$fn" 'index($0,fn"() {")==1 {on=1} on {print} on && $0=="}" {exit}' "$repo/vless-server.sh")"
 done
 _err() { echo "$*" >&2; }
-_singbox_stats_libc() { echo glibc; }
+_singbox_stats_libc() { echo "${fixture_libc:-glibc}"; }
 mkdir "$fixture/source" "$fixture/ok" "$fixture/bad" "$fixture/missing"
 printf 'fixture binary\n' > "$fixture/source/sing-box"
 tar -czf "$fixture/source/pkg" -C "$fixture/source" sing-box
@@ -24,6 +24,18 @@ curl() {
 }
 _download_singbox_stats_core 1.14.0 amd64 "$fixture/ok"
 cmp "$fixture/source/sing-box" "$fixture/ok/bin/sing-box"
+for fixture_arch in amd64 arm64; do
+    for fixture_libc in glibc musl; do
+        jq --arg a "$fixture_arch" --arg l "$fixture_libc" '.arch=$a | .libc=$l' "$fixture/source/manifest" > "$fixture/source/next"
+        mv "$fixture/source/next" "$fixture/source/manifest"
+        mkdir "$fixture/$fixture_arch-$fixture_libc"
+        _download_singbox_stats_core 1.14.0 "$fixture_arch" "$fixture/$fixture_arch-$fixture_libc"
+    done
+done
+fixture_libc=glibc
+if _download_singbox_stats_core 1.14.0 arm64 "$fixture/bad"; then exit 1; fi
+jq '.arch="amd64" | .libc="glibc"' "$fixture/source/manifest" > "$fixture/source/next"
+mv "$fixture/source/next" "$fixture/source/manifest"
 printf 'corrupt\n' >> "$fixture/source/pkg"
 if _download_singbox_stats_core 1.14.0 amd64 "$fixture/bad"; then exit 1; fi
 [[ ! -e "$fixture/bad/bin/sing-box" ]]

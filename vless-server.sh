@@ -2613,7 +2613,7 @@ _build_singbox_stats_core() (
     version="${1:-$(sing-box version | awk '/^sing-box version / {print $3; exit}')}"
     version=$(_singbox_stats_build_version "$version") || { _err "预编译统计核心仅接受完整稳定版本号；目标格式无效，未更换原核心。"; return 1; }
     arch=$(_map_arch "amd64:arm64:unsupported") || return 1
-    [[ "$arch" == amd64 || "$arch" == arm64 ]] || { _err "暂无此架构预编译包，原核心保留"; return 1; }
+    [[ "$arch" == amd64 || "$arch" == arm64 ]] || { _err "暂无此架构预编译包，请本地从官方源码编译带 with_v2ray_api 的核心；原核心保留"; return 1; }
     work=$(mktemp -d) || { _err "无法创建下载临时目录，请检查磁盘空间/权限"; return 1; }
     stage="下载预编译统计核心"
     trap 'rc=$?; if [[ $rc != 0 ]]; then _err "统计核心安装失败，阶段: $stage，退出码: $rc"; fi; rm -rf "$work"; exit "$rc"' EXIT
