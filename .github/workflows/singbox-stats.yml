@@ -23,8 +23,16 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-24.04
+            libc: glibc
+          - arch: amd64
+            runner: ubuntu-24.04
+            libc: musl
           - arch: arm64
             runner: ubuntu-24.04-arm
+            libc: glibc
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            libc: musl
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -36,13 +44,23 @@ jobs:
           go-version: '1.25.7'
           cache: false
       - name: Build and test native core
+        if: matrix.libc == 'glibc'
         env:
           CORE_VERSION: ${{ inputs.version || '1.14.0' }}
           CORE_ARCH: ${{ matrix.arch }}
+          CORE_LIBC: ${{ matrix.libc }}
         run: bash scripts/build-singbox-stats.sh
+      - name: Build and test in native Alpine musl
+        if: matrix.libc == 'musl'
+        env:
+          CORE_VERSION: ${{ inputs.version || '1.14.0' }}
+          CORE_ARCH: ${{ matrix.arch }}
+          CORE_LIBC: musl
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e CORE_VERSION -e CORE_ARCH -e CORE_LIBC -e GITHUB_SHA golang:1.25.7-alpine sh -c 'apk add --no-cache bash jq python3 openssl curl git && bash scripts/build-singbox-stats.sh'
       - uses: actions/upload-artifact@v4
         with:
-          name: core-${{ matrix.arch }}
+          name: core-${{ matrix.arch }}-${{ matrix.libc }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -77,17 +95,18 @@ jobs:
             git -C published remote add origin "$remote"
           fi
           # Never silently replace a previously published version.
-          if [[ -e "published/v$CORE_VERSION" ]]; then
-            echo 'Version already published; keeping existing immutable packages.'
-            exit 0
-          fi
           for arch in amd64 arm64; do
-            test -s "packages/v$CORE_VERSION/linux-$arch/manifest.json"
-            test -s "packages/v$CORE_VERSION/linux-$arch/sing-box.tar.gz"
+            for libc in glibc musl; do
+              path="v$CORE_VERSION/linux-$arch-$libc"
+              test -s "packages/$path/manifest.json"
+              test -s "packages/$path/sing-box.tar.gz"
+              mkdir -p "published/v$CORE_VERSION"
+              if [[ ! -e "published/$path" ]]; then cp -R "packages/$path" "published/$path"; fi
+            done
           done
-          cp -R "packages/v$CORE_VERSION" published/
           git -C published config user.name github-actions[bot]
           git -C published config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git -C published add "v$CORE_VERSION"
+          git -C published diff --cached --quiet && exit 0
           git -C published commit -m "Publish verified Sing-box $CORE_VERSION statistics cores"
           git -C published push origin HEAD:singbox-stats-binaries

@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.1-preview.1"
+readonly VERSION="3.7.1-preview.2"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2510,6 +2510,7 @@ _prepare_singbox_stats_interactive() {
 }
 
 _repair_singbox_stats_interactive() {
+    _singbox_stats_version_gate || return 1
     if ! sing-box version 2>/dev/null | grep -q with_v2ray_api; then
         _warn "当前核心不含用户统计接口。可下载项目 CI 从官方源码构建的同版本统计核心，校验、备份后重启；服务器不再现场编译。"
         local build_answer
@@ -2556,17 +2557,42 @@ _singbox_stats_build_version() {
     printf '%s\n' "$version"
 }
 
+_singbox_stats_version_gate() {
+    local current latest releases
+    current=$(sing-box version | awk '/^sing-box version / {print $3; exit}')
+    releases=$(curl -fsSL --connect-timeout 15 --max-time 60 'https://api.github.com/repos/SagerNet/sing-box/releases?per_page=100') || {
+        _err "无法确认最新 1.14 稳定版，请检查网络后重试；未更换核心"; return 1;
+    }
+    latest=$(jq -er '[.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v1\\.14\\.[0-9]+$"))] | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last | select(. != null) | ltrimstr("v")' <<< "$releases") || {
+        _err "未找到官方 1.14 稳定版，未更换核心"; return 1;
+    }
+    [[ "$current" == "$latest" ]] && return 0
+    _warn "流量统计要求最新 1.14 稳定版 v${latest}，当前 v${current}。请先在核心版本管理中选择指定版本更新，再开启统计；不会自动升级或降级。"
+    return 1
+}
+
+_singbox_stats_libc() {
+    local description
+    description=$(ldd --version 2>&1 || true)
+    case "$description" in
+        *musl*) echo musl ;;
+        *GLIBC*|*GNU\ libc*|*GNU\ C\ Library*) echo glibc ;;
+        *) if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then echo glibc; else return 1; fi ;;
+    esac
+}
+
 _download_singbox_stats_core() {
-    local version="$1" arch="$2" work="$3" base expected binary_sha
+    local version="$1" arch="$2" work="$3" base expected binary_sha libc
     version=$(_singbox_stats_build_version "$version") || return 1
-    [[ "$arch" == amd64 || "$arch" == arm64 ]] || return 1
-    base="https://raw.githubusercontent.com/mozisen/surge/singbox-stats-binaries/v${version}/linux-${arch}"
+    [[ "$arch" == amd64 || "$arch" == arm64 ]] || { _err "无此架构预编译包，请在本地从官方源码编译带 with_v2ray_api 的核心"; return 1; }
+    libc=$(_singbox_stats_libc) || { _err "无法识别 libc，请手动确认或本地编译统计核心"; return 1; }
+    base="https://raw.githubusercontent.com/mozisen/surge/singbox-stats-binaries/v${version}/linux-${arch}-${libc}"
     if ! curl -fsSL --connect-timeout 15 --max-time 60 "$base/manifest.json" -o "$work/manifest.json"; then
-        _err "暂无 v$version linux/$arch 预编译统计包（或网络不可用），原核心保留；请等待项目 CI 构建，不会自动编译或降级。"
+        _err "无法下载 v$version linux/$arch/$libc 统计包。请检查网络；若无对应包，可本地编译带 with_v2ray_api 的核心（需充足内存/磁盘），不会自动编译。原核心保留。"
         return 1
     fi
-    jq -e --arg v "$version" --arg a "$arch" '
-        .version == $v and .arch == $a and .os == "linux" and .profile == "stats-v1" and
+    jq -e --arg v "$version" --arg a "$arch" --arg libc "$libc" '
+        .version == $v and .arch == $a and .libc == $libc and .os == "linux" and .profile == "stats-v1" and
         (.archive_sha256 | test("^[a-f0-9]{64}$")) and (.binary_sha256 | test("^[a-f0-9]{64}$"))
     ' "$work/manifest.json" >/dev/null || { _err "预编译包清单校验失败"; return 1; }
     expected=$(jq -r .archive_sha256 "$work/manifest.json")

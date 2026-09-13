@@ -7,11 +7,12 @@ for fn in _download_singbox_stats_core _singbox_stats_build_version _sha256_file
     eval "$(awk -v fn="$fn" 'index($0,fn"() {")==1 {on=1} on {print} on && $0=="}" {exit}' "$repo/vless-server.sh")"
 done
 _err() { echo "$*" >&2; }
+_singbox_stats_libc() { echo glibc; }
 mkdir "$fixture/source" "$fixture/ok" "$fixture/bad" "$fixture/missing"
 printf 'fixture binary\n' > "$fixture/source/sing-box"
 tar -czf "$fixture/source/pkg" -C "$fixture/source" sing-box
 jq -n --arg archive "$(_sha256_file "$fixture/source/pkg")" --arg binary "$(_sha256_file "$fixture/source/sing-box")" \
-  '{version:"1.14.0",arch:"amd64",os:"linux",profile:"stats-v1",archive_sha256:$archive,binary_sha256:$binary}' > "$fixture/source/manifest"
+  '{version:"1.14.0",arch:"amd64",libc:"glibc",os:"linux",profile:"stats-v1",archive_sha256:$archive,binary_sha256:$binary}' > "$fixture/source/manifest"
 curl() {
     [[ "$missing" != true ]] || return 22
     local url='' dest=''
