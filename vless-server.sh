@@ -20985,6 +20985,23 @@ uninstall_specific_protocol() {
     [[ ! "$confirm" =~ ^[yY]$ ]] && return
     
     _info "卸载 $selected_protocol..."
+
+    # Snell 用户实例独立运行，不能进入 standalone 的整组停止/删除路径。
+    if _snell_managed "$selected_protocol"; then
+        if _snell_uninstall_port "$selected_protocol" "$SELECTED_PORT"; then
+            _pause
+            return 0
+        fi
+        _err "Snell 端口卸载未完成，未继续执行整组卸载"
+        _pause
+        return 1
+    fi
+    if _is_snell_users_protocol "$selected_protocol" && [[ "$SELECTED_PORT" != all ]] &&
+        [[ "$(db_list_ports xray "$selected_protocol" | wc -w)" -gt 1 ]]; then
+        _err "旧版 Snell 多端口尚未迁移为独立用户实例，已取消卸载，避免影响其他端口"
+        _pause
+        return 1
+    fi
     
     # 停止相关服务
     if [[ "$core" == "xray" ]]; then
@@ -30549,6 +30566,30 @@ _snell_sync_traffic() {
             fi
         done <<< "$(_snell_rows "$proto")"
     done
+}
+
+_snell_uninstall_port() {
+    local proto="$1" port="$2" rows name remaining
+    _snell_managed "$proto" || return 1
+    [[ "$port" == all || "$port" =~ ^[0-9]+$ ]] || return 1
+    rows=$(_snell_rows "$proto" | jq -sc --arg port "$port" '
+        map(select($port == "all" or (.port | tostring) == $port))') || return 1
+    # Validate the complete selection before making changes.
+    jq -e 'length > 0 and all(.[]; (.snell_id | test("^[0-9a-f]{24}$")) and
+        (.users | length == 1) and (.users[0].name | type == "string" and length > 0))' <<< "$rows" >/dev/null || {
+        _err "未找到所选 Snell 端口或实例数据异常，已取消卸载"; return 1;
+    }
+    while IFS= read -r name; do
+        _snell_delete_user "$proto" "$name" || return 1
+    done < <(jq -r '.[].users[0].name' <<< "$rows")
+    remaining=$(_snell_rows "$proto" | jq -s 'length') || return 1
+    if [[ "$remaining" == 0 ]]; then
+        _db_apply --arg p "$proto" 'del(.xray[$p], .meta.snell_users[$p])' || return 1
+        rm -f "$CFG/${proto}.join"
+        _ok "$proto 所选端口及用户已卸载，已无剩余实例"
+    else
+        _ok "$proto 端口 $port 及其用户已卸载；其余 $remaining 个实例和用户保持不变"
+    fi
 }
 
 _snell_delete_user() {
