@@ -211,6 +211,15 @@ class Bridge:
                                 after[field] = user["uuid"]
             if after:
                 after["panel_managed"] = True
+                if not proto.startswith("snell"):
+                    # Keep routing tags stable when the CLI subsequently changes a port.
+                    config_path = self.cfg / ("singbox.json" if core == "singbox" else "config.json")
+                    try:
+                        existing = json.loads(config_path.read_text()).get("inbounds", []) if config_path.exists() else []
+                    except json.JSONDecodeError:
+                        existing = []  # Runtime.apply will reject malformed live JSON before replacement.
+                    matches = [i for i in existing if before and i.get("listen_port" if core == "singbox" else "port") == before["port"]]
+                    after["runtime_tag"] = (matches[0].get("tag") if len(matches) == 1 else None) or after.get("runtime_tag") or (proto + ("-in-" if core == "singbox" else "-") + str(after["port"]))
             target = after or before
             service = service_for(core, proto, target)
             paused = db.setdefault("meta", {}).setdefault("panel_paused_services", [])

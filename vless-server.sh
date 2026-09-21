@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.3-preview.1"
+readonly VERSION="3.7.3-preview.2"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2705,6 +2705,8 @@ for proto in ('vless', 'trojan', 'hy2', 'tuic', 'anytls'):
     def normalize_obj(obj):
         if not isinstance(obj, dict):
             return obj
+        if obj.get('panel_managed'):
+            return obj
 
         secret = default_secret(obj)
         if not secret:
@@ -4141,8 +4143,66 @@ gen_xray_user_routing_outbounds() {
     done | sort -u
 }
 
+# Shared renderer for platform-managed instances. stdin: {row, previous}.
+# Kept inside the standalone script so CLI usage never requires the Agent.
+_platform_render_inbound() {
+    local core="$1" proto="$2" nonce today
+    nonce=$(openssl rand -hex 16) || return 1
+    nonce="${nonce:0:8}-${nonce:8:4}-${nonce:12:4}-${nonce:16:4}-${nonce:20:12}"
+    today=$(date +%F)
+    jq -ce --arg core "$core" --arg p "$proto" --arg today "$today" --arg nonce "$nonce" '
+      .row as $r | (.previous // {}) as $old |
+      ($r.users // [{name:"default",uuid:($r.uuid // $r.password // $r.psk),enabled:true}]) as $all |
+      [$all[] | select(.enabled != false) |
+        select((.expire_date // "") == "" or .expire_date >= $today) |
+        select((.quota // 0) == 0 or (.used // 0) < .quota)] as $users |
+      if ($p != "vless" and $p != "trojan" and $p != "hy2" and $p != "anytls") or
+         ($core != "xray" and $core != "singbox") or
+         ($core == "xray" and $p != "vless" and $p != "trojan") then error("unsupported managed inbound")
+      elif $core == "xray" then
+        ($old | .port=$r.port | .listen=(.listen // "0.0.0.0") |
+          .tag=(.tag // $r.runtime_tag // ($p+"-"+($r.port|tostring))) | .protocol=$p) |
+        if $p == "vless" then
+          .settings.decryption="none" |
+          .settings.clients=[$users[] | {id:.uuid,email:(.name+"@vless"),flow:"xtls-rprx-vision"}] |
+          if ($old|length)==0 then .streamSettings={network:"tcp",security:"reality",realitySettings:{
+            show:false,dest:($r.sni+":443"),serverNames:[$r.sni],privateKey:$r.private_key,shortIds:[$r.short_id]}} else . end
+        else .settings.clients=[$users[] | {password:.uuid,email:(.name+"@trojan")}] |
+          if ($old|length)==0 then .streamSettings={network:"tcp",security:"tls",tlsSettings:{certificates:[{
+            certificateFile:$r.panel_cert,keyFile:$r.panel_key}]}} else . end
+        end
+      else
+        ($old | .listen_port=$r.port | .listen=(.listen // "0.0.0.0") |
+          .tag=(.tag // $r.runtime_tag // ($p+"-in-"+($r.port|tostring))) |
+          .type=(if $p=="hy2" then "hysteria2" else $p end)) |
+        if $p=="vless" then
+          .users=[$users[] | {name:("vless-"+.name),uuid:.uuid,flow:"xtls-rprx-vision"}] |
+          if (.users|length)==0 then .users=[{name:"vaio-disabled",uuid:$nonce,flow:"xtls-rprx-vision"}] else . end |
+          if ($old|length)==0 then .tls={enabled:true,server_name:$r.sni,reality:{enabled:true,
+            handshake:{server:$r.sni,server_port:443},private_key:$r.private_key,short_id:[$r.short_id]}} else . end
+        else
+          .users=[$users[] | {name:($p+"-"+.name),password:.uuid}] |
+          if (.users|length)==0 then .users=[{name:"vaio-disabled",password:$nonce}] else . end |
+          if ($old|length)==0 then .tls={enabled:true,certificate_path:$r.panel_cert,key_path:$r.panel_key} else . end
+        end
+      end'
+}
+
+_platform_cli_inbound() {
+    local core="$1" proto="$2" row="$3" previous="$4" payload
+    [[ -n "$previous" ]] || previous='{}'
+    payload=$(jq -nc --argjson row "$row" --argjson config "$previous" '
+      {row:$row,previous:([$config.inbounds[]? |
+        select((.port // .listen_port)==$row.port or
+          ($row.runtime_tag != null and .tag==$row.runtime_tag))] |
+        if length>1 then error("ambiguous managed inbound") else .[0] // {} end)}') || return 1
+    printf '%s\n' "$payload" | _platform_render_inbound "$core" "$proto"
+}
+
 # 生成 Xray 多 inbounds 配置
 generate_xray_config() {
+    local platform_previous_xray
+    platform_previous_xray=$(cat "$CFG/config.json" 2>/dev/null) || platform_previous_xray='{}'
     local xray_protocols=$(get_xray_protocols)
     [[ -z "$xray_protocols" ]] && return 1
     
@@ -4885,6 +4945,9 @@ add_xray_inbound_v2() {
         _ensure_nginx_https_for_reality "$cert_domain"
     fi
     
+    if [[ "$(echo "$cfg" | jq -r '.panel_managed // false')" == true ]]; then
+        _platform_cli_inbound xray "$base_protocol" "$cfg" "${platform_previous_xray:-}" > "$tmp_inbound" || { rm -f "$tmp_inbound"; return 1; }
+    else
     case "$base_protocol" in
         vless)
             local security_mode=$(echo "$cfg" | jq -r '.security_mode // "reality"')
@@ -5370,6 +5433,7 @@ add_xray_inbound_v2() {
             ;;
     esac
     
+    fi
     # 验证生成的 inbound JSON
     if ! jq empty "$tmp_inbound" 2>/dev/null; then
         _err "生成的 $protocol inbound JSON 格式错误"
@@ -11092,6 +11156,8 @@ _build_singbox_ruleset_defs() {
 
 # 生成 Sing-box 统一配置（所有选用 Sing-box 的协议共用一个进程）
 generate_singbox_config() {
+    local platform_previous_singbox
+    platform_previous_singbox=$(cat "$CFG/singbox.json" 2>/dev/null) || platform_previous_singbox='{}'
     _ensure_singbox_default_users
     local singbox_protocols=$(db_list_protocols "singbox")
     [[ -z "$singbox_protocols" ]] && return 1
@@ -11482,6 +11548,9 @@ generate_singbox_config() {
         
         local inbound=""
         
+        if [[ "$(echo "$cfg" | jq -r '.panel_managed // false')" == true ]]; then
+            inbound=$(_platform_cli_inbound singbox "$proto" "$cfg" "$platform_previous_singbox") || return 1
+        else
         case "$proto" in
             vless)
                 local security_mode=$(echo "$cfg" | jq -r '.security_mode // "reality"')
@@ -11700,6 +11769,7 @@ generate_singbox_config() {
                 ;;
         esac
         
+        fi
         if [[ -n "$inbound" ]]; then
             inbounds=$(echo "$inbounds" | jq --argjson ib "$inbound" '. += [$ib]')
             ((success_count++))

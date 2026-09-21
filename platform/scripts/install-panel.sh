@@ -21,7 +21,7 @@ if command -v ss >/dev/null && ss -lntH | grep -Eq '[:.]18080[[:space:]]'; then
 fi
 echo '正在安装运行环境…'
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv nginx certbot python3-certbot-nginx curl ca-certificates
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv nginx certbot python3-certbot-nginx curl ca-certificates jq openssl
 # Do not take over an existing domain's virtual host.
 if nginx -T 2>/dev/null | grep -F "server_name $VAIO_DOMAIN" >/dev/null; then
   echo '此域名已有 Nginx 站点，请使用一个未配置的面板域名。'; exit 1

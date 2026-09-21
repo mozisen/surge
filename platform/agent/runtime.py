@@ -1,11 +1,9 @@
 """Allowlisted OS operations. Existing routing and unrelated inbounds are preserved."""
-import copy
 import datetime
 import hashlib
 import json
 import os
 import re
-import secrets
 import signal
 import subprocess
 import tempfile
@@ -16,7 +14,7 @@ from pathlib import Path
 from .inventory import read_db, rows, service_for, users_for
 
 ROOT = Path(__file__).resolve().parent.parent
-UPSTREAM_SHA = "fc38833fc12d9f1bff8adfa4f12ac1f3aca41aee5978059af68fb27222044c32"
+UPSTREAM_SHA = "4c83a5cda311efd5969906467088b49e0daeea5d97ffd8cc0b57c7369788e1f8"
 
 
 def atomic_write(path, content):
@@ -48,45 +46,21 @@ def active_users(row):
 
 
 def render_inbound(proto, row, previous=None, core=None):
-    inbound = copy.deepcopy(previous) if previous else {}
-    users = active_users(row)
-    if proto == "vless" and core == "singbox":
-        inbound.update(listen_port=row["port"])
-        if not previous:
-            inbound.update(type="vless", tag="vless-in-" + str(row["port"]), listen="0.0.0.0",
-                           tls={"enabled": True, "server_name": row["sni"], "reality": {
-                               "enabled": True, "handshake": {"server": row["sni"], "server_port": 443},
-                               "private_key": row["private_key"], "short_id": [row["short_id"]]}})
-        inbound["users"] = [{"name": "vless-" + u["name"], "uuid": u["uuid"], "flow": "xtls-rprx-vision"} for u in users]
-        if not users:
-            inbound["users"] = [{"name": "vaio-disabled", "uuid": str(uuid.uuid4()), "flow": "xtls-rprx-vision"}]
-    elif proto == "vless":
-        inbound.update(port=row["port"])
-        if not previous:
-            inbound.update(tag="vless-" + str(row["port"]), listen="0.0.0.0", protocol="vless",
-                           settings={"decryption": "none"}, streamSettings={"network": "tcp", "security": "reality",
-                           "realitySettings": {"show": False, "dest": row["sni"] + ":443", "serverNames": [row["sni"]],
-                                               "privateKey": row["private_key"], "shortIds": [row["short_id"]]}})
-        inbound.setdefault("settings", {})["clients"] = [{"id": u["uuid"], "email": u["name"] + "@vless", "flow": "xtls-rprx-vision"} for u in users]
-        # Empty clients intentionally deny all users; never restore a disabled default credential.
-    elif proto == "trojan" and core == "xray":
-        inbound.update(port=row["port"])
-        if not previous:
-            inbound.update(tag="trojan-" + str(row["port"]), listen="0.0.0.0", protocol="trojan",
-                           settings={}, streamSettings={"network": "tcp", "security": "tls",
-                           "tlsSettings": {"certificates": [{"certificateFile": row["panel_cert"], "keyFile": row["panel_key"]}]}})
-        inbound.setdefault("settings", {})["clients"] = [{"password": u["uuid"], "email": u["name"] + "@trojan"} for u in users]
-    elif proto in ("hy2", "trojan", "anytls"):
-        inbound.update(listen_port=row["port"])
-        if not previous:
-            inbound.update(type="hysteria2" if proto == "hy2" else proto, tag=proto + "-in-" + str(row["port"]), listen="0.0.0.0",
-                           tls={"enabled": True, "certificate_path": row["panel_cert"], "key_path": row["panel_key"]})
-        inbound["users"] = [{"name": proto + "-" + u["name"], "password": u["uuid"]} for u in users]
-        if not users:
-            # Some core versions require at least one authentication record. A fresh,
-            # undisclosed credential keeps all real users disabled without falling back.
-            inbound["users"] = [{"name": "vaio-disabled", "password": secrets.token_urlsafe(48)}]
-    return inbound
+    """Use the standalone CLI renderer; no second protocol schema in the Agent."""
+    source = (ROOT / "vendor/vless-server.sh").read_bytes()
+    if hashlib.sha256(source).hexdigest() != UPSTREAM_SHA:
+        raise RuntimeError("脚本完整性校验失败")
+    match = re.search(r"^_platform_render_inbound\(\) \{\n.*?^\}", source.decode(), re.M | re.S)
+    if not match:
+        raise RuntimeError("脚本缺少共享配置生成接口")
+    core = core or ("singbox" if proto in ("hy2", "anytls") else "xray")
+    result = subprocess.run(["bash", "-c", match[0] + '\n_platform_render_inbound "$@"',
+                             "vaio-render", core, proto],
+                            input=json.dumps({"row": row, "previous": previous}),
+                            capture_output=True, text=True, timeout=20)
+    if result.returncode:
+        raise ValueError("共享配置生成失败；未替换运行配置")
+    return json.loads(result.stdout)
 
 
 class Runtime:
