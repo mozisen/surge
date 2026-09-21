@@ -1,5 +1,7 @@
 # 平台管理接口：阶段一（未完成全协议写入）
 
+预览版本：`3.7.3-preview.1`，分支 `codex/platform-api`。仅发布预览分支，不更新 main、正式标签或 GitHub Release。测试入口为 `bash vless-server.sh --api`，不需要进入交互菜单。
+
 依据平台任务「评估 VLESS 节点统一管理平台」及 Vaio 项目的 `docs/all-protocol-management.md` 接口提案实现。本次是只读接入基础，不代表全协议管理已经完成；不修改线上面板、Agent 或节点。
 
 ## 入口
