@@ -17,7 +17,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
-from .common import MUTATIONS, digest, require_text, validate_task
+from .common import MUTATIONS, LEGACY_COMBINATIONS, digest, require_text, validate_task
 from .store import Store
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -482,7 +482,14 @@ def create_app(config=None):
                 return jsonify(error="节点离线或身份已撤销"), 409
             if node["maintenance"]:
                 return jsonify(error="节点正在维护，请稍后再试"), 409
+            capabilities = json.loads(node["snapshot"]).get("write_capabilities", [])
+            if "reset_credentials" in task["params"] and json.loads(node["snapshot"]).get("task_api_version", 1) < 2:
+                return jsonify(error="节点不支持凭据重置，请先升级 Agent"), 409
+            if (task["core"], task["protocol"]) not in LEGACY_COMBINATIONS and {"core": task["core"], "protocol": task["protocol"]} not in capabilities:
+                return jsonify(error="节点尚未声明此协议写入能力，请先升级 Agent"), 409
             if task["action"] in MUTATIONS:
+                if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status='unknown'", (node_id,)).fetchone():
+                    return jsonify(error="该节点有结果未知的任务，请先核对并处理，再提交写入"), 409
                 if not node["adopted"]:
                     return jsonify(error="请先确认接管节点"), 409
                 if task["revision"] != json.loads(node["snapshot"]).get("revision"):

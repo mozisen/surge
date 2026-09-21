@@ -105,6 +105,31 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(response.status_code,400)
         self.assertNotIn('NO_LEAK',self.client.get('/api/nodes').text)
 
+    def test_new_protocol_requires_node_declared_capability(self):
+        node, token, snap = self.registered()
+        task = dict(action='install', protocol='anytls', core='singbox', port=30001,
+                    params={'sni': 'example.com'}, revision='a'*64)
+        send = lambda: self.client.post('/api/nodes/'+node+'/tasks', json=task,
+                                        headers={**self.headers, 'Idempotency-Key': 'new-protocol'})
+        self.assertEqual(send().status_code, 409)
+        snap.update(task_api_version=2, write_capabilities=[{'protocol': 'anytls', 'core': 'singbox'}])
+        self.client.post('/api/agent/'+node+'/poll', json={'snapshot': snap, 'ready': True}, headers=token)
+        self.assertEqual(send().status_code, 201)
+
+    def test_old_node_rejects_reset_and_unknown_blocks_new_writes(self):
+        node, token, snap = self.registered()
+        task = dict(action='user_update', protocol='vless', core='xray', port=30001,
+                    params={'name': 'default', 'reset_credentials': True}, revision='a'*64)
+        send = lambda: self.client.post('/api/nodes/'+node+'/tasks', json=task,
+                                        headers={**self.headers, 'Idempotency-Key': 'reset-user'})
+        self.assertEqual(send().status_code, 409)
+        snap['task_api_version'] = 2
+        self.client.post('/api/agent/'+node+'/poll', json={'snapshot': snap, 'ready': True}, headers=token)
+        self.assertEqual(send().status_code, 201)
+        with self.store.connect() as db:
+            db.execute("UPDATE tasks SET status='unknown' WHERE node_id=?", (node,))
+        self.assertEqual(self.task(node, 'another-write').status_code, 409)
+
     def test_timeout_is_unknown_never_requeued(self):
         node,token,snap=self.registered()
         self.task(node)

@@ -5,7 +5,14 @@ import json
 import re
 
 PROTOCOLS = {"vless": "VLESS Reality", "hy2": "Hysteria2", "snell": "Snell v4",
-             "snell-v5": "Snell v5", "snell-v6": "Snell v6"}
+             "snell-v5": "Snell v5", "snell-v6": "Snell v6", "trojan": "Trojan", "anytls": "AnyTLS"}
+PROTOCOL_CORES = {"vless": ("xray", "singbox"), "hy2": ("singbox",), "anytls": ("singbox",),
+                  "trojan": ("xray", "singbox"), "snell": ("xray",), "snell-v5": ("xray",), "snell-v6": ("xray",)}
+LEGACY_COMBINATIONS = {("xray", "vless"), ("singbox", "hy2"), ("xray", "snell"), ("xray", "snell-v5"), ("xray", "snell-v6")}
+
+
+def write_capabilities():
+    return [{"core": core, "protocol": proto} for proto, cores in PROTOCOL_CORES.items() for core in cores]
 MUTATIONS = {"install", "update", "delete", "restart", "start", "stop", "user_add", "user_update", "user_delete"}
 ACTIONS = MUTATIONS | {"share", "inspect"}
 
@@ -36,17 +43,17 @@ def validate_task(data):
         raise ValueError("不支持的操作")
     p = data.get("protocol")
     if p not in PROTOCOLS:
-        raise ValueError("首版支持 VLESS Reality、Hysteria2、Snell v4/v5/v6 的写入操作")
+        raise ValueError("协议尚未实现安全写入适配，请查看节点能力列表")
     core = data.get("core")
-    if core != ("singbox" if p == "hy2" else "xray"):
-        raise ValueError("协议内核不受支持；首版 VLESS 写入仅支持 Xray")
+    if core not in PROTOCOL_CORES[p]:
+        raise ValueError("协议内核不受支持，请查看节点能力列表")
     port(data.get("port"))
     params = data.get("params", {})
     if not isinstance(params, dict):
         raise ValueError("参数无效")
     allowed = {"install": {"sni", "name"}, "update": {"port"},
                "user_add": {"name", "quota_gb", "expire_date"},
-               "user_update": {"name", "quota_gb", "expire_date", "enabled"},
+               "user_update": {"name", "quota_gb", "expire_date", "enabled", "reset_credentials"},
                "user_delete": {"name"}, "share": {"name", "host"}}
     if set(params) - allowed.get(action, set()):
         raise ValueError("不支持的参数")
@@ -54,10 +61,12 @@ def validate_task(data):
         require_text(params.get("name"), "用户名", 32, r"[A-Za-z0-9_-]+")
     if action == "install":
         require_text(params.get("name", "default"), "用户名", 32, r"[A-Za-z0-9_-]+")
-        if p in ("vless", "hy2"):
+        if p in ("vless", "hy2", "trojan", "anytls"):
             require_text(params.get("sni"), "SNI", 253, r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
     if action == "update":
         port(params.get("port"))
+    if "reset_credentials" in params and type(params["reset_credentials"]) is not bool:
+        raise ValueError("凭据重置选项无效")
     if "enabled" in params and type(params["enabled"]) is not bool:
         raise ValueError("用户状态无效")
     if "quota_gb" in params and (type(params["quota_gb"]) is not int or not 0 <= params["quota_gb"] <= 999999):

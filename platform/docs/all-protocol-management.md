@@ -1,6 +1,6 @@
 # 全协议管理：适配范围与上游接口提案
 
-状态：接口设计与兼容性审查，尚未实现全协议写入。当前线上版本仍为 0.2.1。
+状态：本地开发版本 0.3.0-dev.1，已扩展至 9 种协议/内核组合，尚未实现全协议写入。本轮未部署或更改线上版本。
 
 ## 已核对的范围
 
@@ -10,13 +10,28 @@
 |---|---|---|
 | Xray | vless | Reality 模式已支持 |
 | Xray | vless-xhttp、vless-xhttp-cdn、vless-ws、vless-ws-notls、vmess-ws、vless-vision | 只读 |
-| Xray | trojan、trojan-ws、socks、ss2022、ss-legacy | 只读 |
-| Sing-box | vless、trojan、ss2022、ss-legacy、tuic、anytls | 只读 |
+| Xray | trojan | 已实现，待真实节点验收 |
+| Xray | trojan-ws、socks、ss2022、ss-legacy | 只读 |
+| Sing-box | vless、trojan、anytls | 已实现，VLESS 限 Reality；待真实节点验收 |
+| Sing-box | ss2022、ss-legacy、tuic | 只读 |
 | Sing-box | hy2 | 不含端口跳跃的实例已支持 |
 | 独立服务 | snell、snell-v5、snell-v6 | 已支持；旧多端口格式必须先迁移 |
 | 独立服务 | snell-shadowtls、snell-v5-shadowtls、ss2022-shadowtls、naive | 只读 |
 
 “已支持”不等于每种环境均已通过真实连通性验收；现有记录见 `validation.md`。
+
+## 0.3.0-dev.1 本地增量
+
+- 新增 AnyTLS/Sing-box、Trojan/Xray、Trojan/Sing-box、VLESS Reality/Sing-box：安装、端口修改、单实例卸载、用户增删/启停/到期、凭据重置及连接导出。
+- 新安装实例保存稳定 UUID，并使用独立证书目录；同协议多端口默认用户名不重复，避免统计键冲突。
+- 平台安装表单按节点 `write_capabilities` 显示协议/内核组合。`task_api_version=2` 才允许凭据重置；旧节点拒绝新协议，不通过前端绕过校验。
+- 共享核心先校验私有暂存配置，再替换正式文件；保留无关入站、路由、出站和原有统计用户。添加用户补充已有 Sing-box 统计白名单，不自动安装统计核心。
+- 回滚备份增加 `recovery.json`，记录服务原启停/自启状态及备份文件映射。恢复失败为 unknown，禁止自动重放；平台有未核对 unknown 任务时拒绝新写入。
+- UI 按 ui-ux-pro-max 的表单错误提示与破坏性操作说明规则调整，保留既有中文黑白界面。
+
+验证：59 项 Python 隔离回归（包括全部 9 种已声明组合的双实例增删改及凭据重置）、12 套根脚本回归、Node/Shell 语法、diff 空白检查。未执行真实核心握手、真实 systemd/OpenRC/nft、Docker、Python 3.12 及线上升级。
+
+重要边界：`vless-server.sh --api` 仍是只读接口，写入通过本仓库 Agent 的 Bridge 实现。本轮不发布正式版或预览版，不更换固定 vendor 快照。原脚本的全量配置重建与面板独立证书/用户策略的双向同步仍需接入统一生成器并回归，因此不能将这次 Agent 适配直接作为全协议生产升级。WS/XHTTP/CDN、SS、TUIC、SOCKS、ShadowTLS、NaïveProxy、HY2 跳跃端口和关联资源跨服务事务仍未开放。协议参数编辑目前仅端口，SNI/证书/传输参数编辑及配额写入仍待实现。失败回滚恢复数据库、配置及服务，不卸载下载的二进制、系统包或新证书。
 
 ## 为什么建议先改原脚本
 

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from vaio import __version__
-from vaio.common import PROTOCOLS, config_revision
+from vaio.common import PROTOCOLS, PROTOCOL_CORES, config_revision, write_capabilities
 
 STANDALONE = {"snell", "snell-v5", "snell-v6", "snell-shadowtls", "snell-v5-shadowtls", "ss2022-shadowtls", "naive"}
 
@@ -52,7 +52,7 @@ def service_status(name):
 
 
 def mutable(core, proto, row):
-    if proto not in PROTOCOLS or core != ("singbox" if proto == "hy2" else "xray"):
+    if proto not in PROTOCOLS or core not in PROTOCOL_CORES[proto]:
         return False
     if proto == "vless" and row.get("security_mode", "reality") != "reality":
         return False
@@ -81,7 +81,7 @@ def inventory(cfg, status=service_status):
                           "sni": row.get("sni", ""), "users": [
                               {k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("used", 0), ("quota", 0), ("expire_date", ""))}
                               for u in users_for(row)]})
-    return {"revision": config_revision(db), "instances": instances,
+    return {"revision": config_revision(db), "instances": instances, "write_capabilities": write_capabilities(), "task_api_version": 2,
             "hostname": platform.node(), "os": platform.system() + " " + platform.release(),
             "arch": platform.machine(), "agent_version": __version__, "metrics": metrics(),
             "traffic_status": db.get("meta", {}).get("last_traffic_sync_status", "unavailable"), "at": time.time()}
@@ -126,6 +126,9 @@ def sanitize_snapshot(snapshot):
             if type(api.get(key)) is int and 0 <= api[key] <= 1000:
                 clean["script_api"][key] = api[key]
     clean["instances"] = []
+    clean["task_api_version"] = 2 if snapshot.get("task_api_version") == 2 else 1
+    declared = snapshot.get("write_capabilities", [])
+    clean["write_capabilities"] = [item for item in write_capabilities() if item in declared] if isinstance(declared, list) else []
     instances = snapshot.get("instances", [])
     if not isinstance(instances, list) or len(instances) > 1000:
         raise ValueError("实例数量无效")

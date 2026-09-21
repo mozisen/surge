@@ -149,16 +149,20 @@ class Bridge:
                 # Do not mix legacy and independently managed Snell layouts without migration.
                 if proto.startswith("snell") and any(p == proto and not r.get("snell_id") for _, p, r in rows(db)):
                     raise ValueError("已有旧版 Snell，请先用原脚本迁移多用户后再添加实例")
-                self.runtime.install(proto)
+                self.runtime.install(proto, core) if proto in ("trojan", "anytls") or (proto == "vless" and core == "singbox") else self.runtime.install(proto)
                 name = params.get("name", "default") if proto.startswith("snell") else "default"
+                if not proto.startswith("snell") and any(u.get("name") == name for c, p, r in rows(db) if (c, p) == (core, proto) for u in users_for(r)):
+                    name = "u" + str(task["port"])
+                    if any(u.get("name") == name for c, p, r in rows(db) if (c, p) == (core, proto) for u in users_for(r)):
+                        raise ValueError("自动生成的用户名已存在，请选择其他端口")
                 credential = str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16)
-                after = {"port": task["port"], "panel_managed": True, "users": [
+                after = {"port": task["port"], "instance_id": str(uuid.uuid4()), "panel_managed": True, "users": [
                     {"name": name, "uuid": credential, "enabled": True, "used": 0, "quota": 0, "expire_date": ""}]}
                 if proto == "vless":
-                    private, public = self.runtime.keys()
+                    private, public = self.runtime.keys(core) if core == "singbox" else self.runtime.keys()
                     after.update(uuid=credential, private_key=private, public_key=public, short_id=secrets.token_hex(4),
                                  sni=params["sni"], security_mode="reality")
-                elif proto == "hy2":
+                elif proto in ("hy2", "trojan", "anytls"):
                     after.update(password=credential, sni=params["sni"], hop_enable="0")
                     self.runtime.certificate(after)
                 else:
@@ -199,6 +203,12 @@ class Bridge:
                         user["expire_date"] = params["expire_date"]
                     if "enabled" in params:
                         user["enabled"] = params["enabled"]
+                    if params.get("reset_credentials"):
+                        old_credential = user.get("uuid")
+                        user["uuid"] = str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16)
+                        for field in ("uuid", "password", "psk"):
+                            if old_credential is not None and after.get(field) == old_credential:
+                                after[field] = user["uuid"]
             if after:
                 after["panel_managed"] = True
             target = after or before
@@ -223,6 +233,11 @@ class Bridge:
             atomic_write(backup / "manifest.json", json.dumps(list(files)))
             running = self.runtime.is_running(service)
             enabled = self.runtime.is_enabled(service)
+            atomic_write(backup / "recovery.json", json.dumps({
+                "core": core, "protocol": proto, "port": task["port"], "service": service,
+                "running": running, "enabled": enabled, "revision": config_revision(original),
+                "files": [{"path": path, "backup": str(number) if content is not None else None}
+                          for number, (path, content) in enumerate(files.items())]}))
             self.save_row(db, core, proto, before, after)
             try:
                 self.write(db)
@@ -258,6 +273,11 @@ class Bridge:
             return "vless://" + quote(credential, safe="") + "@" + address + "?" + query + "#" + quote(params["name"])
         if proto == "hy2":
             return "hysteria2://" + quote(credential, safe="") + "@" + address + "?" + urlencode({"sni": row["sni"], "insecure": "1"})
+        if proto in ("trojan", "anytls"):
+            options = {"sni": row.get("sni", ""), "security": "tls"}
+            if row.get("panel_cert"):
+                options["allowInsecure"] = "1"
+            return proto + "://" + quote(credential, safe="") + "@" + address + "?" + urlencode(options) + "#" + quote(params["name"])
         version = {"snell": 4, "snell-v5": 5, "snell-v6": 6}[proto]
         return f'{params["name"]} = snell, {host}, {row["port"]}, psk={credential}, version={version}, reuse=true'
 

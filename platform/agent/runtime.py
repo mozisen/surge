@@ -10,6 +10,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from .inventory import read_db, rows, service_for, users_for
@@ -46,10 +47,20 @@ def active_users(row):
             and (not u.get("quota") or u.get("used", 0) < u["quota"])]
 
 
-def render_inbound(proto, row, previous=None):
+def render_inbound(proto, row, previous=None, core=None):
     inbound = copy.deepcopy(previous) if previous else {}
     users = active_users(row)
-    if proto == "vless":
+    if proto == "vless" and core == "singbox":
+        inbound.update(listen_port=row["port"])
+        if not previous:
+            inbound.update(type="vless", tag="vless-in-" + str(row["port"]), listen="0.0.0.0",
+                           tls={"enabled": True, "server_name": row["sni"], "reality": {
+                               "enabled": True, "handshake": {"server": row["sni"], "server_port": 443},
+                               "private_key": row["private_key"], "short_id": [row["short_id"]]}})
+        inbound["users"] = [{"name": "vless-" + u["name"], "uuid": u["uuid"], "flow": "xtls-rprx-vision"} for u in users]
+        if not users:
+            inbound["users"] = [{"name": "vaio-disabled", "uuid": str(uuid.uuid4()), "flow": "xtls-rprx-vision"}]
+    elif proto == "vless":
         inbound.update(port=row["port"])
         if not previous:
             inbound.update(tag="vless-" + str(row["port"]), listen="0.0.0.0", protocol="vless",
@@ -58,12 +69,19 @@ def render_inbound(proto, row, previous=None):
                                                "privateKey": row["private_key"], "shortIds": [row["short_id"]]}})
         inbound.setdefault("settings", {})["clients"] = [{"id": u["uuid"], "email": u["name"] + "@vless", "flow": "xtls-rprx-vision"} for u in users]
         # Empty clients intentionally deny all users; never restore a disabled default credential.
-    elif proto == "hy2":
+    elif proto == "trojan" and core == "xray":
+        inbound.update(port=row["port"])
+        if not previous:
+            inbound.update(tag="trojan-" + str(row["port"]), listen="0.0.0.0", protocol="trojan",
+                           settings={}, streamSettings={"network": "tcp", "security": "tls",
+                           "tlsSettings": {"certificates": [{"certificateFile": row["panel_cert"], "keyFile": row["panel_key"]}]}})
+        inbound.setdefault("settings", {})["clients"] = [{"password": u["uuid"], "email": u["name"] + "@trojan"} for u in users]
+    elif proto in ("hy2", "trojan", "anytls"):
         inbound.update(listen_port=row["port"])
         if not previous:
-            inbound.update(type="hysteria2", tag="hy2-in-" + str(row["port"]), listen="0.0.0.0",
+            inbound.update(type="hysteria2" if proto == "hy2" else proto, tag=proto + "-in-" + str(row["port"]), listen="0.0.0.0",
                            tls={"enabled": True, "certificate_path": row["panel_cert"], "key_path": row["panel_key"]})
-        inbound["users"] = [{"name": "hy2-" + u["name"], "password": u["uuid"]} for u in users]
+        inbound["users"] = [{"name": proto + "-" + u["name"], "password": u["uuid"]} for u in users]
         if not users:
             # Some core versions require at least one authentication record. A fresh,
             # undisclosed credential keeps all real users disabled without falling back.
@@ -109,28 +127,33 @@ class Runtime:
         runner = 'source "$1"; shift; "$@"'
         self.command(["bash", "-c", runner, "vaio", str(library), operation, *args], timeout=1200)
 
-    def install(self, proto):
+    def install(self, proto, core=None):
+        if proto in ("trojan", "anytls") or (proto == "vless" and core == "singbox"):
+            return self.upstream("install_singbox" if core == "singbox" else "install_xray")
         operation = {"vless": "install_xray", "hy2": "install_singbox", "snell": "install_snell",
                      "snell-v5": "install_snell_v5", "snell-v6": "install_snell_v6"}[proto]
         self.upstream(operation)
 
-    def keys(self):
-        output = self.command(["/usr/local/bin/xray", "x25519"], capture=True)
+    def keys(self, core="xray"):
+        output = self.command(["/usr/local/bin/sing-box", "generate", "reality-keypair"] if core == "singbox" else ["/usr/local/bin/xray", "x25519"], capture=True)
         private = re.search(r"PrivateKey:\s*(\S+)", output)
         public = re.search(r"(?:Password(?: \(PublicKey\))?|PublicKey):\s*(\S+)", output)
         if not private or not public:
-            raise RuntimeError("无法读取 Xray Reality 密钥")
+            raise RuntimeError("无法读取 Reality 密钥")
         return private[1], public[1]
 
     def certificate(self, row):
-        certdir = self.cfg / "certs" / "hy2"
+        identity = row.get("instance_id")
+        if identity is not None and (not isinstance(identity, str) or str(uuid.UUID(identity)) != identity):
+            raise ValueError("证书实例标识无效")
+        certdir = self.cfg / "certs" / ("panel-" + identity if identity else "hy2")
         certdir.mkdir(parents=True, mode=0o700, exist_ok=True)
         cert, key = certdir / "server.crt", certdir / "server.key"
         if not cert.exists() and not key.exists():
             self.command(["openssl", "req", "-x509", "-nodes", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
                           "-keyout", str(key), "-out", str(cert), "-subj", "/CN=" + row["sni"], "-days", "3650"])
         if not cert.exists() or not key.exists():
-            raise ValueError("Hysteria2 证书文件不完整，请先修复")
+            raise ValueError("TLS 证书文件不完整，请先修复")
         key.chmod(0o600)
         row.update(panel_cert=str(cert), panel_key=str(key))
 
@@ -251,24 +274,41 @@ class Runtime:
                 raise ValueError("运行配置与数据库不一致，无法唯一定位端口")
             old = config["inbounds"][matches[0]] if matches else None
             if old:
-                if (proto == "vless" and (old.get("protocol") != "vless" or old.get("streamSettings", {}).get("security") != "reality")) or (proto == "hy2" and old.get("type") != "hysteria2"):
+                if (proto == "vless" and core == "xray" and (old.get("protocol") != "vless" or old.get("streamSettings", {}).get("security") != "reality")) or (proto == "hy2" and old.get("type") != "hysteria2"):
                     raise ValueError("运行协议与数据库不一致")
+                if proto == "vless" and core == "singbox" and (old.get("type") != "vless" or not old.get("tls", {}).get("reality", {}).get("enabled")):
+                    raise ValueError("运行协议与数据库不一致")
+                if proto in ("trojan", "anytls"):
+                    if old.get("type" if core == "singbox" else "protocol") != proto:
+                        raise ValueError("运行协议与数据库不一致")
             if matches:
                 if after:
-                    config["inbounds"][matches[0]] = render_inbound(proto, after, old)
+                    config["inbounds"][matches[0]] = render_inbound(proto, after, old, core)
                 else:
                     config["inbounds"].pop(matches[0])
             else:
-                config.setdefault("inbounds", []).append(render_inbound(proto, after))
+                config.setdefault("inbounds", []).append(render_inbound(proto, after, core=core))
+            if core == "singbox":
+                stats = config.get("experimental", {}).get("v2ray_api", {}).get("stats", {})
+                if stats.get("enabled"):
+                    # Preserve all existing names; add this instance's users only.
+                    stats["users"] = list(dict.fromkeys(stats.get("users", []) + [proto + "-" + u["name"] for u in users_for(after or {})]))
             if not [i for i in config["inbounds"] if i.get("tag") != "api"]:
                 self.service(service, "stop")
                 self.service(service, "disable")
                 atomic_write(path, json.dumps(config, indent=2))
                 return
-            atomic_write(path, json.dumps(config, indent=2))
             binary = "/usr/local/bin/sing-box" if core == "singbox" else "/usr/local/bin/xray"
-            check = [binary, "check", "-c", str(path)] if core == "singbox" else [binary, "run", "-test", "-config", str(path)]
-            self.command(check)
+            # Check a private sibling file before replacing the live configuration.
+            fd, candidate = tempfile.mkstemp(dir=path.parent, prefix=".vaio-check-", suffix=".json")
+            os.close(fd)
+            try:
+                atomic_write(candidate, json.dumps(config, indent=2))
+                check = [binary, "check", "-c", candidate] if core == "singbox" else [binary, "run", "-test", "-config", candidate]
+                self.command(check)
+                atomic_write(path, json.dumps(config, indent=2))
+            finally:
+                Path(candidate).unlink(missing_ok=True)
             self.ensure_unit(service, binary, "run -c " + str(path))
         self.service(service, "enable")
         self.service(service, "restart")

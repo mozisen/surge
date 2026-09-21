@@ -40,6 +40,8 @@ const badge = status => `<span class="badge ${esc(status)}">${status === 'online
 const names = {
     vless: 'VLESS Reality',
     hy2: 'Hysteria2',
+    trojan: 'Trojan',
+    anytls: 'AnyTLS',
     snell: 'Snell v4',
     'snell-v5': 'Snell v5',
     'snell-v6': 'Snell v6'
@@ -325,7 +327,7 @@ function showInstance(index) {
     const p = selected.snapshot.instances[index];
     if (!p) return;
     const writable = p.managed && selected.adopted && selected.status === 'online' && !selected.maintenance;
-    modal(`${names[p.protocol]||p.protocol} · ${p.port}`, `<p>服务：<code>${esc(p.service)}</code> ${badge(p.status)}</p>${!p.managed?'<div class="notice warn">此实例首版只读。支持的写入范围：Xray VLESS Reality、无端口跳跃的 Hysteria2、Snell。</div>':''}<div class="action-row"><button data-action="edit-port" data-index="${index}" ${writable?'':'disabled'}>修改端口</button><button data-action="${p.status==='running'?'stop':'start'}" data-index="${index}" ${writable?'':'disabled'}>${p.status==='running'?'停止服务':'启动服务'}</button><button data-action="restart" data-index="${index}" ${writable?'':'disabled'}>重启服务</button><button class="danger" data-action="delete" data-index="${index}" ${writable?'':'disabled'}>卸载此实例</button></div><label>实例用户</label><div class="table-wrap"><table><thead><tr><th>用户</th><th>已用 / 配额</th><th>状态</th><th>操作</th></tr></thead><tbody>${(p.users||[]).map((u,i)=>`<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.expire_date||'永不过期')}</span></td><td>${bytes(u.used)} / ${u.quota?bytes(u.quota):'不限'}</td><td>${badge(u.enabled?'running':'stopped')}</td><td><button class="small" data-action="edit-user" data-index="${index}" data-user="${i}" ${writable?'':'disabled'}>编辑</button><button class="small" data-action="share" data-index="${index}" data-user="${i}" ${p.managed&&selected.status==='online'?'':'disabled'}>连接</button></td></tr>`).join('')}</tbody></table></div><p class="helper">用户流量来自节点数据库，依赖原脚本统计任务；无统计接口时不代表真实用量为零。</p><div class="modal-foot"><button data-action="add-user" data-index="${index}" ${writable&&!p.protocol.startsWith('snell')?'':'disabled'}>新增用户</button><button data-action="close">关闭</button></div>`, true);
+    modal(`${names[p.protocol]||p.protocol} · ${p.port}`, `<p>服务：<code>${esc(p.service)}</code> ${badge(p.status)}</p>${!p.managed?'<div class="notice warn">此实例尚未适配安全写入，当前仅可查看；安装列表按节点已声明的协议与内核能力展示。</div>':''}<div class="action-row"><button data-action="edit-port" data-index="${index}" ${writable?'':'disabled'}>修改端口</button><button data-action="${p.status==='running'?'stop':'start'}" data-index="${index}" ${writable?'':'disabled'}>${p.status==='running'?'停止服务':'启动服务'}</button><button data-action="restart" data-index="${index}" ${writable?'':'disabled'}>重启服务</button><button class="danger" data-action="delete" data-index="${index}" ${writable?'':'disabled'}>卸载此实例</button></div><label>实例用户</label><div class="table-wrap"><table><thead><tr><th>用户</th><th>已用 / 配额</th><th>状态</th><th>操作</th></tr></thead><tbody>${(p.users||[]).map((u,i)=>`<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.expire_date||'永不过期')}</span></td><td>${bytes(u.used)} / ${u.quota?bytes(u.quota):'不限'}</td><td>${badge(u.enabled?'running':'stopped')}</td><td><button class="small" data-action="edit-user" data-index="${index}" data-user="${i}" ${writable?'':'disabled'}>编辑</button><button class="small" data-action="share" data-index="${index}" data-user="${i}" ${p.managed&&selected.status==='online'?'':'disabled'}>连接</button></td></tr>`).join('')}</tbody></table></div><p class="helper">用户流量来自节点数据库，依赖原脚本统计任务；无统计接口时不代表真实用量为零。</p><div class="modal-foot"><button data-action="add-user" data-index="${index}" ${writable&&!p.protocol.startsWith('snell')?'':'disabled'}>新增用户</button><button data-action="close">关闭</button></div>`, true);
 }
 async function submitTask(action, p, params = {}) {
     const data = await post('/nodes/' + selected.id + '/tasks', {
@@ -355,19 +357,25 @@ function showTask(id) {
 }
 
 function install() {
-    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议</label><select id="protocol" name="protocol">${Object.entries(names).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required></div><div><label for="sni">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required></div></div><p class="helper">VLESS 的 SNI 需在节点网络中支持 TLS 1.3；安装成功不代表目标站握手可用。Hysteria2 使用自签证书，导出链接包含 insecure=1。Snell 不使用 SNI。</p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
+    const legacy = ['xray:vless','singbox:hy2','xray:snell','xray:snell-v5','xray:snell-v6'];
+    const combinations = selected.snapshot.task_api_version === 2
+        ? (selected.snapshot.write_capabilities || []).map(c=>`${c.core}:${c.protocol}`)
+        : legacy;
+    if (!combinations.length) return modal('暂不可安装', '<p>节点未声明可用写入能力，请先升级 Agent。</p>');
+    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required></div><div><label for="sni">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required></div></div><p class="helper">仅展示节点已声明支持的组合。VLESS 的目标域名需支持 TLS 1.3；Hysteria2、Trojan、AnyTLS 新实例使用自签证书，客户端需跳过证书验证。Snell 不使用 SNI。</p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
     $('#protocol').addEventListener('change', e => {
-        $('#sni').disabled = e.target.value.startsWith('snell');
+        $('#sni').disabled = e.target.value.split(':')[1].startsWith('snell');
     });
+    $('#sni').disabled = $('#protocol').value.split(':')[1].startsWith('snell');
     $('#install-form').addEventListener('submit', async e => {
         e.preventDefault();
         const b = $('[type=submit]', e.target);
         b.disabled = true;
-        const p = $('#protocol').value;
+        const [core, p] = $('#protocol').value.split(':');
         try {
             await submitTask('install', {
                 protocol: p,
-                core: p === 'hy2' ? 'singbox' : 'xray',
+                core,
                 port: Number($('#port').value)
             }, p.startsWith('snell') ? {
                 name: 'u' + $('#port').value
@@ -385,6 +393,9 @@ function editUser(index, userIndex) {
     const p = selected.snapshot.instances[index],
         u = userIndex == null ? null : p.users[userIndex];
     modal(u ? '编辑用户' : '新增用户', `<form id="user-form"><label for="username">用户名</label><input id="username" value="${esc(u?.name||'')}" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32" required ${u?'readonly':''}><label for="expiry">到期日期</label><input id="expiry" type="date" value="${esc(u?.expire_date||'')}"><p class="helper">留空表示永不过期。按节点本地日期判断，每分钟检查。</p>${u?`<label class="field-check"><input id="enabled" type="checkbox" ${u.enabled?'checked':''}>启用此用户</label>`:''}<p class="helper">凭据自动生成。配额设置首版仅展示，沿用原脚本。</p><div class="error" role="alert"></div><div class="modal-foot">${u&&u.name!=='default'&&!p.protocol.startsWith('snell')?`<button type="button" class="danger" data-action="delete-user" data-index="${index}" data-user="${userIndex}">删除用户</button>`:''}<button type="submit" class="primary">${u?'保存修改':'创建用户'}</button></div></form>`);
+    if (u && selected.snapshot.task_api_version === 2) {
+        $('#user-form .error').insertAdjacentHTML('beforebegin', '<label class="field-check"><input id="reset-credentials" type="checkbox">重置此用户凭据（旧连接将失效）</label><p class="helper">不清空流量、配额或 TG 绑定；保存后请重新导出连接。</p>');
+    }
     $('#user-form').addEventListener('submit', async e => {
         e.preventDefault();
         const b = $('[type=submit]', e.target);
@@ -395,6 +406,7 @@ function editUser(index, userIndex) {
                 expire_date: $('#expiry').value
             };
             if (u) params.enabled = $('#enabled').checked;
+            if ($('#reset-credentials')?.checked) params.reset_credentials = true;
             await submitTask(u ? 'user_update' : 'user_add', p, params);
         } catch (err) {
             formError(err);
