@@ -22,6 +22,7 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
       - run: node --check web/app.js
+      - run: node tests/install-form.cjs
       - run: sh -n scripts/install-agent.sh && sh -n scripts/install-panel.sh && sh -n scripts/vaio-panel && sh -n scripts/vaio-agent && bash -n vendor/vless-server.sh
       - run: git diff --check
   image:

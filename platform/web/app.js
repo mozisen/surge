@@ -356,17 +356,63 @@ function showTask(id) {
     modal(actions[t.action] + ' · 执行记录', `<p>${badge(t.status)} <span class="mono">${esc(t.request.protocol)}:${t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection?`<label for="connection">连接信息（10 分钟后过期）</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button>`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
 }
 
+function installPortCandidate(instances, current) {
+    const used = new Set(instances.map(i => Number(i.port)));
+    used.add(Number(current));
+    const count = 65535 - 20000 + 1;
+    const random = crypto.getRandomValues(new Uint32Array(1))[0] % count;
+    for (let i = 0; i < count; i++) {
+        const port = 20000 + (random + i) % count;
+        if (!used.has(port)) return port;
+    }
+    throw new Error('没有可推荐的高位端口，请检查节点端口配置。');
+}
+
+function installNameCandidate(instances, protocol, port) {
+    const used = new Set(instances.filter(i => i.protocol === protocol).flatMap(i => (i.users || []).map(u => u.name)));
+    const base = 'u' + port;
+    let name = base;
+    for (let n = 1; used.has(name); n++) name = base + '_' + n;
+    return name;
+}
+
 function install() {
     const legacy = ['xray:vless','singbox:hy2','xray:snell','xray:snell-v5','xray:snell-v6'];
     const combinations = selected.snapshot.task_api_version === 2
         ? (selected.snapshot.write_capabilities || []).map(c=>`${c.core}:${c.protocol}`)
         : legacy;
     if (!combinations.length) return modal('暂不可安装', '<p>节点未声明可用写入能力，请先升级 Agent。</p>');
-    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required></div><div><label for="sni">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required></div></div><p class="helper">仅展示节点已声明支持的组合。VLESS 的目标域名需支持 TLS 1.3；Hysteria2、Trojan、AnyTLS 新实例使用自签证书，客户端需跳过证书验证。Snell 不使用 SNI。</p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
-    $('#protocol').addEventListener('change', e => {
-        $('#sni').disabled = e.target.value.split(':')[1].startsWith('snell');
-    });
-    $('#sni').disabled = $('#protocol').value.split(':')[1].startsWith('snell');
+    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required><button type="button" id="generate-port">自动生成端口</button><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div><label for="sni">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="reset-sni">恢复默认域名</button></div></div><div id="snell-name-field" hidden><label for="install-name">Snell 用户名</label><input id="install-name" value="u24443" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32"><button type="button" id="generate-name">自动生成用户名</button></div><p id="generated-credentials" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><p class="helper">仅展示节点已声明支持的组合。VLESS 的目标域名需支持 TLS 1.3；Hysteria2、Trojan、AnyTLS 新实例使用自签证书，客户端需跳过证书验证。Snell 不使用 SNI。</p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
+    const updateFields = () => {
+        const p = $('#protocol').value.split(':')[1], snell = p.startsWith('snell');
+        $('#sni').disabled = snell;
+        $('#reset-sni').disabled = snell;
+        $('#snell-name-field').hidden = !snell;
+        $('#install-name').disabled = !snell;
+        $('#install-name').required = snell;
+        $('#generated-credentials').textContent = p === 'vless'
+            ? 'UUID、Reality 密钥对及 Short ID 在确认安装后由服务端自动生成，无需填写。'
+            : snell ? 'PSK 在确认安装后由服务端自动生成，无需填写。'
+            : '用户密码及自签证书在确认安装后由服务端自动生成，无需填写。';
+        $('#generation-feedback').textContent = '';
+    };
+    $('#protocol').addEventListener('change', updateFields);
+    updateFields();
+    $('#generate-port').onclick = () => {
+        try {
+            $('#port').value = installPortCandidate(selected.snapshot.instances || [], $('#port').value);
+            $('#generation-feedback').textContent = '已生成推荐端口；尚未安装，请核对后提交。';
+        } catch (err) { formError(err); }
+    };
+    $('#generate-name').onclick = () => {
+        if (!$('#port').reportValidity()) return;
+        $('#install-name').value = installNameCandidate(selected.snapshot.instances || [], $('#protocol').value.split(':')[1], Number($('#port').value));
+        $('#generation-feedback').textContent = '已生成当前协议未使用的用户名，可继续手动修改。';
+    };
+    $('#reset-sni').onclick = () => {
+        $('#sni').value = 'www.cloudflare.com';
+        $('#generation-feedback').textContent = '已恢复默认域名；仍需确认节点能够访问该域名。';
+    };
     $('#install-form').addEventListener('submit', async e => {
         e.preventDefault();
         const b = $('[type=submit]', e.target);
@@ -378,7 +424,7 @@ function install() {
                 core,
                 port: Number($('#port').value)
             }, p.startsWith('snell') ? {
-                name: 'u' + $('#port').value
+                name: $('#install-name').value
             } : {
                 sni: $('#sni').value
             });
