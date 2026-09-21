@@ -30801,8 +30801,122 @@ _snell_edit_user() {
     return 1
 }
 
+# 版本化只读管理接口。写操作在完整事务适配器通过验证前不开放。
+_api_reply() {
+    local status="$1" code="$2" data="${3:-null}"
+    jq -nc --arg id "${api_id:-}" --arg status "$status" --arg code "$code" \
+        --arg version "$VERSION" --argjson data "$data" \
+        '{api_version:1,request_id:$id,script_version:$version,status:$status,code:$code,data:$data}'
+}
+
+_api_inventory() {
+    local snapshot revision
+    if [[ -f "$DB_FILE" ]]; then
+        snapshot=$(cat "$DB_FILE") || return 1
+    else
+        snapshot='{"xray":{},"singbox":{}}'
+    fi
+    # Hash the same immutable in-memory snapshot used for the response. Includes
+    # counters conservatively; this is not yet a config-only revision token.
+    snapshot=$(jq -Sce 'select(type == "object") |
+      if all([(.xray // {}), (.singbox // {})][]; type == "object") then .
+      else error("invalid core records") end' <<< "$snapshot") || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        revision=$(printf '%s' "$snapshot" | sha256sum | awk '{print $1}')
+    else
+        revision=$(printf '%s' "$snapshot" | shasum -a 256 | awk '{print $1}')
+    fi
+    jq -ce --arg revision "$revision" --arg standalone "$STANDALONE_PROTOCOLS" '
+      def rows: if type == "array" then .[] else . end;
+      {revision:$revision,revision_scope:"database_snapshot",instances:[
+        . as $db | ["xray","singbox"][] as $storage |
+        ($db[$storage] // {} | to_entries[]) as $entry |
+        $entry.value | rows | . as $r |
+        (if ($standalone | split(" ") | index($entry.key)) != null then "standalone" else $storage end) as $core |
+        {instance_id:(if ((.snell_id // "") | test("^[0-9a-f]{24}$")) then .snell_id else null end),
+         identity_kind:(if ((.snell_id // "") | test("^[0-9a-f]{24}$")) then "snell_id" else "legacy_locator" end),
+         target:{core:$core,protocol:$entry.key,port:.port},
+         storage_core:$storage,managed_operations:[],
+         unavailable_reason:"transaction_adapter_not_implemented",
+         service:(if $core == "xray" then "vless-reality" elif $core == "singbox" then "vless-singbox"
+            elif ((.snell_id // "") | test("^[0-9a-f]{24}$")) then "vless-snellu-" + .snell_id
+            else null end),
+         resources:{ownership_verified:false},
+         users:[(.users // [])[] | {name:.name,enabled:.enabled,quota:.quota,used:.used,expire_date:.expire_date}]}
+      ]}' <<< "$snapshot"
+}
+
+_api_dispatch() {
+    local request action api_id="" inventory target matches count
+    command -v jq >/dev/null 2>&1 || {
+        printf '%s\n' '{"api_version":1,"status":"failed","code":"missing_jq","data":null}'
+        return 1
+    }
+    # One bounded JSON document, not shell text. Never interpolate it into commands.
+    request=$(head -c 1048577) || return 1
+    [[ ${#request} -le 1048576 ]] || { _api_reply failed request_too_large; return 1; }
+    request=$(jq -cse 'if length == 1 and (.[0]|type) == "object" then .[0] else error("one request required") end' <<< "$request" 2>/dev/null) || {
+        _api_reply failed invalid_json; return 1;
+    }
+    jq -e '
+      .api_version == 1 and (.request_id|type == "string") and
+      (.request_id|test("^[A-Za-z0-9_-]{1,128}$")) and (.action|type == "string") and
+      ((keys - ["api_version","request_id","action","expected_revision","target","params"])|length == 0) and
+      ((.target // {})|type == "object") and ((.params // {})|type == "object") and
+      ((.expected_revision // "")|type == "string")
+    ' <<< "$request" >/dev/null 2>&1 || { _api_reply failed invalid_request; return 1; }
+    api_id=$(jq -r .request_id <<< "$request")
+    action=$(jq -r .action <<< "$request")
+    case "$action" in
+        capabilities)
+            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" '
+              {stage:"read_only_foundation",actions:["capabilities","inventory","plan","result"],write_actions:[],
+               protocols:([($x|split(" ")[])|{core:"xray",protocol:.,write_supported:false}] +
+                 [($s|split(" ")[])|{core:"singbox",protocol:.,write_supported:false}] +
+                 [($p|split(" ")[])|{core:"standalone",protocol:.,write_supported:false}]),
+               schemas:{plan:{params:{action:"mutation action name"},target:"instance_id or core/protocol/port",expected_revision:"inventory revision"}},
+               secrets_in_inventory:false,implicit_migration:false}')"
+            ;;
+        inventory)
+            inventory=$(_api_inventory 2>/dev/null) || { _api_reply failed invalid_database; return 1; }
+            _api_reply succeeded ok "$inventory"
+            ;;
+        result)
+            # No mutations are executable in this API revision, so no durable
+            # mutation result exists. Never replay an unknown request.
+            _api_reply unknown result_not_found '{"replay_allowed":false}'
+            ;;
+        plan)
+            inventory=$(_api_inventory 2>/dev/null) || { _api_reply failed invalid_database; return 1; }
+            [[ "$(jq -r '.expected_revision // ""' <<< "$request")" == "$(jq -r .revision <<< "$inventory")" ]] || {
+                _api_reply failed revision_conflict; return 1;
+            }
+            jq -e '(.params|keys) == ["action"] and
+              (.params.action as $a | ["install","update","delete","start","stop","restart","user_add","user_update","user_delete","share","migrate"] | index($a) != null) and
+              ((.target|keys) == ["instance_id"] or (.target|keys) == ["core","port","protocol"]) and
+              (if .target.instance_id then (.target.instance_id|type == "string") else
+                (.target.core|type == "string") and (.target.protocol|type == "string") and
+                (.target.port|type == "number") and (.target.port >= 1 and .target.port <= 65535 and .target.port == (.target.port|floor)) end)
+            ' <<< "$request" >/dev/null 2>&1 || { _api_reply failed invalid_plan; return 1; }
+            target=$(jq -c .target <<< "$request")
+            matches=$(jq -c --argjson t "$target" '[.instances[] | select(
+              if $t.instance_id then .instance_id == $t.instance_id else .target == $t end)]' <<< "$inventory")
+            count=$(jq length <<< "$matches")
+            [[ "$count" != 0 ]] || { _api_reply failed target_not_found; return 1; }
+            [[ "$count" == 1 ]] || { _api_reply failed ambiguous_target; return 1; }
+            _api_reply failed unsupported_operation '{"executable":false,"changes":[],"reason":"transaction_adapter_not_implemented"}'
+            return 1
+            ;;
+        *) _api_reply failed unsupported_operation; return 1 ;;
+    esac
+}
+
 # 命令行参数处理
 case "${1:-}" in
+    --api)
+        _api_dispatch
+        exit $?
+        ;;
     --snell-prepare)
         check_root
         _snell_prepare_user "${2:-}" "${3:-}"
@@ -30870,6 +30984,7 @@ case "${1:-}" in
         echo "用法: $0 [选项]"
         echo ""
         echo "选项:"
+        echo "  --api               标准输入 JSON 管理接口（当前只读基础层）"
         echo "  --sync-traffic       同步流量数据到数据库 (用于定时任务)"
         echo "  --show-traffic       显示实时流量统计"
         echo "  --tg-bot-poll        处理 Telegram 用户机器人消息 (用于定时任务)"
