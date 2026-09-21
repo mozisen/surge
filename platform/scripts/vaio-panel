@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+case "${1:-help}" in
+  status) systemctl status vaio-panel --no-pager ;;
+  restart) systemctl restart vaio-panel ;;
+  logs) journalctl -u vaio-panel -n 80 --no-pager ;;
+  update)
+    shift
+    exec python3 /opt/vaio-panel/scripts/update-panel.py "$@" ;;
+  account)
+    [ "$(id -u)" = 0 ] || { echo '重置登录信息需要 root'; exit 1; }
+    set -a
+    . /etc/vaio-panel/panel.env
+    set +a
+    cd /opt/vaio-panel
+    runuser -u vaio-panel --preserve-environment -- .venv/bin/python -m vaio init
+    ;;
+  *) echo '用法：vaio-panel status（状态）| restart（重启）| logs（日志）| account（重置账号密码）| update（备份并升级）' ;;
+esac
