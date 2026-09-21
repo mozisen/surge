@@ -376,17 +376,47 @@ function installNameCandidate(instances, protocol, port) {
     return name;
 }
 
+// Mirrors COMMON_SNI_LIST in the pinned script; install-form.cjs checks parity.
+function installSniCandidate(current) {
+    const pool = ['ads', 'advertising', 'apps', 'asia', 'books', 'community', 'crl',
+        'developer', 'files', 'guide', 'iphone', 'link', 'maps', 'ml', 'music',
+        'one', 'store', 'support', 'time', 'tv', 'videos'].map(name => name + '.apple.com');
+    const candidates = pool.filter(name => name !== current);
+    return candidates[crypto.getRandomValues(new Uint32Array(1))[0] % candidates.length];
+}
+
+function installProtocolGuidance(protocol) {
+    const tls = '自签证书及密码由节点生成；客户端需跳过证书验证。平台暂不提供 ACME / 已有证书选择。';
+    return {
+        vless: 'Reality 模式：目标 SNI 需支持 TLS 1.3，且节点可以访问。自动生成仅选择脚本候选域名，不代表已验证连通性。不使用自签证书。',
+        hy2: 'Hysteria2 使用 UDP，请放行 UDP 监听端口。当前安装不启用端口跳跃。' + tls,
+        trojan: 'Trojan 使用 TCP + TLS；当前安装为原生 TCP，不是 WebSocket。' + tls,
+        anytls: 'AnyTLS 使用 TCP + TLS。' + tls,
+        snell: 'Snell v4 使用独立核心和 PSK，无需 SNI。当前安装不附加 ShadowTLS。',
+        'snell-v5': 'Snell v5 使用独立核心和 PSK，无需 SNI。当前安装不附加 ShadowTLS。',
+        'snell-v6': 'Snell v6 使用独立核心和 PSK，无需 SNI。模式、DNS 和 TFO 沿用节点默认设置，平台暂不提供这些参数编辑。'
+    }[protocol];
+}
+
 function install() {
     const legacy = ['xray:vless','singbox:hy2','xray:snell','xray:snell-v5','xray:snell-v6'];
     const combinations = selected.snapshot.task_api_version === 2
         ? (selected.snapshot.write_capabilities || []).map(c=>`${c.core}:${c.protocol}`)
         : legacy;
+    // Only render combinations with an implemented installation form.
+    const supported = ['xray:vless', 'singbox:vless', 'singbox:hy2', 'xray:trojan',
+        'singbox:trojan', 'singbox:anytls', 'xray:snell', 'xray:snell-v5', 'xray:snell-v6'];
+    combinations.splice(0, combinations.length, ...combinations.filter(k => supported.includes(k)));
     if (!combinations.length) return modal('暂不可安装', '<p>节点未声明可用写入能力，请先升级 Agent。</p>');
-    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required><button type="button" id="generate-port">自动生成端口</button><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div><label for="sni">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="reset-sni">恢复默认域名</button></div></div><div id="snell-name-field" hidden><label for="install-name">Snell 用户名</label><input id="install-name" value="u24443" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32"><button type="button" id="generate-name">自动生成用户名</button></div><p id="generated-credentials" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><p class="helper">仅展示节点已声明支持的组合。VLESS 的目标域名需支持 TLS 1.3；Hysteria2、Trojan、AnyTLS 新实例使用自签证书，客户端需跳过证书验证。Snell 不使用 SNI。</p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
+    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required><button type="button" id="generate-port" class="install-generate">自动生成端口</button><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div id="sni-field"><label for="sni" id="sni-label">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="generate-sni" class="install-generate">自动生成 SNI</button></div></div><div id="snell-name-field" hidden><label for="install-name">Snell 用户名</label><input id="install-name" value="u24443" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32"><button type="button" id="generate-name" class="install-generate">自动生成用户名</button></div><p id="generated-credentials" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><p id="protocol-guidance" class="helper"></p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
     const updateFields = () => {
         const p = $('#protocol').value.split(':')[1], snell = p.startsWith('snell');
         $('#sni').disabled = snell;
-        $('#reset-sni').disabled = snell;
+        $('#sni').required = !snell;
+        $('#sni-field').hidden = snell;
+        $('#generate-sni').disabled = snell;
+        $('#sni-label').textContent = p === 'vless' ? 'Reality 目标 SNI（必填）' : '证书 SNI 域名（必填）';
+        $('#protocol-guidance').textContent = installProtocolGuidance(p);
         $('#snell-name-field').hidden = !snell;
         $('#install-name').disabled = !snell;
         $('#install-name').required = snell;
@@ -409,9 +439,9 @@ function install() {
         $('#install-name').value = installNameCandidate(selected.snapshot.instances || [], $('#protocol').value.split(':')[1], Number($('#port').value));
         $('#generation-feedback').textContent = '已生成当前协议未使用的用户名，可继续手动修改。';
     };
-    $('#reset-sni').onclick = () => {
-        $('#sni').value = 'www.cloudflare.com';
-        $('#generation-feedback').textContent = '已恢复默认域名；仍需确认节点能够访问该域名。';
+    $('#generate-sni').onclick = () => {
+        $('#sni').value = installSniCandidate($('#sni').value);
+        $('#generation-feedback').textContent = '已从脚本候选列表生成 SNI，可手动修改；仍需确认节点可访问该域名。';
     };
     $('#install-form').addEventListener('submit', async e => {
         e.preventDefault();

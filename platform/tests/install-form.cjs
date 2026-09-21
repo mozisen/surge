@@ -5,8 +5,8 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 const chunk = source.slice(source.indexOf('function installPortCandidate('), source.indexOf('function editUser('));
 const elements = {};
-for (const id of ['protocol', 'port', 'sni', 'reset-sni', 'snell-name-field', 'install-name',
-    'generated-credentials', 'generation-feedback', 'generate-port', 'generate-name', 'install-form', 'submit']) {
+for (const id of ['protocol', 'port', 'sni', 'generate-sni', 'snell-name-field', 'install-name',
+    'sni-field', 'sni-label', 'protocol-guidance', 'generated-credentials', 'generation-feedback', 'generate-port', 'generate-name', 'install-form', 'submit']) {
     elements[id] = {value: '', events: {}, addEventListener(event, handler) { this.events[event] = handler; }, reportValidity() { return true; }};
 }
 elements.protocol.value = 'xray:vless';
@@ -31,7 +31,7 @@ const context = vm.createContext({
 vm.runInContext(chunk, context);
 async function main() {
     context.install();
-    for (const id of ['generate-port', 'generate-name', 'reset-sni']) {
+    for (const id of ['generate-port', 'generate-name', 'generate-sni']) {
         assert(markup.includes(`type="button" id="${id}"`));
     }
     assert.equal(elements.port.value, '24443'); // opening does not overwrite defaults
@@ -45,7 +45,7 @@ async function main() {
     elements.protocol.events.change();
     assert.equal(elements['snell-name-field'].hidden, false);
     assert.equal(elements.sni.disabled, true);
-    assert.equal(elements['reset-sni'].disabled, true);
+    assert.equal(elements['generate-sni'].disabled, true);
     assert.match(elements['generated-credentials'].textContent, /PSK/);
     elements['generate-name'].onclick();
     assert.equal(elements['install-name'].value, 'u20001_2');
@@ -55,11 +55,31 @@ async function main() {
     elements.protocol.value = 'xray:vless';
     elements.protocol.events.change();
     elements.sni.value = 'custom.example.com';
-    elements['reset-sni'].onclick();
-    assert.equal(elements.sni.value, 'www.cloudflare.com');
+    elements['generate-sni'].onclick();
+    assert.equal(elements.sni.value, 'ads.apple.com');
     await elements['install-form'].events.submit({preventDefault() {}, target: elements['install-form']});
     assert.equal(calls[1][2].name, undefined);
-    assert.equal(calls[1][2].sni, 'www.cloudflare.com');
+    assert.equal(calls[1][2].sni, 'ads.apple.com');
+    for (const combo of ['xray:vless', 'singbox:vless', 'singbox:hy2', 'xray:trojan', 'singbox:trojan', 'singbox:anytls', 'xray:snell', 'xray:snell-v5', 'xray:snell-v6']) {
+        elements.protocol.value = combo;
+        elements.protocol.events.change();
+        const snell = combo.includes('snell');
+        assert.equal(elements['sni-field'].hidden, snell);
+        assert.equal(elements.sni.required, !snell);
+        assert.equal(elements['install-name'].required, snell);
+        assert(elements['protocol-guidance'].textContent.length > 10);
+        await elements['install-form'].events.submit({preventDefault() {}, target: elements['install-form']});
+        assert.deepEqual(Object.keys(calls.at(-1)[2]), [snell ? 'name' : 'sni']);
+    }
+    const script = fs.readFileSync(path.join(__dirname, '../vendor/vless-server.sh'), 'utf8');
+    const pool = [...script.match(/readonly COMMON_SNI_LIST=\(([\s\S]*?)\n\)/)[1].matchAll(/"([^"]+)"/g)].map(m => m[1]);
+    const generated = [];
+    for (let i = 0; i < pool.length; i++) {
+        context.crypto.getRandomValues = array => {array[0] = i; return array;};
+        generated.push(context.installSniCandidate('custom.example'));
+    }
+    assert.deepEqual(generated, pool);
+    assert.notEqual(context.installSniCandidate('ads.apple.com'), 'ads.apple.com');
     const allUsed = Array.from({length: 45536}, (_, i) => ({port: i + 20000}));
     assert.throws(() => context.installPortCandidate(allUsed, 24443), /没有可推荐/);
     assert.equal(context.installNameCandidate([{protocol: 'snell', users: [{name: 'u12345'}]}], 'snell-v6', 12345), 'u12345');

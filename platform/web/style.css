@@ -875,6 +875,24 @@ dialog::backdrop {
     gap: 14px
 }
 
+#install-form .install-generate {
+    margin-top: 12px;
+    margin-bottom: 8px;
+    min-height: 44px;
+    border-color: var(--muted);
+    background: var(--accent-soft);
+    font-weight: 600;
+}
+
+#install-form .install-generate:hover {
+    background: var(--ink);
+    color: var(--surface);
+}
+
+#install-form [hidden] {
+    display: none;
+}
+
 .helper {
     font-size: 11px;
     color: var(--muted);
