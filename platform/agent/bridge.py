@@ -161,8 +161,11 @@ class Bridge:
                 after = {"port": task["port"], "instance_id": str(uuid.uuid4()), "panel_managed": True, "users": [
                     {"name": name, "uuid": credential, "enabled": True, "used": 0, "quota": 0, "expire_date": ""}]}
                 if proto == "vless":
-                    private, public = self.runtime.keys(core) if core == "singbox" else self.runtime.keys()
-                    after.update(uuid=credential, private_key=private, public_key=public, short_id=secrets.token_hex(4),
+                    if "private_key" in params:
+                        private, public = self.runtime.supplied_keys(params["private_key"])
+                    else:
+                        private, public = self.runtime.keys(core) if core == "singbox" else self.runtime.keys()
+                    after.update(uuid=credential, private_key=private, public_key=public, short_id=params.get("short_id", secrets.token_hex(4)).lower(),
                                  sni=params["sni"], security_mode="reality")
                 elif proto in ("hy2", "trojan", "anytls"):
                     after.update(password=credential, sni=params["sni"], hop_enable="0")

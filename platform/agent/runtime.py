@@ -1,4 +1,5 @@
 """Allowlisted OS operations. Existing routing and unrelated inbounds are preserved."""
+import base64
 import datetime
 import hashlib
 import json
@@ -131,6 +132,18 @@ class Runtime:
             shortcut.symlink_to(script)
         if not (self.cfg / "role").exists():
             atomic_write(self.cfg / "role", "server\n")
+
+    def supplied_keys(self, private):
+        """Derive X25519 public key without putting the private key in argv/logs."""
+        from vaio.install_options import validate_install_options
+        validate_install_options("vless", {"private_key": private})
+        der = bytes.fromhex("302e020100300506032b656e04220420") + base64.urlsafe_b64decode(private + "=")
+        result = subprocess.run(["openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
+                                input=der, capture_output=True, timeout=20)
+        prefix = bytes.fromhex("302a300506032b656e032100")
+        if result.returncode or len(result.stdout) != len(prefix) + 32 or not result.stdout.startswith(prefix):
+            raise ValueError("无法从 Reality 私钥生成公钥，未安装协议")
+        return private, base64.urlsafe_b64encode(result.stdout[-32:]).decode().rstrip("=")
 
     def keys(self, core="xray"):
         output = self.command(["/usr/local/bin/sing-box", "generate", "reality-keypair"] if core == "singbox" else ["/usr/local/bin/xray", "x25519"], capture=True)

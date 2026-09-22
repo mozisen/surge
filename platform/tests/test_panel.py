@@ -145,6 +145,23 @@ class PanelTest(unittest.TestCase):
         delivery = self.client.post("/api/agent/"+node+"/poll", json={"snapshot": snap, "ready": True}, headers=token)
         self.assertEqual(delivery.json["task"]["params"]["credential"], secret)
 
+    def test_reality_options_require_v2_and_private_key_is_not_listed(self):
+        node, token, snap = self.registered()
+        private = "A" * 43
+        task = dict(action="install", protocol="vless", core="xray", port=30001,
+                    params={"sni": "example.com", "private_key": private, "short_id": "abcd"}, revision="a"*64)
+        send = lambda: self.client.post("/api/nodes/"+node+"/tasks", json=task,
+                                        headers={**self.headers, "Idempotency-Key": "reality-install"})
+        snap["install_options_version"] = 1
+        self.client.post("/api/agent/"+node+"/poll", json={"snapshot": snap, "ready": True}, headers=token)
+        self.assertEqual(send().status_code, 409)
+        snap["install_options_version"] = 2
+        self.client.post("/api/agent/"+node+"/poll", json={"snapshot": snap, "ready": True}, headers=token)
+        self.assertEqual(send().status_code, 201)
+        self.assertNotIn(private, self.client.get("/api/tasks").text)
+        delivery = self.client.post("/api/agent/"+node+"/poll", json={"snapshot": snap, "ready": True}, headers=token)
+        self.assertEqual(delivery.json["task"]["params"]["private_key"], private)
+
     def test_timeout_is_unknown_never_requeued(self):
         node,token,snap=self.registered()
         self.task(node)

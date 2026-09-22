@@ -1,4 +1,6 @@
 import tempfile
+import base64
+import subprocess
 import unittest
 import uuid
 from pathlib import Path
@@ -10,6 +12,42 @@ from vaio.common import validate_task
 
 
 class InstallationOptionsTest(unittest.TestCase):
+    def test_reality_private_derivation_and_validation(self):
+        private = base64.urlsafe_b64encode(bytes.fromhex(
+            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")).decode().rstrip("=")
+        public = base64.urlsafe_b64encode(bytes.fromhex(
+            "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")).decode().rstrip("=")
+        validate_task(self.request("vless", sni="example.com", private_key=private, short_id="AABB"))
+        for fields in ({"short_id": "abc"}, {"short_id": "zz"}, {"private_key": "invalid"},
+                       {"short_id": 12}, {"private_key": ";" * 43}):
+            with self.assertRaises(ValueError):
+                validate_task(self.request("vless", sni="example.com", **fields))
+        with self.assertRaises(ValueError):
+            validate_task(self.request("anytls", sni="example.com", private_key=private))
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp)/"cfg", Path(tmp)/"state")
+            raw_public = bytes.fromhex("302a300506032b656e032100") + base64.urlsafe_b64decode(public + "=")
+            with patch("agent.runtime.subprocess.run", return_value=subprocess.CompletedProcess([], 0, raw_public, b"")) as run:
+                self.assertEqual(runtime.supplied_keys(private), (private, public))
+                self.assertNotIn(private, str(run.call_args.args))
+                self.assertEqual(run.call_args.kwargs["input"][-32:], base64.urlsafe_b64decode(private + "="))
+            with patch("agent.runtime.subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"", b"failure")):
+                with self.assertRaises(ValueError):
+                    runtime.supplied_keys(private)
+        self.assertEqual(sanitize_snapshot({"install_options_version": 2})["install_options_version"], 2)
+        self.assertEqual(sanitize_snapshot({"install_options_version": True})["install_options_version"], 0)
+
+    def test_reality_private_derivation_live_openssl(self):
+        algorithms = subprocess.run(["openssl", "list", "-public-key-algorithms"], capture_output=True, text=True)
+        if algorithms.returncode or "X25519" not in algorithms.stdout:
+            self.skipTest("本机 OpenSSL 不支持 X25519，真实推导需在支持它的节点验证")
+        with tempfile.TemporaryDirectory() as tmp:
+            private = base64.urlsafe_b64encode(bytes.fromhex(
+                "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")).decode().rstrip("=")
+            public = Runtime(Path(tmp)/"cfg", Path(tmp)/"state").supplied_keys(private)[1]
+            self.assertEqual(base64.urlsafe_b64decode(public+"=").hex(),
+                             "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+
     def request(self, proto="anytls", **params):
         return dict(action="install", protocol=proto,
                     core="xray" if proto.startswith("snell") or proto == "vless" else "singbox",

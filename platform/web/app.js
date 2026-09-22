@@ -408,19 +408,22 @@ function install() {
         'singbox:trojan', 'singbox:anytls', 'xray:snell', 'xray:snell-v5', 'xray:snell-v6'];
     combinations.splice(0, combinations.length, ...combinations.filter(k => supported.includes(k)));
     if (!combinations.length) return modal('暂不可安装', '<p>节点未声明可用写入能力，请先升级 Agent。</p>');
-    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required><button type="button" id="generate-port" class="install-generate">自动生成端口</button><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div id="sni-field"><label for="sni" id="sni-label">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="generate-sni" class="install-generate">自动生成 SNI</button></div></div><div id="snell-name-field" hidden><label for="install-name">用户名</label><input id="install-name" value="u24443" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32"><button type="button" id="generate-name" class="install-generate">自动生成用户名</button></div><fieldset class="install-options"><legend>凭据与证书</legend><p id="install-options-status" class="helper"></p><label for="credential">UUID / 密码 / PSK（留空自动生成）</label><input id="credential" type="password" autocomplete="new-password" maxlength="128"><button type="button" id="generate-credential" class="install-generate">自动生成凭据</button><label for="certificate-mode">证书方式</label><select id="certificate-mode"><option value="self">生成自签证书</option><option value="acme">自有域名 · 申请 Let’s Encrypt 证书（HTTP）</option><option value="existing">使用节点已有证书</option></select><label for="acme-email">证书联系邮箱</label><input id="acme-email" type="email" maxlength="254"><p id="certificate-help" class="helper"></p></fieldset><fieldset class="install-options"><legend>Snell v6 设置</legend><label for="snell-mode">混淆模式</label><select id="snell-mode"><option value="default">default</option><option value="unshaped">unshaped</option><option value="unsafe-raw">unsafe-raw</option></select><label for="dns">DNS 服务器（逗号分隔；留空使用系统 DNS）</label><input id="dns" maxlength="512" placeholder="1.1.1.1,8.8.8.8"><label for="dns-preference">DNS IP 偏好</label><select id="dns-preference"><option value="default">default</option><option value="prefer-ipv4">prefer-ipv4</option><option value="prefer-ipv6">prefer-ipv6</option><option value="ipv4-only">ipv4-only</option><option value="ipv6-only">ipv6-only</option></select><label for="tfo">客户端 TCP Fast Open</label><select id="tfo"><option value="true">启用</option><option value="false">关闭</option></select></fieldset><p id="generated-credentials" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><p id="protocol-guidance" class="helper"></p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
+    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required><button type="button" id="generate-port" class="install-generate">自动生成端口</button><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div id="sni-field"><label for="sni" id="sni-label">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="generate-sni" class="install-generate">自动生成 SNI</button></div></div><div id="snell-name-field" hidden><label for="install-name">用户名</label><input id="install-name" value="u24443" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32"><button type="button" id="generate-name" class="install-generate">自动生成用户名</button></div><fieldset class="install-options"><legend>凭据与证书</legend><p id="install-options-status" class="helper"></p><label for="credential">UUID / 密码 / PSK（留空自动生成）</label><input id="credential" type="password" autocomplete="new-password" maxlength="128"><button type="button" id="generate-credential" class="install-generate">自动生成凭据</button><label for="certificate-mode">证书方式</label><select id="certificate-mode"><option value="self">生成自签证书</option><option value="acme">自有域名 · 申请 Let’s Encrypt 证书（HTTP）</option><option value="existing">使用节点已有证书</option></select><label for="acme-email">证书联系邮箱</label><input id="acme-email" type="email" maxlength="254"><p id="certificate-help" class="helper"></p></fieldset><fieldset class="install-options"><legend>Reality 参数</legend><label for="reality-private">Reality 私钥（留空自动生成）</label><input id="reality-private" type="password" autocomplete="new-password" maxlength="43"><p class="helper">公钥由节点从私钥推导，不需另填。仅 VLESS Reality 可用，需要新版 Agent。</p><label for="reality-short-id">Short ID（留空自动生成）</label><input id="reality-short-id" maxlength="16" pattern="([0-9a-fA-F]{2}){1,8}"><button type="button" id="generate-short-id" class="install-generate">自动生成 Short ID</button></fieldset><fieldset class="install-options"><legend>Snell v6 设置</legend><label for="snell-mode">混淆模式</label><select id="snell-mode"><option value="default">default</option><option value="unshaped">unshaped</option><option value="unsafe-raw">unsafe-raw</option></select><label for="dns">DNS 服务器（逗号分隔；留空使用系统 DNS）</label><input id="dns" maxlength="512" placeholder="1.1.1.1,8.8.8.8"><label for="dns-preference">DNS IP 偏好</label><select id="dns-preference"><option value="default">default</option><option value="prefer-ipv4">prefer-ipv4</option><option value="prefer-ipv6">prefer-ipv6</option><option value="ipv4-only">ipv4-only</option><option value="ipv6-only">ipv6-only</option></select><label for="tfo">客户端 TCP Fast Open</label><select id="tfo"><option value="true">启用</option><option value="false">关闭</option></select></fieldset><p id="generated-credentials" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><p id="protocol-guidance" class="helper"></p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
     const updateFields = () => {
         const p = $('#protocol').value.split(':')[1], snell = p.startsWith('snell');
-        const advanced = selected.snapshot.install_options_version === 1;
+        const advanced = [1, 2].includes(selected.snapshot.install_options_version);
+        for (const id of ['reality-private', 'reality-short-id', 'generate-short-id'])
+            $('#'+id).disabled = !(p === 'vless' && selected.snapshot.install_options_version === 2);
         const tls = ['hy2', 'trojan', 'anytls'].includes(p);
         $('#sni').disabled = snell;
         $('#sni').required = !snell;
         $('#sni-field').hidden = false;
         $('#generate-sni').disabled = snell;
-        $('#sni-label').textContent = p === 'vless' ? 'Reality 目标 SNI（必填）' : '证书 SNI 域名（必填）';
+        $('#sni-label').textContent = snell ? 'SNI 域名（此协议不适用）' : p === 'vless' ? 'Reality 目标 SNI（必填）' : '证书 SNI / 自有域名（必填）';
         $('#protocol-guidance').textContent = installProtocolGuidance(p);
         $('#snell-name-field').hidden = false;
         $('#install-name').disabled = !(snell || advanced);
+        $('#generate-name').disabled = $('#install-name').disabled;
         $('#install-name').required = snell || advanced;
         for (const id of ['credential', 'generate-credential']) $('#'+id).disabled = !advanced;
         $('#certificate-mode').disabled = !(advanced && tls);
@@ -437,12 +440,17 @@ function install() {
             : certificate === 'existing' ? '使用节点 /etc/vless-reality/certs/server.crt 与 server.key；验证域名、有效期及密钥匹配。'
             : '可填写自有域名或生成候选域名。节点生成带 SAN 的自签证书，无需域名解析；客户端需跳过证书验证。';
         $('#generated-credentials').textContent = p === 'vless'
-            ? 'UUID、Reality 密钥对及 Short ID 在确认安装后由服务端自动生成，无需填写。'
-            : snell ? 'PSK 在确认安装后由服务端自动生成，无需填写。'
+            ? 'UUID、Reality 私钥及 Short ID 留空时由节点自动生成；公钥始终从私钥推导。'
+            : snell ? 'PSK 留空时由节点自动生成。'
             : '凭据留空时自动生成。证书按所选方式在节点准备，不覆盖其他实例的证书。';
         $('#generation-feedback').textContent = '';
     };
     $('#protocol').addEventListener('change', updateFields);
+    $('#generate-short-id').onclick = () => {
+        $('#reality-short-id').value = Array.from(crypto.getRandomValues(new Uint8Array(4)),
+            n => n.toString(16).padStart(2, '0')).join('');
+        $('#generation-feedback').textContent = '已生成 Short ID，尚未安装。';
+    };
     $('#certificate-mode').addEventListener('change', updateFields);
     $('#generate-credential').onclick = () => {
         $('#credential').value = $('#protocol').value.split(':')[1] === 'vless'
@@ -473,7 +481,11 @@ function install() {
         const [core, p] = $('#protocol').value.split(':');
         try {
             const params = p.startsWith('snell') ? {name: $('#install-name').value} : {sni: $('#sni').value};
-            if (selected.snapshot.install_options_version === 1) {
+            if (selected.snapshot.install_options_version === 2 && p === 'vless') {
+                if ($('#reality-private').value) params.private_key = $('#reality-private').value;
+                if ($('#reality-short-id').value) params.short_id = $('#reality-short-id').value;
+            }
+            if ([1, 2].includes(selected.snapshot.install_options_version)) {
                 params.name = $('#install-name').value;
                 if ($('#credential').value) params.credential = $('#credential').value;
                 if (['hy2', 'trojan', 'anytls'].includes(p)) {

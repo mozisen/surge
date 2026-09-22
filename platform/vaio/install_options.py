@@ -1,23 +1,38 @@
 """Strict installation options; no shell fragments or filesystem paths in requests."""
+import base64
 import ipaddress
 import re
 import uuid
 
 TLS_PROTOCOLS = {"hy2", "trojan", "anytls"}
 ADVANCED_INSTALL_FIELDS = {"credential", "certificate_mode", "acme_email",
-                           "mode", "dns", "dns_ip_preference", "tfo"}
+                           "mode", "dns", "dns_ip_preference", "tfo", "private_key", "short_id"}
+
+REALITY_INSTALL_FIELDS = {"private_key", "short_id"}
 
 
 def validate_install_options(proto, params):
     allowed = {"name", "credential"}
     if proto == "vless" or proto in TLS_PROTOCOLS:
         allowed.add("sni")
+    if proto == "vless":
+        allowed |= REALITY_INSTALL_FIELDS
     if proto in TLS_PROTOCOLS:
         allowed |= {"certificate_mode", "acme_email"}
     if proto == "snell-v6":
         allowed |= {"mode", "dns", "dns_ip_preference", "tfo"}
     if set(params) - allowed:
         raise ValueError("该协议不具备所提交的安装参数")
+    if "private_key" in params:
+        value = params["private_key"]
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", value):
+            raise ValueError("Reality 私钥必须为 32 字节 Base64URL 编码")
+        raw = base64.urlsafe_b64decode(value + "=")
+        if base64.urlsafe_b64encode(raw).decode().rstrip("=") != value:
+            raise ValueError("Reality 私钥编码无效")
+    if "short_id" in params and (not isinstance(params["short_id"], str) or
+                                 not re.fullmatch(r"(?:[0-9a-fA-F]{2}){1,8}", params["short_id"])):
+        raise ValueError("Short ID 必须为 2–16 位偶数长度十六进制字符")
     if "credential" in params:
         value = params["credential"]
         if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_+=./-]{8,128}", value):
