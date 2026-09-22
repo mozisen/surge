@@ -893,6 +893,20 @@ dialog::backdrop {
     display: none;
 }
 
+#install-form .install-options {
+    margin: 24px 0 0;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+}
+
+#install-form :disabled {
+    background: var(--accent-soft);
+    color: var(--muted);
+    cursor: not-allowed;
+    opacity: .65;
+}
+
 .helper {
     font-size: 11px;
     color: var(--muted);

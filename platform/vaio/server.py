@@ -18,6 +18,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
 from .common import MUTATIONS, LEGACY_COMBINATIONS, digest, require_text, validate_task
+from .install_options import ADVANCED_INSTALL_FIELDS
 from .store import Store
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -483,6 +484,8 @@ def create_app(config=None):
             if node["maintenance"]:
                 return jsonify(error="节点正在维护，请稍后再试"), 409
             capabilities = json.loads(node["snapshot"]).get("write_capabilities", [])
+            if task["action"] == "install" and set(task["params"]) & ADVANCED_INSTALL_FIELDS and json.loads(node["snapshot"]).get("install_options_version") != 1:
+                return jsonify(error="节点不支持高级安装参数，请先升级 Agent"), 409
             if "reset_credentials" in task["params"] and json.loads(node["snapshot"]).get("task_api_version", 1) < 2:
                 return jsonify(error="节点不支持凭据重置，请先升级 Agent"), 409
             if (task["core"], task["protocol"]) not in LEGACY_COMBINATIONS and {"core": task["core"], "protocol": task["protocol"]} not in capabilities:
@@ -516,6 +519,7 @@ def create_app(config=None):
         for row in rows:
             item = dict(row)
             item["request"] = json.loads(item["request"])
+            item["request"].get("params", {}).pop("credential", None)
             item["result"] = json.loads(item["result"] or "{}")
             if item["action"] == "share" and item["finished"] and item["finished"] < time.time() - 600:
                 item["result"] = {}

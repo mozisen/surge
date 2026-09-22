@@ -5,7 +5,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 const chunk = source.slice(source.indexOf('function installPortCandidate('), source.indexOf('function editUser('));
 const elements = {};
-for (const id of ['protocol', 'port', 'sni', 'generate-sni', 'snell-name-field', 'install-name',
+for (const id of ['credential', 'generate-credential', 'certificate-mode', 'acme-email', 'snell-mode', 'dns', 'dns-preference', 'tfo', 'install-options-status', 'certificate-help', 'protocol', 'port', 'sni', 'generate-sni', 'snell-name-field', 'install-name',
     'sni-field', 'sni-label', 'protocol-guidance', 'generated-credentials', 'generation-feedback', 'generate-port', 'generate-name', 'install-form', 'submit']) {
     elements[id] = {value: '', events: {}, addEventListener(event, handler) { this.events[event] = handler; }, reportValidity() { return true; }};
 }
@@ -35,7 +35,7 @@ async function main() {
         assert(markup.includes(`type="button" id="${id}"`));
     }
     assert.equal(elements.port.value, '24443'); // opening does not overwrite defaults
-    assert.equal(elements['snell-name-field'].hidden, true);
+    assert.equal(elements['snell-name-field'].hidden, false);
     assert.equal(elements['install-name'].disabled, true);
     assert.match(elements['generated-credentials'].textContent, /UUID/);
     elements['generate-port'].onclick();
@@ -64,7 +64,7 @@ async function main() {
         elements.protocol.value = combo;
         elements.protocol.events.change();
         const snell = combo.includes('snell');
-        assert.equal(elements['sni-field'].hidden, snell);
+        assert.equal(elements['sni-field'].hidden, false);
         assert.equal(elements.sni.required, !snell);
         assert.equal(elements['install-name'].required, snell);
         assert(elements['protocol-guidance'].textContent.length > 10);
@@ -80,6 +80,32 @@ async function main() {
     }
     assert.deepEqual(generated, pool);
     assert.notEqual(context.installSniCandidate('ads.apple.com'), 'ads.apple.com');
+    context.selected.snapshot.install_options_version = 1;
+    elements.protocol.value = 'singbox:anytls';
+    elements['certificate-mode'].value = 'acme';
+    elements['acme-email'].value = 'admin@example.com';
+    elements['install-name'].value = 'alice';
+    elements.protocol.events.change();
+    assert.equal(elements['acme-email'].disabled, false);
+    assert.equal(elements['acme-email'].required, true);
+    assert.equal(elements['generate-sni'].disabled, true);
+    assert.equal(elements['snell-mode'].disabled, true);
+    await elements['install-form'].events.submit({preventDefault() {}, target: elements['install-form']});
+    assert.equal(calls.at(-1)[2].certificate_mode, 'acme');
+    assert.equal(calls.at(-1)[2].name, 'alice');
+    elements.protocol.value = 'xray:snell-v6';
+    elements['snell-mode'].value = 'unshaped';
+    elements['dns-preference'].value = 'prefer-ipv4';
+    elements.dns.value = '1.1.1.1';
+    elements.tfo.value = 'false';
+    elements.protocol.events.change();
+    assert.equal(elements['certificate-mode'].disabled, true);
+    assert.equal(elements['snell-mode'].disabled, false);
+    await elements['install-form'].events.submit({preventDefault() {}, target: elements['install-form']});
+    assert.equal(calls.at(-1)[2].mode, 'unshaped');
+    assert.equal(calls.at(-1)[2].tfo, false);
+    assert.equal(calls.at(-1)[2].acme_email, undefined);
+    assert.equal(calls.at(-1)[2].sni, undefined);
     const allUsed = Array.from({length: 45536}, (_, i) => ({port: i + 20000}));
     assert.throws(() => context.installPortCandidate(allUsed, 24443), /没有可推荐/);
     assert.equal(context.installNameCandidate([{protocol: 'snell', users: [{name: 'u12345'}]}], 'snell-v6', 12345), 'u12345');

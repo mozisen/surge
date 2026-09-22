@@ -3,6 +3,7 @@ import datetime
 import hashlib
 import json
 import re
+from .install_options import ADVANCED_INSTALL_FIELDS, validate_install_options
 
 PROTOCOLS = {"vless": "VLESS Reality", "hy2": "Hysteria2", "snell": "Snell v4",
              "snell-v5": "Snell v5", "snell-v6": "Snell v6", "trojan": "Trojan", "anytls": "AnyTLS"}
@@ -51,7 +52,7 @@ def validate_task(data):
     params = data.get("params", {})
     if not isinstance(params, dict):
         raise ValueError("参数无效")
-    allowed = {"install": {"sni", "name"}, "update": {"port"},
+    allowed = {"install": {"sni", "name"} | ADVANCED_INSTALL_FIELDS, "update": {"port"},
                "user_add": {"name", "quota_gb", "expire_date"},
                "user_update": {"name", "quota_gb", "expire_date", "enabled", "reset_credentials"},
                "user_delete": {"name"}, "share": {"name", "host"}}
@@ -60,6 +61,7 @@ def validate_task(data):
     if action in ("user_add", "user_update", "user_delete"):
         require_text(params.get("name"), "用户名", 32, r"[A-Za-z0-9_-]+")
     if action == "install":
+        validate_install_options(p, params)
         require_text(params.get("name", "default"), "用户名", 32, r"[A-Za-z0-9_-]+")
         if p in ("vless", "hy2", "trojan", "anytls"):
             require_text(params.get("sni"), "SNI", 253, r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")

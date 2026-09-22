@@ -5,6 +5,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import subprocess
 import tempfile
 import time
@@ -90,7 +91,7 @@ class Runtime:
             return output.decode().strip() if capture else ""
 
     def upstream(self, operation, *args):
-        allowed = {"install_xray", "install_singbox", "install_snell", "install_snell_v5", "install_snell_v6", "_snell_update_counter_port"}
+        allowed = {"install_xray", "install_singbox", "install_snell", "install_snell_v5", "install_snell_v6", "_snell_update_counter_port", "install_acme_tool"}
         if operation not in allowed:
             raise ValueError("未授权的脚本操作")
         source = (ROOT / "vendor/vless-server.sh").read_bytes()
@@ -102,11 +103,34 @@ class Runtime:
         self.command(["bash", "-c", runner, "vaio", str(library), operation, *args], timeout=1200)
 
     def install(self, proto, core=None):
+        self.ensure_main_script()
         if proto in ("trojan", "anytls") or (proto == "vless" and core == "singbox"):
             return self.upstream("install_singbox" if core == "singbox" else "install_xray")
         operation = {"vless": "install_xray", "hy2": "install_singbox", "snell": "install_snell",
                      "snell-v5": "install_snell_v5", "snell-v6": "install_snell_v6"}[proto]
         self.upstream(operation)
+
+    def ensure_main_script(self, bindir="/usr/local/bin"):
+        """Bootstrap CLI on fresh nodes, never overwrite an existing installation."""
+        source = (ROOT / "vendor/vless-server.sh").read_bytes()
+        if hashlib.sha256(source).hexdigest() != UPSTREAM_SHA:
+            raise RuntimeError("脚本完整性校验失败")
+        directory = Path(bindir)
+        script, shortcut = directory / "vless-server.sh", directory / "vless"
+        # Validate all collisions before writing anything.
+        if script.is_symlink() or (script.exists() and not script.is_file()):
+            raise ValueError("主脚本路径冲突，请先在节点核对")
+        if shortcut.exists() or shortcut.is_symlink():
+            if not shortcut.is_symlink() or shortcut.resolve() != script.resolve():
+                raise ValueError("vless 快捷命令已被其他程序占用，未覆盖")
+        directory.mkdir(parents=True, exist_ok=True)
+        if not script.exists():
+            atomic_write(script, source)
+            script.chmod(0o755)
+        if not shortcut.is_symlink():
+            shortcut.symlink_to(script)
+        if not (self.cfg / "role").exists():
+            atomic_write(self.cfg / "role", "server\n")
 
     def keys(self, core="xray"):
         output = self.command(["/usr/local/bin/sing-box", "generate", "reality-keypair"] if core == "singbox" else ["/usr/local/bin/xray", "x25519"], capture=True)
@@ -123,12 +147,68 @@ class Runtime:
         certdir = self.cfg / "certs" / ("panel-" + identity if identity else "hy2")
         certdir.mkdir(parents=True, mode=0o700, exist_ok=True)
         cert, key = certdir / "server.crt", certdir / "server.key"
-        if not cert.exists() and not key.exists():
+        mode = row.get("certificate_mode", "self")
+        if mode == "existing":
+            cert, key = self.cfg / "certs/server.crt", self.cfg / "certs/server.key"
+        elif mode == "acme":
+            matches = [r for _, _, r in rows(read_db(self.cfg))
+                       if r.get("certificate_mode") == "acme" and r.get("sni") == row["sni"]]
+            if matches:
+                prior = matches[0]
+                cert, key = Path(prior["panel_cert"]), Path(prior["panel_key"])
+                if not cert.is_relative_to(self.cfg / "certs") or not key.is_relative_to(self.cfg / "certs"):
+                    raise ValueError("已有证书不在受管目录")
+                self.command(["openssl", "x509", "-in", str(cert), "-noout", "-checkend", "86400"])
+                self.command(["openssl", "x509", "-in", str(cert), "-noout", "-checkhost", row["sni"]])
+                cert_public = self.command(["openssl", "x509", "-in", str(cert), "-pubkey", "-noout"], capture=True)
+                key_public = self.command(["openssl", "pkey", "-in", str(key), "-pubout"], capture=True)
+                if not cert_public or cert_public != key_public:
+                    raise ValueError("已有证书与私钥不匹配")
+                row.update(panel_cert=str(cert), panel_key=str(key))
+                return
+            # Never stop an unrelated web server to acquire port 80.
+            from .bridge import Bridge
+            Bridge.check_port(read_db(self.cfg), 80)
+            self.upstream("install_acme_tool")
+            acme = str(Path.home() / ".acme.sh/acme.sh")
+            self.command([acme, "--register-account", "--server", "letsencrypt", "-m", row["acme_email"]], timeout=180)
+            self.command([acme, "--issue", "--server", "letsencrypt", "-d", row["sni"],
+                          "--standalone", "--httpport", "80", "--keylength", "ec-256"], timeout=600)
+            # An instance-specific path prevents replacing sibling certificates.
+            # Renewal uses a fixed hook, not administrator-supplied shell.
+            hook = certdir / "reload.sh"
+            core = row.get("certificate_core")
+            if core not in {"xray", "singbox"}:
+                raise ValueError("证书续期目标内核无效")
+            hook_text = '#!/bin/sh\n'
+            for service, filename in (("vless-reality", "config.json"), ("vless-singbox", "singbox.json")):
+                hook_text += ('if grep -Fq -- ' + shlex.quote(str(cert)) + ' ' + shlex.quote(str(self.cfg / filename)) + '; then\n'
+                              + '  if command -v systemctl >/dev/null 2>&1; then\n'
+                              + '    systemctl try-restart ' + service + ' || exit 1\n'
+                              + '  elif command -v rc-service >/dev/null 2>&1; then\n'
+                              + '    if rc-service ' + service + ' status >/dev/null 2>&1; then rc-service ' + service + ' restart || exit 1; fi\n'
+                              + '  fi\nfi\n')
+            atomic_write(hook, hook_text)
+            hook.chmod(0o700)
+            self.command([acme, "--install-cert", "-d", row["sni"], "--ecc",
+                          "--key-file", str(key), "--fullchain-file", str(cert),
+                          "--reloadcmd", str(hook)], timeout=180)
+        elif mode != "self":
+            raise ValueError("证书模式无效")
+        elif not cert.exists() and not key.exists():
             self.command(["openssl", "req", "-x509", "-nodes", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
-                          "-keyout", str(key), "-out", str(cert), "-subj", "/CN=" + row["sni"], "-days", "3650"])
+                          "-keyout", str(key), "-out", str(cert), "-subj", "/CN=" + row["sni"], "-days", "3650",
+                          "-addext", "subjectAltName=DNS:" + row["sni"],
+                          "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "extendedKeyUsage=serverAuth"])
         if not cert.exists() or not key.exists():
             raise ValueError("TLS 证书文件不完整，请先修复")
         key.chmod(0o600)
+        self.command(["openssl", "x509", "-in", str(cert), "-noout", "-checkend", "0"])
+        self.command(["openssl", "x509", "-in", str(cert), "-noout", "-checkhost", row["sni"]])
+        cert_public = self.command(["openssl", "x509", "-in", str(cert), "-pubkey", "-noout"], capture=True)
+        key_public = self.command(["openssl", "pkey", "-in", str(key), "-pubout"], capture=True)
+        if not cert_public or cert_public != key_public:
+            raise ValueError("证书与私钥不匹配")
         row.update(panel_cert=str(cert), panel_key=str(key))
 
     def is_running(self, service):
@@ -224,6 +304,13 @@ class Runtime:
             old_text = path.read_text() if path.exists() else "[snell-server]\nlisten = 0.0.0.0:0\npsk = pending\n"
             text = re.sub(r"(?m)^(\s*listen\s*=\s*.+:)\d+\s*$", lambda m: m[1] + str(after["port"]), old_text)
             text = re.sub(r"(?m)^\s*psk\s*=.*$", "psk = " + after["psk"], text)
+            if proto == "snell-v6":
+                for option, value in (("mode", after.get("mode", "default")),
+                                      ("dns", after.get("dns", "")),
+                                      ("dns-ip-preference", after.get("dns_ip_preference", "default"))):
+                    text = re.sub(r"(?m)^\s*" + re.escape(option) + r"\s*=.*\n?", "", text)
+                    if value:
+                        text = text.rstrip() + "\n" + option + " = " + str(value) + "\n"
             atomic_write(path, text)
             binary = "/usr/local/bin/" + {"snell": "snell-server", "snell-v5": "snell-server-v5", "snell-v6": "snell-server-v6"}[proto]
             self.ensure_unit(service, binary, "-c " + str(path))

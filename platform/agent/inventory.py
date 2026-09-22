@@ -82,6 +82,7 @@ def inventory(cfg, status=service_status):
                               {k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("used", 0), ("quota", 0), ("expire_date", ""))}
                               for u in users_for(row)]})
     return {"revision": config_revision(db), "instances": instances, "write_capabilities": write_capabilities(), "task_api_version": 2,
+            "install_options_version": 1,
             "hostname": platform.node(), "os": platform.system() + " " + platform.release(),
             "arch": platform.machine(), "agent_version": __version__, "metrics": metrics(),
             "traffic_status": db.get("meta", {}).get("last_traffic_sync_status", "unavailable"), "at": time.time()}
@@ -127,6 +128,7 @@ def sanitize_snapshot(snapshot):
                 clean["script_api"][key] = api[key]
     clean["instances"] = []
     clean["task_api_version"] = 2 if snapshot.get("task_api_version") == 2 else 1
+    clean["install_options_version"] = 1 if snapshot.get("install_options_version") == 1 else 0
     declared = snapshot.get("write_capabilities", [])
     clean["write_capabilities"] = [item for item in write_capabilities() if item in declared] if isinstance(declared, list) else []
     instances = snapshot.get("instances", [])

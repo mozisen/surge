@@ -150,12 +150,14 @@ class Bridge:
                 if proto.startswith("snell") and any(p == proto and not r.get("snell_id") for _, p, r in rows(db)):
                     raise ValueError("已有旧版 Snell，请先用原脚本迁移多用户后再添加实例")
                 self.runtime.install(proto, core) if proto in ("trojan", "anytls") or (proto == "vless" and core == "singbox") else self.runtime.install(proto)
-                name = params.get("name", "default") if proto.startswith("snell") else "default"
+                name = params.get("name", "default")
                 if not proto.startswith("snell") and any(u.get("name") == name for c, p, r in rows(db) if (c, p) == (core, proto) for u in users_for(r)):
+                    if "name" in params:
+                        raise ValueError("同协议用户名已存在")
                     name = "u" + str(task["port"])
                     if any(u.get("name") == name for c, p, r in rows(db) if (c, p) == (core, proto) for u in users_for(r)):
                         raise ValueError("自动生成的用户名已存在，请选择其他端口")
-                credential = str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16)
+                credential = params.get("credential") or (str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16))
                 after = {"port": task["port"], "instance_id": str(uuid.uuid4()), "panel_managed": True, "users": [
                     {"name": name, "uuid": credential, "enabled": True, "used": 0, "quota": 0, "expire_date": ""}]}
                 if proto == "vless":
@@ -164,6 +166,10 @@ class Bridge:
                                  sni=params["sni"], security_mode="reality")
                 elif proto in ("hy2", "trojan", "anytls"):
                     after.update(password=credential, sni=params["sni"], hop_enable="0")
+                    after["certificate_mode"] = params.get("certificate_mode", "self")
+                    after["certificate_core"] = core
+                    if "acme_email" in params:
+                        after["acme_email"] = params["acme_email"]
                     self.runtime.certificate(after)
                 else:
                     if any(u.get("name") == name for c, p, r in rows(db) if p == proto for u in users_for(r)):
@@ -171,6 +177,10 @@ class Bridge:
                     snell_id = secrets.token_hex(12)
                     after.update(psk=credential, snell_id=snell_id, version={"snell": "4", "snell-v5": "5", "snell-v6": "6"}[proto])
                     after["users"][0]["id"] = snell_id
+                    if proto == "snell-v6":
+                        after.update(mode=params.get("mode", "default"), dns=params.get("dns", ""),
+                                     dns_ip_preference=params.get("dns_ip_preference", "default"),
+                                     tfo=params.get("tfo", True))
                     db.setdefault("meta", {}).setdefault("snell_users", {})[proto] = True
             elif action == "delete":
                 after = None
@@ -281,14 +291,16 @@ class Bridge:
                                "sni": row["sni"], "fp": "chrome", "pbk": row["public_key"], "sid": row["short_id"]})
             return "vless://" + quote(credential, safe="") + "@" + address + "?" + query + "#" + quote(params["name"])
         if proto == "hy2":
-            return "hysteria2://" + quote(credential, safe="") + "@" + address + "?" + urlencode({"sni": row["sni"], "insecure": "1"})
+            return "hysteria2://" + quote(credential, safe="") + "@" + address + "?" + urlencode({"sni": row["sni"], "insecure": "1" if row.get("certificate_mode", "self") == "self" else "0"})
         if proto in ("trojan", "anytls"):
             options = {"sni": row.get("sni", ""), "security": "tls"}
-            if row.get("panel_cert"):
+            if row.get("panel_cert") and row.get("certificate_mode", "self") == "self":
                 options["allowInsecure"] = "1"
             return proto + "://" + quote(credential, safe="") + "@" + address + "?" + urlencode(options) + "#" + quote(params["name"])
         version = {"snell": 4, "snell-v5": 5, "snell-v6": 6}[proto]
-        return f'{params["name"]} = snell, {host}, {row["port"]}, psk={credential}, version={version}, reuse=true'
+        mode = ', mode=' + row["mode"] if version == 6 and row.get("mode", "default") != "default" else ""
+        tfo = str(row.get("tfo", True)).lower()
+        return f'{params["name"]} = snell, {host}, {row["port"]}, psk={credential}, version={version}{mode}, reuse=true, tfo={tfo}'
 
     def reconcile(self):
         """Locally enforce expiry / externally collected quotas even if the panel is offline."""

@@ -130,6 +130,21 @@ class PanelTest(unittest.TestCase):
             db.execute("UPDATE tasks SET status='unknown' WHERE node_id=?", (node,))
         self.assertEqual(self.task(node, 'another-write').status_code, 409)
 
+    def test_install_options_require_capability_and_credentials_are_not_listed(self):
+        node, token, snap = self.registered()
+        secret = "12345678-1234-4234-8234-123456789012"
+        task = dict(action="install", protocol="vless", core="xray", port=30001,
+                    params={"sni": "example.com", "credential": secret}, revision="a"*64)
+        send = lambda: self.client.post("/api/nodes/"+node+"/tasks", json=task,
+                                        headers={**self.headers, "Idempotency-Key": "advanced-install"})
+        self.assertEqual(send().status_code, 409)
+        snap["install_options_version"] = 1
+        self.client.post("/api/agent/"+node+"/poll", json={"snapshot": snap, "ready": True}, headers=token)
+        self.assertEqual(send().status_code, 201)
+        self.assertNotIn(secret, self.client.get("/api/tasks").text)
+        delivery = self.client.post("/api/agent/"+node+"/poll", json={"snapshot": snap, "ready": True}, headers=token)
+        self.assertEqual(delivery.json["task"]["params"]["credential"], secret)
+
     def test_timeout_is_unknown_never_requeued(self):
         node,token,snap=self.registered()
         self.task(node)
