@@ -1,0 +1,15 @@
+#!name=WiFi 自动控制 po0加白
+
+#!desc=连接指定 WiFi 时关闭「po0 防火墙自动加白」，离开后自动开启
+
+#!system=ios
+
+#!arguments=wifi_list:wifi1|wifi2
+
+#!arguments-desc=填写需要关闭 po0 防火墙自动加白模块的 WiFi 名称，多个 WiFi 使用 | 分隔
+
+[Script]
+
+WiFi-模块切换 = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/mozisen/surge/main/scripts/wifi-module-switch.js,script-update-interval=3600,argument="{{{wifi_list}}}"
+
+WiFi-启动检查 = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/mozisen/surge/main/scripts/wifi-module-switch.js,script-update-interval=3600,argument="{{{wifi_list}}}"
