@@ -1,11 +1,11 @@
 #!name=po0fw 全部槽位面板
-#!desc=只读展示固定槽位、FIFO 记录、剩余容量及本机出口命中情况；不执行加白。
+#!desc=只读展示固定槽位、FIFO 记录、剩余容量及本机出口命中情况，不执行加白。
 #!system=ios
-#!arguments=TOKEN:pgnfw_REPLACE_ME,SCRIPT:po0fw-panel.js
-#!arguments-desc=TOKEN：填写单个 po0fw token，可带 @0，查询会忽略槽位后缀。SCRIPT：脚本相对配置目录的路径，或你托管的 HTTPS 脚本直链。请勿公开分享填写了真实 token 的模块。
+#!arguments=TOKEN:pgnfw_REPLACE_ME
+#!arguments-desc=TOKEN：填写单个 po0fw token，可省略 @0 后缀。请勿公开分享填写了真实 token 的模块。
 
 [Panel]
 po0fw-slots = title="po0fw · 全部槽位", content="点击刷新查询", style=info, script-name=po0fw-slots, update-interval=60
 
 [Script]
-po0fw-slots = type=generic, script-path={{{SCRIPT}}}, timeout=15, argument="token={{{TOKEN}}}"
+po0fw-slots = type=generic, script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/po0fw-panel.js, timeout=15, argument="token={{{TOKEN}}}"
