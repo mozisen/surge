@@ -1,15 +1,19 @@
 #!name=WiFi 自动控制 po0加白
-
 #!desc=连接指定 WiFi 时关闭「po0 防火墙自动加白」，离开后自动开启
-
 #!system=ios
-
 #!arguments=wifi_list:wifi1|wifi2
-
 #!arguments-desc=填写需要关闭 po0 防火墙自动加白模块的 WiFi 名称，多个 WiFi 使用 | 分隔
+#!name=po0fw 全部槽位面板
+#!desc=只读展示固定槽位、FIFO 记录、剩余容量及本机出口命中情况，不执行加白。
+#!system=ios
+#!arguments=TOKEN:pgnfw_REPLACE_ME
+#!arguments-desc=TOKEN：填写单个 po0fw token，可省略 @0 后缀。请勿公开分享填写了真实 token 的模块。
+
+[Panel]
+po0fw-slots = title="po0fw · 全部槽位", content="点击刷新查询", style=info, script-name=po0fw-slots, update-interval=60
 
 [Script]
 
 WiFi-模块切换 = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/mozisen/surge/main/scripts/wifi-module-switch.js,script-update-interval=3600,argument="{{{wifi_list}}}"
-
 WiFi-启动检查 = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/mozisen/surge/main/scripts/wifi-module-switch.js,script-update-interval=3600,argument="{{{wifi_list}}}"
+po0fw-slots = type=generic, script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/po0fw-panel.js, timeout=15, argument="token={{{TOKEN}}}"
