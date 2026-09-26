@@ -12,4 +12,4 @@ IP-CIDR,124.221.69.228/32,DIRECT,no-resolve
 [Script]
 po0-fw-cron = type=cron,cronexp="*/10 * * * *",script-path=https://raw.githubusercontent.com/w0ven/po0fw/main/scripts/po0-firewall-whitelist.js,timeout=60,argument="tokens={{{tokens}}}"
 po0-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/w0ven/po0fw/main/scripts/po0-firewall-whitelist.js,timeout=60,argument="tokens={{{tokens}}}"
-po0-fw-panel = type=generic,script-path=https://raw.githubusercontent.com/w0ven/po0fw/main/scripts/po0-firewall-whitelist.js,timeout=60,argument="tokens={{{tokens}}}"
+
