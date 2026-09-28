@@ -68,3 +68,48 @@ _db_apply '.singbox.anytls=[{port:1,users:[{name:"alice",uuid:"a",enabled:false,
 db_reset_user_traffic singbox anytls alice
 jq -e '.singbox.anytls[0].users[0].enabled and (.singbox.anytls[1].users[0].enabled == false) and .singbox.anytls[1].users[0].used == 8' "$DB_FILE" >/dev/null
 echo 'PASS quota reset resumes users, manual/expired remain disabled, legacy marker compatibility, failed resume retry, multi-port isolation'
+
+for fn in reset_monthly_user_traffic check_monthly_traffic_reset db_get_user; do load "$fn"; done
+TRAFFIC_MONTHLY_RESET_LAST_FILE="$fixture/monthly-last"
+get_traffic_monthly_reset_enabled() { echo "$monthly_enabled"; }
+get_traffic_monthly_reset_day() { echo 5; }
+date() {
+    case "$1" in
+        +%Y-%m) echo "$test_month" ;;
+        +%d) echo "$test_day" ;;
+        +%F) echo "$test_month-$test_day" ;;
+        *) command date "$@" ;;
+    esac
+}
+monthly_enabled=true; test_month=2026-09; test_day=04
+_db_apply '.={xray:{vless:{users:[{name:"x",uuid:"x",used:100,quota:100,enabled:false,disable_reason:"quota"},{name:"manual",uuid:"m",used:12,enabled:false,disable_reason:"manual"},{name:"expired",uuid:"e",used:13,enabled:false,disable_reason:"quota",expire_date:"2000-01-01"}]},
+    "snell-v6":[{users:[{name:"s",uuid:"s",used:100,quota:100,enabled:false,disable_reason:"quota"}]}]},
+    singbox:{anytls:{users:[{name:"a",uuid:"a",used:100,quota:100,enabled:false,disable_reason:"quota"}]}}}'
+check_monthly_traffic_reset
+[[ ! -f "$TRAFFIC_MONTHLY_RESET_LAST_FILE" ]]
+_snell_managed() { [[ "$1" == snell-v6 ]]; }
+_snell_apply_users() { echo snell >> "$fixture/reloads"; }
+test_day=05
+_regenerate_config() { [[ "$monthly_fail" != true ]]; }
+monthly_fail=true
+if check_monthly_traffic_reset; then echo 'expected monthly partial failure'; exit 1; fi
+[[ ! -f "$TRAFFIC_MONTHLY_RESET_LAST_FILE" ]]
+jq -e '.xray.vless.users[0].enabled and .xray["snell-v6"][0].users[0].enabled and
+    (.xray.vless.users[1].enabled == false) and (.xray.vless.users[2].enabled == false)' "$DB_FILE" >/dev/null
+_db_apply '.xray.vless.users[0].used=23 | .singbox.anytls.users[0].used=7'
+monthly_fail=false
+check_monthly_traffic_reset
+[[ "$(cat "$TRAFFIC_MONTHLY_RESET_LAST_FILE")" == 2026-09 ]]
+jq -e '.xray.vless.users[0].used == 23 and .singbox.anytls.users[0].used == 7 and
+    .singbox.anytls.users[0].enabled' "$DB_FILE" >/dev/null
+check_monthly_traffic_reset
+jq -e '.xray.vless.users[0].used == 23' "$DB_FILE" >/dev/null
+test_month=2026-10; test_day=09
+check_monthly_traffic_reset
+jq -e '.xray.vless.users[0].used == 0 and .singbox.anytls.users[0].used == 0' "$DB_FILE" >/dev/null
+[[ "$(cat "$TRAFFIC_MONTHLY_RESET_LAST_FILE")" == 2026-10 ]]
+test_month=2026-11; monthly_enabled=false
+_db_apply '.xray.vless.users[0].used=33'
+check_monthly_traffic_reset
+jq -e '.xray.vless.users[0].used == 33' "$DB_FILE" >/dev/null
+echo 'PASS monthly due date/catch-up, both cores and Snell, partial failure retry without double reset, disabled/expired protection, next month and switch off'

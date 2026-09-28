@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.3-preview.quota.2"
+readonly VERSION="3.7.3-preview.quota.3"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -1229,16 +1229,18 @@ db_set_user_traffic() {
 # 重置用户流量
 # 用法: db_reset_user_traffic "xray" "vless" "用户名"
 db_reset_user_traffic() {
-    local core="$1" proto="$2" name="$3" resume
+    local core="$1" proto="$2" name="$3" month="${4:-}" resume
+    [[ -z "$month" || "$month" =~ ^[0-9]{4}-[0-9]{2}$ ]] || return 1
     # Keep the cause separate from enabled: false alone cannot distinguish
     # manual suspension from a quota suspension.
-    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg today "$(date +%F)" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg month "$month" --arg today "$(date +%F)" '
         def reset_user:
-            if .name != $n then . else
+            if .name != $n or ($month != "" and .traffic_reset_month == $month) then . else
                 ((.disable_reason == "quota") or (.resume_after_quota_reset == true) or
                  (.disable_reason == null and
                   (.quota_enforced == true or .quota_exceeded_notified == true))) as $quota_stop |
                 .used = 0 |
+                (if $month != "" then .traffic_reset_month = $month else . end) |
                 .resume_after_quota_reset = ($quota_stop and
                     ((.expire_date // "") == "" or .expire_date >= $today)) |
                 del(.quota_enforced, .quota_exceeded_notified, .last_alert_percent)
@@ -2955,8 +2957,8 @@ _sync_all_user_traffic_unlocked() {
     [[ ! -f "$DB_FILE" ]] && return 1
     _ensure_singbox_default_users
     
-    # 月重置（仅重置数据库累计值，不影响实时计数器）
-    check_monthly_traffic_reset
+    # Collect outstanding counters before monthly reset so old usage is not
+    # immediately added back to the new month's zero balance.
     _snell_sync_traffic || { mark_traffic_sync_result "snell_error" 0; return 1; }
     
     # 检查是否需要发送每日报告
@@ -2968,6 +2970,7 @@ _sync_all_user_traffic_unlocked() {
     _pgrep sing-box && has_singbox=true
 
     if [[ "$has_xray" == "false" && "$has_singbox" == "false" ]]; then
+        check_monthly_traffic_reset || { mark_traffic_sync_result "monthly_reset_error" 0; return 1; }
         if _snell_any_managed; then
             mark_traffic_sync_result "ok" 0
         else
@@ -2985,9 +2988,13 @@ _sync_all_user_traffic_unlocked() {
     local reset_flag=""
     [[ "$reset" == "true" ]] && reset_flag="-reset"
     
+    local xray_failed=false xray_stats
     if [[ "$has_xray" == "true" ]]; then
-        xray api statsquery --server=127.0.0.1:${XRAY_API_PORT} $reset_flag 2>/dev/null | \
-            jq -r '.stat[]? | "\(.name // .Name) \(.value // .Value // 0)"' >> "$tmp_stats" 2>/dev/null || true
+        if xray_stats=$(xray api statsquery --server=127.0.0.1:${XRAY_API_PORT} $reset_flag 2>/dev/null); then
+            printf '%s\n' "$xray_stats" | jq -r '.stat[]? | "\(.name // .Name) \(.value // .Value // 0)"' >> "$tmp_stats" 2>/dev/null || xray_failed=true
+        else
+            xray_failed=true
+        fi
     fi
 
     local singbox_failed=false
@@ -3002,6 +3009,8 @@ _sync_all_user_traffic_unlocked() {
         rm -f "$tmp_stats"
         _enforce_user_quotas || { mark_traffic_sync_result "enforcement_error" 0; return 1; }
         if [[ "$singbox_failed" == true ]]; then mark_traffic_sync_result "singbox_error" 0; return 1; fi
+        if [[ "$xray_failed" == true ]]; then mark_traffic_sync_result "xray_error" 0; return 1; fi
+        check_monthly_traffic_reset || { mark_traffic_sync_result "monthly_reset_error" 0; return 1; }
         mark_traffic_sync_result "no_stats" 0
         return 0
     fi
@@ -3126,6 +3135,11 @@ _sync_all_user_traffic_unlocked() {
         mark_traffic_sync_result "partial_singbox_error" "$updated"
         return 1
     fi
+    if [[ "$xray_failed" == true ]]; then
+        mark_traffic_sync_result "partial_xray_error" "$updated"
+        return 1
+    fi
+    check_monthly_traffic_reset || { mark_traffic_sync_result "monthly_reset_error" "$updated"; return 1; }
     mark_traffic_sync_result "ok" "$updated"
     
     return 0
@@ -3428,24 +3442,25 @@ set_traffic_monthly_reset_day() {
 
 reset_monthly_user_traffic() {
     [[ ! -f "$DB_FILE" ]] && return 0
-    local month_key
+    local month_key core proto user failed=0 staged
     month_key=$(date +%Y-%m)
-    echo "$month_key" > "$TRAFFIC_MONTHLY_RESET_LAST_FILE"
-
-    _db_apply '
-      if .xray then
-        .xray |= with_entries(
-          .value |= (
-            if type == "array" then
-              map(if .users then .users |= map(.used = 0 | .enabled = true | del(.alert.last_alert_percent, .alert.quota_exceeded_notified)) else . end)
-            else
-              if .users then .users |= map(.used = 0 | .enabled = true | del(.alert.last_alert_percent, .alert.quota_exceeded_notified)) else . end
-            end
-          )
-        )
-      else . end
-    '
-    _ok "已按月重置 Xray 用户流量"
+    for core in xray singbox; do
+        for proto in $(db_list_protocols "$core"); do
+            for user in $(db_list_users "$core" "$proto"); do
+                db_reset_user_traffic "$core" "$proto" "$user" "$month_key" || failed=1
+            done
+        done
+    done
+    if [[ "$failed" != 0 ]]; then
+        _err "月度流量重置或用户恢复未全部完成，下次同步将重试"
+        return 1
+    fi
+    staged=$(mktemp "${TRAFFIC_MONTHLY_RESET_LAST_FILE}.XXXXXX") || return 1
+    if ! printf '%s\n' "$month_key" > "$staged" || ! mv "$staged" "$TRAFFIC_MONTHLY_RESET_LAST_FILE"; then
+        rm -f "$staged"
+        return 1
+    fi
+    _ok "已按月重置 Xray / Sing-box / Snell 用户流量，超额停用用户已恢复"
 }
 
 check_monthly_traffic_reset() {

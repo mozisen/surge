@@ -54,3 +54,14 @@ fail=true
 if _sync_all_user_traffic_unlocked true; then exit 1; fi
 [[ "$(cat "$fixture/result")" == singbox_error ]]
 echo 'PASS VLESS/Trojan/HY2/TUIC/AnyTLS sync to database, empty post-reset sync, failed query not reported as success'
+_pgrep() { [[ "$1" == xray ]]; }
+xray() { return 1; }
+monthly_called=false
+check_monthly_traffic_reset() { monthly_called=true; }
+if _sync_all_user_traffic_unlocked true; then exit 1; fi
+[[ "$monthly_called" == false && "$(cat "$fixture/result")" == xray_error ]]
+xray() { echo '{}'; }
+check_monthly_traffic_reset() { return 1; }
+if _sync_all_user_traffic_unlocked true; then exit 1; fi
+[[ "$(cat "$fixture/result")" == monthly_reset_error ]]
+echo 'PASS failed counter read postpones monthly reset; monthly failure is not reported as sync success'
