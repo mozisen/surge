@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.2"
+readonly VERSION="3.7.3-preview.quota.1"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -622,6 +622,13 @@ gen_xray_vless_clients() {
     
     local users=$(db_get_users_stats "xray" "$proto")
     if [[ -z "$users" ]]; then
+        # An explicit empty user array must never reactivate the legacy secret.
+        if db_get "xray" "$proto" | jq -e '
+            (if type=="array" then . else [.] end) |
+            any(.[]; (.users | type)=="array")' >/dev/null 2>&1; then
+            echo "[]"
+            return
+        fi
         # 尝试从配置中获取默认 UUID（支持多端口数组）
         local config=$(db_get "xray" "$proto")
         if [[ -n "$config" && "$config" != "null" ]]; then
@@ -684,6 +691,13 @@ gen_xray_vmess_clients() {
     
     local users=$(db_get_users_stats "xray" "$proto")
     if [[ -z "$users" ]]; then
+        # An explicit empty user array must never reactivate the legacy secret.
+        if db_get "xray" "$proto" | jq -e '
+            (if type=="array" then . else [.] end) |
+            any(.[]; (.users | type)=="array")' >/dev/null 2>&1; then
+            echo "[]"
+            return
+        fi
         # 尝试从配置中获取默认 UUID（支持多端口数组）
         local config=$(db_get "xray" "$proto")
         if [[ -n "$config" && "$config" != "null" ]]; then
@@ -717,6 +731,13 @@ gen_xray_trojan_clients() {
     
     local users=$(db_get_users_stats "xray" "$proto")
     if [[ -z "$users" ]]; then
+        # An explicit empty user array must never reactivate the legacy secret.
+        if db_get "xray" "$proto" | jq -e '
+            (if type=="array" then . else [.] end) |
+            any(.[]; (.users | type)=="array")' >/dev/null 2>&1; then
+            echo "[]"
+            return
+        fi
         # 尝试从配置中获取默认 password（支持多端口数组）
         local config=$(db_get "xray" "$proto")
         if [[ -n "$config" && "$config" != "null" ]]; then
@@ -751,6 +772,13 @@ gen_xray_ss2022_clients() {
     
     local users=$(db_get_users_stats "xray" "$proto")
     if [[ -z "$users" ]]; then
+        # An explicit empty user array must never reactivate the legacy secret.
+        if db_get "xray" "$proto" | jq -e '
+            (if type=="array" then . else [.] end) |
+            any(.[]; (.users | type)=="array")' >/dev/null 2>&1; then
+            echo "[]"
+            return
+        fi
         # SS2022 多用户模式必须有 users 数组，返回空
         echo "[]"
         return
@@ -773,6 +801,13 @@ gen_xray_socks_accounts() {
     
     local users=$(db_get_users_stats "xray" "$proto")
     if [[ -z "$users" ]]; then
+        # An explicit empty user array must never reactivate the legacy secret.
+        if db_get "xray" "$proto" | jq -e '
+            (if type=="array" then . else [.] end) |
+            any(.[]; (.users | type)=="array")' >/dev/null 2>&1; then
+            echo "[]"
+            return
+        fi
         # 尝试从配置中获取默认账号（支持多端口数组）
         local config=$(db_get "xray" "$proto")
         if [[ -n "$config" && "$config" != "null" ]]; then
@@ -1249,6 +1284,8 @@ db_set_user_enabled() {
         _snell_apply_users "$proto" "$name"
     elif [[ "$core" == "xray" ]]; then
         rebuild_and_reload_xray "silent"
+    elif [[ "$core" == "singbox" ]]; then
+        _regenerate_config "$core" "$proto"
     fi
 }
 
@@ -1717,8 +1754,8 @@ db_get_users_stats() {
         elif ($cfg | type) == "array" then
             # 多端口数组
             $cfg[] | . as $port_cfg |
-            if (.users | length) > 0 then
-                .users[] | "\(.name)|\(.uuid)|\(.used // 0)|\(.quota // 0)|\(.enabled // true)|\($port_cfg.port)|\(.routing // "")|\(.expire_date // "")"
+            if (.users | type) == "array" then
+                .users[] | "\(.name)|\(.uuid)|\(.used // 0)|\(.quota // 0)|\(.enabled != false)|\($port_cfg.port)|\(.routing // "")|\(.expire_date // "")"
             elif (.uuid != null or .password != null or .username != null) then
                 # 无 users 数组，生成默认用户（与 Xray email 格式一致使用 "default"）
                 "default|\(.uuid // .password // .username)|0|0|true|\(.port)||"
@@ -1727,8 +1764,8 @@ db_get_users_stats() {
             end
         else
             # 单端口对象
-            if ($cfg.users | length) > 0 then
-                $cfg.users[] | "\(.name)|\(.uuid)|\(.used // 0)|\(.quota // 0)|\(.enabled // true)|\($cfg.port)|\(.routing // "")|\(.expire_date // "")"
+            if ($cfg.users | type) == "array" then
+                $cfg.users[] | "\(.name)|\(.uuid)|\(.used // 0)|\(.quota // 0)|\(.enabled != false)|\($cfg.port)|\(.routing // "")|\(.expire_date // "")"
             elif ($cfg.uuid != null or $cfg.password != null or $cfg.username != null) then
                 "default|\($cfg.uuid // $cfg.password // $cfg.username)|0|0|true|\($cfg.port)||"
             else
@@ -2720,7 +2757,7 @@ for proto in ('vless', 'trojan', 'hy2', 'tuic', 'anytls'):
                 default_user = user
                 break
 
-        if default_user is None:
+        if default_user is None and not isinstance(obj.get('users'), list):
             users.insert(0, {
                 'name': 'default',
                 'uuid': secret,
@@ -2732,7 +2769,7 @@ for proto in ('vless', 'trojan', 'hy2', 'tuic', 'anytls'):
             })
             obj['users'] = users
             changed[0] = True
-        else:
+        elif default_user is not None:
             if not default_user.get('uuid'):
                 default_user['uuid'] = secret
                 changed[0] = True
@@ -2845,6 +2882,35 @@ mark_traffic_sync_result() {
          if $s == "ok" then .meta.last_traffic_sync = $t else . end' || true
 }
 
+_enforce_user_quotas() {
+    local core proto user used quota enabled enforced failed=0
+    for core in xray singbox; do
+        for proto in $(db_list_protocols "$core"); do
+            case "$proto" in snell*) continue ;; esac
+            for user in $(db_list_users "$core" "$proto"); do
+                used=$(db_get_user_field "$core" "$proto" "$user" used)
+                quota=$(db_get_user_field "$core" "$proto" "$user" quota)
+                [[ "$used" =~ ^[0-9]+$ && "$quota" =~ ^[0-9]+$ ]] || continue
+                (( quota > 0 && used >= quota )) || continue
+                enabled=$(db_get_user_field "$core" "$proto" "$user" enabled)
+                enforced=$(db_get_user_alert_state "$core" "$proto" "$user" quota_enforced)
+                if [[ "$enabled" == true || "$enforced" != true ]]; then
+                    # Persist failure before applying: a failed reload must be retried
+                    # even when no new traffic arrives or a notification was sent.
+                    db_set_user_alert_state "$core" "$proto" "$user" quota_enforced false || { failed=1; continue; }
+                    if ! db_set_user_enabled "$core" "$proto" "$user" false; then
+                        _warn "$core / $proto 用户停用未生效，将在下次同步重试" >&2
+                        failed=1
+                        continue
+                    fi
+                    db_set_user_alert_state "$core" "$proto" "$user" quota_enforced true || failed=1
+                fi
+            done
+        done
+    done
+    return "$failed"
+}
+
 # 同步实现。外层 sync_all_user_traffic() 负责加锁，避免 cron 与 TG 查询同时
 # 使用 -reset 读取核心计数器而造成流量遗漏。
 _sync_all_user_traffic_unlocked() {
@@ -2898,13 +2964,13 @@ _sync_all_user_traffic_unlocked() {
     
     if [[ ! -s "$tmp_stats" ]]; then
         rm -f "$tmp_stats"
+        _enforce_user_quotas || { mark_traffic_sync_result "enforcement_error" 0; return 1; }
         if [[ "$singbox_failed" == true ]]; then mark_traffic_sync_result "singbox_error" 0; return 1; fi
         mark_traffic_sync_result "no_stats" 0
         return 0
     fi
     
     local updated=0
-    local need_reload=false  # 标记是否需要重载 Xray 配置
     local notify_percent=$(tg_get_config "notify_quota_percent")
     notify_percent=${notify_percent:-80}
     
@@ -2937,10 +3003,8 @@ _sync_all_user_traffic_unlocked() {
                     if [[ "$used" -ge "$quota" ]]; then
                         local exceeded_notified=$(db_get_user_alert_state "xray" "$proto" "$user" "quota_exceeded_notified")
                         if [[ "$exceeded_notified" != "true" ]]; then
-                            db_set_user_enabled "xray" "$proto" "$user" "false"
                             db_set_user_alert_state "xray" "$proto" "$user" "quota_exceeded_notified" "true"
                             tg_send_over_quota "$user" "$proto" "$used" "$quota" "xray"
-                            need_reload=true
                         fi
                     elif [[ "$percent" -ge "$notify_percent" ]]; then
                         local last_alert=$(db_get_user_alert_state "xray" "$proto" "$user" "last_alert_percent")
@@ -2992,7 +3056,6 @@ _sync_all_user_traffic_unlocked() {
                         if [[ "$used" -ge "$quota" ]]; then
                             local exceeded_notified=$(db_get_user_alert_state "singbox" "$proto" "$user" "quota_exceeded_notified")
                             if [[ "$exceeded_notified" != "true" ]]; then
-                                db_set_user_enabled "singbox" "$proto" "$user" "false"
                                 db_set_user_alert_state "singbox" "$proto" "$user" "quota_exceeded_notified" "true"
                                 tg_send_over_quota "$user" "$proto" "$used" "$quota" "singbox"
                             fi
@@ -3019,12 +3082,9 @@ _sync_all_user_traffic_unlocked() {
     fi
     
     rm -f "$tmp_stats"
+
+    _enforce_user_quotas || { mark_traffic_sync_result "enforcement_error" "$updated"; return 1; }
     
-    # 批量处理完成后统一重载配置（避免循环内多次重启）
-    if [[ "$need_reload" == "true" ]]; then
-        generate_xray_config 2>/dev/null
-        svc restart vless-reality 2>/dev/null
-    fi
 
     if [[ "$singbox_failed" == true ]]; then
         mark_traffic_sync_result "partial_singbox_error" "$updated"
@@ -4891,7 +4951,7 @@ add_xray_inbound_v2() {
             if [[ "$security_mode" == "encryption" ]]; then
                 local decryption=$(echo "$cfg" | jq -r '.decryption // "none"')
                 local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
-                [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
+                [[ -n "$clients" ]] || return 1
 
                 jq -n \
                     --argjson port "$port" \
@@ -4918,7 +4978,7 @@ add_xray_inbound_v2() {
                 # VLESS+Reality - 使用 jq 安全构建 (支持 WS 回落)
                 # 获取完整的用户列表（包含子用户和 email，用于流量统计）
                 local clients=$(gen_xray_vless_clients "$base_protocol" "xtls-rprx-vision" "$port")
-                [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\",\"flow\":\"xtls-rprx-vision\"}]"
+                [[ -n "$clients" ]] || return 1
                 
                 jq -n \
                     --argjson port "$port" \
@@ -4960,7 +5020,7 @@ add_xray_inbound_v2() {
             # VLESS-Vision - 使用 jq 安全构建
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
             local clients=$(gen_xray_vless_clients "$base_protocol" "xtls-rprx-vision" "$port")
-            [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\",\"flow\":\"xtls-rprx-vision\"}]"
+            [[ -n "$clients" ]] || return 1
             
             jq -n \
                 --argjson port "$port" \
@@ -4996,7 +5056,7 @@ add_xray_inbound_v2() {
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
             # vless-ws 不需要 flow
             local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
-            [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
+            [[ -n "$clients" ]] || return 1
             
             if [[ "$has_master" == "true" ]]; then
                 # 回落模式：监听本地
@@ -5056,7 +5116,7 @@ add_xray_inbound_v2() {
         vless-ws-notls)
             # VLESS-WS 无 TLS - 专为 CF Tunnel 设计
             local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
-            [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
+            [[ -n "$clients" ]] || return 1
             
             # 从数据库获取 host 配置
             local host=$(db_get_field "xray" "$base_protocol" "host")
@@ -5086,7 +5146,7 @@ add_xray_inbound_v2() {
         vless-xhttp)
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
             local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
-            [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
+            [[ -n "$clients" ]] || return 1
             
             jq -n \
                 --argjson port "$port" \
@@ -5127,7 +5187,7 @@ add_xray_inbound_v2() {
             
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
             local clients=$(gen_xray_vless_clients "$base_protocol" "" "$port")
-            [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\"}]"
+            [[ -n "$clients" ]] || return 1
             
             jq -n \
                 --argjson port "$internal_port" \
@@ -5151,7 +5211,7 @@ add_xray_inbound_v2() {
         vmess-ws)
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
             local clients=$(gen_xray_vmess_clients "$base_protocol")
-            [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"id\":\"$uuid\",\"email\":\"default@${base_protocol}\",\"alterId\":0}]"
+            [[ -n "$clients" ]] || return 1
             
             if [[ "$has_master" == "true" ]]; then
                 jq -n \
@@ -5203,7 +5263,7 @@ add_xray_inbound_v2() {
         trojan)
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
             local clients=$(gen_xray_trojan_clients "$base_protocol")
-            [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"password\":\"$password\",\"email\":\"default@${base_protocol}\"}]"
+            [[ -n "$clients" ]] || return 1
             
             jq -n \
                 --argjson port "$port" \
@@ -5235,7 +5295,7 @@ add_xray_inbound_v2() {
             
             # 获取完整的用户列表（包含子用户和 email，用于流量统计）
             local clients=$(gen_xray_trojan_clients "$base_protocol")
-            [[ -z "$clients" || "$clients" == "[]" ]] && clients="[{\"password\":\"$password\",\"email\":\"default@${base_protocol}\"}]"
+            [[ -n "$clients" ]] || return 1
             
             # Trojan-WS 作为回落协议或独立运行
             if _has_master_protocol; then
@@ -11091,6 +11151,28 @@ _build_singbox_ruleset_defs() {
 }
 
 # 生成 Sing-box 统一配置（所有选用 Sing-box 的协议共用一个进程）
+_singbox_effective_users() {
+    local proto="$1" cfg="$2" nonce
+    nonce=$(openssl rand -hex 16) || return 1
+    nonce="${nonce:0:8}-${nonce:8:4}-${nonce:12:4}-${nonce:16:4}-${nonce:20:12}"
+    jq -ce --arg p "$proto" --arg nonce "$nonce" --arg today "$(date +%F)" '
+        . as $r |
+        (if .users == null then
+            [{name:"default",uuid:(if $p=="vless" or $p=="tuic" then .uuid else .password end)}]
+         else .users end) |
+        map(select(.enabled != false) |
+            select((.quota // 0) == 0 or (.used // 0) < .quota) |
+            select((.expire_date // "") == "" or .expire_date >= $today)) |
+        map(if $p=="vless" then {name:($p+"-"+.name),uuid:.uuid,flow:"xtls-rprx-vision"}
+            elif $p=="tuic" then {name:($p+"-"+.name),uuid:.uuid,password:(.password // $r.password)}
+            else {name:($p+"-"+.name),password:.uuid} end) |
+        if length > 0 then . else
+            [if $p=="vless" then {name:"quota-disabled",uuid:$nonce,flow:"xtls-rprx-vision"}
+             elif $p=="tuic" then {name:"quota-disabled",uuid:$nonce,password:$nonce}
+             else {name:"quota-disabled",password:$nonce} end]
+        end' <<< "$cfg"
+}
+
 generate_singbox_config() {
     _ensure_singbox_default_users
     local singbox_protocols=$(db_list_protocols "singbox")
@@ -11491,10 +11573,7 @@ generate_singbox_config() {
                 local short_id=$(echo "$cfg" | jq -r '.short_id // empty')
                 local sni=$(echo "$cfg" | jq -r '.sni // "www.microsoft.com"')
                 local users_json
-                users_json=$(echo "$cfg" | jq --arg uuid "$uuid" '
-                    [(.users // [])[] | select(.enabled // true) |
-                        {name:("vless-" + .name), uuid:.uuid, flow:"xtls-rprx-vision"}] |
-                    if length == 0 then [{name:"vless-default", uuid:$uuid, flow:"xtls-rprx-vision"}] else . end')
+                users_json=$(_singbox_effective_users "$proto" "$cfg") || return 1
                 inbound=$(jq -n \
                     --argjson port "$port" --argjson users "$users_json" \
                     --arg private_key "$private_key" --arg short_id "$short_id" \
@@ -11514,10 +11593,7 @@ generate_singbox_config() {
                 local password=$(echo "$cfg" | jq -r '.password // empty')
                 local sni=$(echo "$cfg" | jq -r '.sni // "bing.com"')
                 local users_json
-                users_json=$(echo "$cfg" | jq --arg password "$password" '
-                    [(.users // [])[] | select(.enabled // true) |
-                        {name:("trojan-" + .name), password:.uuid}] |
-                    if length == 0 then [{name:"trojan-default", password:$password}] else . end')
+                users_json=$(_singbox_effective_users "$proto" "$cfg") || return 1
                 inbound=$(jq -n \
                     --argjson port "$port" --argjson users "$users_json" \
                     --arg cert "$CFG/certs/server.crt" --arg key "$CFG/certs/server.key" \
@@ -11555,27 +11631,9 @@ generate_singbox_config() {
                     fi
                 fi
                 
-                # 构建用户列表：从数据库读取用户，如果没有则使用默认用户
-                local users_json="[]"
-                local db_users=$(jq -r --arg p "$proto" '
-                    .singbox[$p] as $cfg |
-                    if $cfg == null then empty
-                    elif ($cfg | type) == "array" then
-                        [$cfg[].users // [] | .[]] | unique_by(.name)
-                    else
-                        $cfg.users // []
-                    end
-                ' "$DB_FILE" 2>/dev/null)
-                
-                if [[ -n "$db_users" && "$db_users" != "[]" && "$db_users" != "null" ]]; then
-                    # 有自定义用户，为每个用户生成 {name, password}
-                    # hy2 用户的 uuid 字段存储的是密码；name 使用协议隔离后的内部统计键
-                    local default_user_json=$(jq -n --arg name "hy2-default" --arg pw "$password" '{name: $name, password: $pw}')
-                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" '([$chk_def] + ($db_users | map({name: ("hy2-" + .name), password: .uuid}))) | unique_by(.name)')
-                else
-                    # 没有自定义用户，使用默认密码
-                    users_json=$(jq -n --arg name "hy2-default" --arg pw "$password" '[{name: $name, password: $pw}]')
-                fi
+                # Only this port's eligible users; never restore disabled default credentials.
+                local users_json
+                users_json=$(_singbox_effective_users "$proto" "$cfg") || return 1
                 
                 inbound=$(jq -n \
                     --argjson port "$port" \
@@ -11609,25 +11667,9 @@ generate_singbox_config() {
                 local key_path="$CFG/certs/tuic/server.key"
                 [[ ! -f "$cert_path" ]] && { cert_path="$CFG/certs/server.crt"; key_path="$CFG/certs/server.key"; }
                 
-                # 构建用户列表：从数据库读取用户，如果没有则使用默认用户
-                local users_json="[]"
-                local db_users=$(jq -r --arg p "$proto" '
-                    .singbox[$p] as $cfg |
-                    if $cfg == null then empty
-                    elif ($cfg | type) == "array" then
-                        [$cfg[].users // [] | .[]] | unique_by(.name)
-                    else
-                        $cfg.users // []
-                    end
-                ' "$DB_FILE" 2>/dev/null)
-                
-                if [[ -n "$db_users" && "$db_users" != "[]" && "$db_users" != "null" ]]; then
-                    # TUIC 用户的 uuid 字段存储的是真正用户 UUID；name 使用协议隔离后的内部统计键
-                    local default_user_json=$(jq -n --arg name "tuic-default" --arg id "$uuid" --arg pw "$password" '{name: $name, uuid: $id, password: $pw}')
-                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" --arg pw "$password" '([$chk_def] + ($db_users | map({name: ("tuic-" + .name), uuid: .uuid, password: $pw}))) | unique_by(.name)')
-                else
-                    users_json=$(jq -n --arg name "tuic-default" --arg id "$uuid" --arg pw "$password" '[{name: $name, uuid: $id, password: $pw}]')
-                fi
+                # Only this port's eligible users; never restore disabled default credentials.
+                local users_json
+                users_json=$(_singbox_effective_users "$proto" "$cfg") || return 1
                 
                 inbound=$(jq -n \
                     --argjson port "$port" \
@@ -11658,25 +11700,9 @@ generate_singbox_config() {
                 local key_path="$CFG/certs/server.key"
                 [[ ! -f "$cert_path" || ! -f "$key_path" ]] && continue
 
-                # 构建用户列表：从数据库读取用户，如果没有则使用默认用户
-                local users_json="[]"
-                local db_users=$(jq -r --arg p "$proto" '
-                    .singbox[$p] as $cfg |
-                    if $cfg == null then empty
-                    elif ($cfg | type) == "array" then
-                        [$cfg[].users // [] | .[]] | unique_by(.name)
-                    else
-                        $cfg.users // []
-                    end
-                ' "$DB_FILE" 2>/dev/null)
-
-                if [[ -n "$db_users" && "$db_users" != "[]" && "$db_users" != "null" ]]; then
-                    # AnyTLS 用户的 uuid 字段存储的是真正用户密码；name 使用协议隔离后的内部统计键
-                    local default_user_json=$(jq -n --arg name "anytls-default" --arg pw "$password" '{name: $name, password: $pw}')
-                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" '([$chk_def] + ($db_users | map({name: ("anytls-" + .name), password: .uuid}))) | unique_by(.name)')
-                else
-                    users_json=$(jq -n --arg name "anytls-default" --arg pw "$password" '[{name: $name, password: $pw}]')
-                fi
+                # Only this port's eligible users; never restore disabled default credentials.
+                local users_json
+                users_json=$(_singbox_effective_users "$proto" "$cfg") || return 1
 
                 inbound=$(jq -n \
                     --argjson port "$port" \
@@ -30497,8 +30523,12 @@ _snell_apply_users() {
         else
             local prepare_status=$?
             [[ "$prepare_status" == 2 ]] || { _err "用户 $id 计数规则准备失败"; return 1; }
-            svc stop "$service" || true
-            svc disable "$service" || true
+            svc stop "$service" || failed=1
+            svc disable "$service" || failed=1
+            if svc status "$service"; then
+                _err "Snell 用户实例未停止: $service"
+                failed=1
+            fi
         fi
     done <<< "$(_snell_rows "$proto")"
     return "$failed"
@@ -30551,8 +30581,9 @@ _snell_sync_traffic() {
             quota=$(jq -r '.users[0].quota // 0' <<< "$row")
             enabled=$(jq -r '.users[0].enabled' <<< "$row")
             expire=$(jq -r '.users[0].expire_date // ""' <<< "$row")
-            if [[ "$enabled" == true ]] && { (( quota > 0 && used >= quota )) || [[ -n "$expire" && "$expire" < "$(date +%F)" ]]; }; then
+            if { (( quota > 0 && used >= quota )) || [[ -n "$expire" && "$expire" < "$(date +%F)" ]]; }; then
                 db_set_user_enabled xray "$proto" "$name" false || return 1
+                [[ "$enabled" == true ]] || continue
                 if (( quota > 0 && used >= quota )); then
                     tg_send_over_quota "$name" "$proto" "$used" "$quota" xray
                 else
