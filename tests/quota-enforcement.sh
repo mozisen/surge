@@ -5,10 +5,11 @@ fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 CFG="$fixture"; DB_FILE="$fixture/db.json"
 load() { eval "$(awk -v fn="$1" 'index($0, fn "() {") == 1 {on=1} on {print} on && $0 == "}" {exit}' "$repo/vless-server.sh")"; }
-for fn in _singbox_effective_users _ensure_singbox_default_users db_get_users_stats _enforce_user_quotas db_list_users db_list_protocols db_get_user_field db_get_user_alert_state db_set_user_alert_state db_set_user_enabled _db_apply db_get gen_xray_trojan_clients gen_xray_vmess_clients; do load "$fn"; done
+for fn in _singbox_effective_users _ensure_singbox_default_users db_get_users_stats _enforce_user_quotas db_list_users db_list_protocols db_get_user_field db_get_user_alert_state db_set_user_alert_state db_set_user_enabled db_reset_user_traffic _db_apply db_get gen_xray_trojan_clients gen_xray_vmess_clients; do load "$fn"; done
 _db_lock_acquire() { :; }; _db_lock_release() { :; }
 _snell_managed() { return 1; }
 _warn() { :; }
+_ok() { :; }; _info() { :; }; _err() { :; }
 for proto in vless trojan hy2 tuic anytls; do
     cfg='{"port":10001,"uuid":"original","password":"original","users":[{"name":"default","uuid":"blocked","enabled":false},{"name":"over","uuid":"over-secret","used":100,"quota":100},{"name":"expired","uuid":"expired-secret","expire_date":"2000-01-01"},{"name":"alice","uuid":"valid","enabled":true}]}'
     result=$(_singbox_effective_users "$proto" "$cfg")
@@ -45,3 +46,25 @@ count=$(wc -l < "$fixture/reloads")
 _enforce_user_quotas
 [[ "$(wc -l < "$fixture/reloads")" == "$count" ]]
 echo 'PASS per-port eligibility, disabled/default exclusion, migration, Xray false, reload failure retry independent of traffic/notification'
+
+db_reset_user_traffic singbox anytls alice
+jq -e '.singbox.anytls.users[0] | .enabled == true and .used == 0 and .quota_enforced == null and .quota_exceeded_notified == null' "$DB_FILE" >/dev/null
+_db_apply '.singbox.anytls.users[0] |= (.used=100 | .enabled=false | .disable_reason="manual" | .quota_enforced=true)'
+db_reset_user_traffic singbox anytls alice
+jq -e '.singbox.anytls.users[0] | .enabled == false and .used == 0' "$DB_FILE" >/dev/null
+_db_apply '.singbox.anytls.users[0] |= (.used=100 | .disable_reason="quota" | .expire_date="2000-01-01")'
+db_reset_user_traffic singbox anytls alice
+jq -e '.singbox.anytls.users[0].enabled == false' "$DB_FILE" >/dev/null
+_db_apply '.singbox.anytls.users[0] |= (del(.disable_reason,.expire_date) | .quota_exceeded_notified=true)'
+fail=true
+if db_reset_user_traffic singbox anytls alice; then exit 1; fi
+jq -e '.singbox.anytls.users[0].resume_after_quota_reset == true' "$DB_FILE" >/dev/null
+fail=false
+db_reset_user_traffic singbox anytls alice
+jq -e '.singbox.anytls.users[0] | .enabled and (.resume_after_quota_reset == false)' "$DB_FILE" >/dev/null
+db_reset_user_traffic xray vless bob
+jq -e '.xray.vless.users[0] | .enabled and .used == 0' "$DB_FILE" >/dev/null
+_db_apply '.singbox.anytls=[{port:1,users:[{name:"alice",uuid:"a",enabled:false,disable_reason:"quota",used:9,quota:9}]},{port:2,users:[{name:"sibling",uuid:"b",enabled:false,used:8}]}]'
+db_reset_user_traffic singbox anytls alice
+jq -e '.singbox.anytls[0].users[0].enabled and (.singbox.anytls[1].users[0].enabled == false) and .singbox.anytls[1].users[0].used == 8' "$DB_FILE" >/dev/null
+echo 'PASS quota reset resumes users, manual/expired remain disabled, legacy marker compatibility, failed resume retry, multi-port isolation'

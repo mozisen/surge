@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.3-preview.quota.1"
+readonly VERSION="3.7.3-preview.quota.2"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -1229,7 +1229,35 @@ db_set_user_traffic() {
 # 重置用户流量
 # 用法: db_reset_user_traffic "xray" "vless" "用户名"
 db_reset_user_traffic() {
-    db_set_user_traffic "$1" "$2" "$3" 0
+    local core="$1" proto="$2" name="$3" resume
+    # Keep the cause separate from enabled: false alone cannot distinguish
+    # manual suspension from a quota suspension.
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg today "$(date +%F)" '
+        def reset_user:
+            if .name != $n then . else
+                ((.disable_reason == "quota") or (.resume_after_quota_reset == true) or
+                 (.disable_reason == null and
+                  (.quota_enforced == true or .quota_exceeded_notified == true))) as $quota_stop |
+                .used = 0 |
+                .resume_after_quota_reset = ($quota_stop and
+                    ((.expire_date // "") == "" or .expire_date >= $today)) |
+                del(.quota_enforced, .quota_exceeded_notified, .last_alert_percent)
+            end;
+        if (.[$c][$p] | type) == "array" then
+            .[$c][$p] |= map(.users |= map(reset_user))
+        else .[$c][$p].users |= map(reset_user) end
+    ' || return 1
+    resume=$(db_get_user_field "$core" "$proto" "$name" resume_after_quota_reset)
+    if [[ "$resume" == true ]]; then
+        db_set_user_enabled "$core" "$proto" "$name" true || {
+            _err "流量已重置，但用户恢复未生效；请重试重置流量"
+            return 1
+        }
+        db_set_user_alert_state "$core" "$proto" "$name" resume_after_quota_reset false || return 1
+        _ok "用户 $name 流量已重置，已自动恢复并应用配置"
+    else
+        _info "用户 $name 流量已重置；保留原启停状态（手动停用或到期不会自动恢复）"
+    fi
 }
 
 # 设置用户配额 (支持多端口数组格式)
@@ -1256,7 +1284,7 @@ db_set_user_quota() {
 # 启用/禁用用户 (支持多端口数组格式)
 # 用法: db_set_user_enabled "xray" "vless" "用户名" true/false
 db_set_user_enabled() {
-    local core="$1" proto="$2" name="$3" enabled="$4"
+    local core="$1" proto="$2" name="$3" enabled="$4" reason="${5:-manual}"
     [[ ! -f "$DB_FILE" ]] && return 1
     if _snell_managed "$proto" && [[ "$enabled" == true ]]; then
         local snell_user
@@ -1270,12 +1298,20 @@ db_set_user_enabled() {
         fi
     fi
     
-    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --argjson e "$enabled" '
+    _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --argjson e "$enabled" --arg reason "$reason" '
+        def state:
+            if .name != $n then . else
+                .enabled = $e |
+                if $e then del(.disable_reason)
+                elif $reason == "manual" then .disable_reason = "manual" | .resume_after_quota_reset = false
+                elif .disable_reason != "manual" then .disable_reason = $reason
+                else . end
+            end;
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
-            .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | if .name == $n then .enabled = $e else . end])]
+            .[$c][$p] = [$cfg[] | .users = ([.users // [] | .[] | state])]
         else
-            .[$c][$p].users = [.[$c][$p].users // [] | .[] | if .name == $n then .enabled = $e else . end]
+            .[$c][$p].users = [.[$c][$p].users // [] | .[] | state]
         end
     ' || return 1
     
@@ -1661,7 +1697,7 @@ check_and_disable_expired_users() {
     
     while IFS='|' read -r core proto name expire_date days_left; do
         [[ -z "$name" ]] && continue
-        db_set_user_enabled "$core" "$proto" "$name" false
+        db_set_user_enabled "$core" "$proto" "$name" false expired
         ((count++))
         [[ "$notify" == "--notify" ]] && send_tg_expired_notice "$name" "$proto" "$expire_date" "$core"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 禁用: $name ($proto)" >> "$CFG/expire.log"
@@ -2898,7 +2934,7 @@ _enforce_user_quotas() {
                     # Persist failure before applying: a failed reload must be retried
                     # even when no new traffic arrives or a notification was sent.
                     db_set_user_alert_state "$core" "$proto" "$user" quota_enforced false || { failed=1; continue; }
-                    if ! db_set_user_enabled "$core" "$proto" "$user" false; then
+                    if ! db_set_user_enabled "$core" "$proto" "$user" false quota; then
                         _warn "$core / $proto 用户停用未生效，将在下次同步重试" >&2
                         failed=1
                         continue
@@ -28020,10 +28056,11 @@ _reset_user_traffic() {
             read -rp "  确认重置所有用户流量? [y/N]: " confirm
             [[ ! "$confirm" =~ ^[yY]$ ]] && return
             
+            local reset_failed=0
             for user in $users; do
-                db_reset_user_traffic "$core" "$proto" "$user"
+                db_reset_user_traffic "$core" "$proto" "$user" || reset_failed=1
             done
-            _ok "所有用户流量已重置"
+            if [[ "$reset_failed" == 0 ]]; then _ok "所有用户流量已重置"; else _err "部分用户重置或恢复失败，请查看上方提示"; fi
             return
         fi
         
@@ -30582,7 +30619,9 @@ _snell_sync_traffic() {
             enabled=$(jq -r '.users[0].enabled' <<< "$row")
             expire=$(jq -r '.users[0].expire_date // ""' <<< "$row")
             if { (( quota > 0 && used >= quota )) || [[ -n "$expire" && "$expire" < "$(date +%F)" ]]; }; then
-                db_set_user_enabled xray "$proto" "$name" false || return 1
+                local stop_reason=quota
+                [[ -n "$expire" && "$expire" < "$(date +%F)" ]] && stop_reason=expired
+                db_set_user_enabled xray "$proto" "$name" false "$stop_reason" || return 1
                 [[ "$enabled" == true ]] || continue
                 if (( quota > 0 && used >= quota )); then
                     tg_send_over_quota "$name" "$proto" "$used" "$quota" xray
