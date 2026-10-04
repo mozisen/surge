@@ -733,13 +733,17 @@ async function backupPage() {
 
 async function historyDialog() {
     const data = await api('/nodes/'+selected.id+'/history');
-    const charts = [['系统负载', x=>x.load], ['内存使用率（%）', x=>x.memory_total?100*x.memory_used/x.memory_total:null], ['磁盘使用率（%）',x=>x.disk_total?100*x.disk_used/x.disk_total:null]];
+    data.samples.forEach((sample, i) => {
+        const prior = data.samples[i-1], dt = prior ? sample.at-prior.at : 0;
+        for (const field of ['network_rx','network_tx']) sample[field+'_rate'] = prior && dt>0 && dt<=120 && Number.isFinite(prior[field]) && Number.isFinite(sample[field]) && sample[field]>=prior[field] ? (sample[field]-prior[field])*8/dt/1000000 : null;
+    });
+    const charts = [['系统负载', x=>x.load], ['内存使用率（%）', x=>x.memory_total?100*x.memory_used/x.memory_total:null], ['磁盘使用率（%）',x=>x.disk_total?100*x.disk_used/x.disk_total:null], ['网卡接收速率（Mbps）',x=>x.network_rx_rate], ['网卡发送速率（Mbps）',x=>x.network_tx_rate]];
     const end = Date.now()/1000, start=end-86400;
     const content=charts.map(([title,value])=>{
-        const points=data.samples.filter(x=>Number.isFinite(value(x))), max=Math.max(1,...points.map(value));
+        const points=data.samples.filter(x=>Number.isFinite(value(x))), peak=Math.max(0,...points.map(value)), max=Math.max(1,peak);
         let d='',previous=0;
         for(const x of points) { const px=((x.at-start)/86400*600).toFixed(2), py=(105-value(x)/max*90).toFixed(2); d+=(x.at-previous>120?'M':'L')+px+','+py+' ';previous=x.at; }
-        return `<section class="history-chart"><h3>${title}</h3>${points.length?`<p class="helper">最新 ${value(points[points.length-1]).toFixed(2)} · 最高 ${max.toFixed(2)} · ${points.length} 个采样点</p><svg viewBox="0 0 600 120" role="img" aria-label="${title}过去24小时变化"><path d="${d}" fill="none" stroke="currentColor" stroke-width="2"/></svg>`:'<p>暂无采样数据</p>'}</section>`;
+        return `<section class="history-chart"><h3>${title}</h3>${points.length?`<p class="helper">最新 ${value(points[points.length-1]).toFixed(2)} · 最高 ${peak.toFixed(2)} · ${points.length} 个采样点</p><svg viewBox="0 0 600 120" role="img" aria-label="${title}过去24小时变化"><path d="${d}" fill="none" stroke="currentColor" stroke-width="2"/></svg>`:'<p>暂无采样数据</p>'}</section>`;
     }).join('');
     modal('资源历史 · '+selected.name, `<p class="helper">过去 24 小时，每分钟采样一次；保留 7 天数据。断线时间段留空。</p>${content}<p class="helper">${date(start)} — ${date(end)}</p>`, true);
 }
