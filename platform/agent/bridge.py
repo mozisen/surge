@@ -81,6 +81,8 @@ class Bridge:
         validated = validate_task({k: v for k, v in task.items() if k != "id"})
         if validated["action"] not in MUTATIONS:
             return self._execute({**validated, "id": identity})
+        if (self.state / "enforcement-pending.json").exists():
+            raise TransactionUnknown("自动计费策略上次执行未确认，请在节点核对 enforcement-backup 后解除阻塞")
         fingerprint = hashlib.sha256(json.dumps(validated, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         directory = self.state / "transactions"
         directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -125,6 +127,8 @@ class Bridge:
         task = validate_task({k: v for k, v in task.items() if k != "id"})
         core, proto, action = task["core"], task["protocol"], task["action"]
         with self.locked():
+            if action in MUTATIONS and (self.state / "enforcement-pending.json").exists():
+                raise TransactionUnknown("自动策略执行结果未知，请先在节点核对")
             db = read_db(self.cfg)
             if action in MUTATIONS and task["revision"] != config_revision(db):
                 raise ValueError("节点配置已变化，已拒绝过期任务；请刷新后重新操作")
@@ -313,6 +317,9 @@ class Bridge:
     def reconcile(self):
         """Locally enforce expiry / externally collected quotas even if the panel is offline."""
         with self.locked():
+            pending = self.state / "enforcement-pending.json"
+            if pending.exists():
+                raise TransactionUnknown("自动策略执行结果未知，未自动重试；请核对 enforcement-backup")
             db = read_db(self.cfg)
             original = copy.deepcopy(db)
             for _, _, item in rows(db):
@@ -349,13 +356,20 @@ class Bridge:
                             atomic_write(backup / name, content)
                         manifest[service]["files"][path] = name if content is not None else None
                 atomic_write(backup / "manifest.json", json.dumps(manifest))
+                if plans:
+                    atomic_write(pending, json.dumps({"revision": config_revision(original)}))
                 self.write(db)
                 try:
                     for core, proto, row in plans:
                         self.runtime.apply(core, proto, row, row, db)
                 except Exception:
-                    self.write(original)
-                    for service, (files, running, enabled) in saved.items():
-                        self.runtime.restore(service, files, running, enabled)
+                    try:
+                        self.write(original)
+                        for service, (files, running, enabled) in saved.items():
+                            self.runtime.restore(service, files, running, enabled)
+                    except Exception as error:
+                        raise TransactionUnknown("自动策略失败且恢复未确认，请核对 enforcement-backup") from error
+                    pending.unlink(missing_ok=True)
                     raise
             atomic_write(statepath, json.dumps(state))
+            pending.unlink(missing_ok=True)

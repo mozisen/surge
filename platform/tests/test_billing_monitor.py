@@ -91,6 +91,21 @@ class BillingTest(unittest.TestCase):
             reset=read_db(cfg)['xray']['vless'][0]['users'][0]
             self.assertEqual(reset['panel_used'],100)
 
+    def test_automatic_enforcement_unknown_is_not_replayed(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg=Path(d)/'cfg';cfg.mkdir();state=Path(d)/'state'
+            data=fixture();data['xray']['vless'][0]['panel_managed']=True
+            atomic_write(cfg/'db.json',json.dumps(data))
+            runtime=FakeRuntime(cfg/'config.json',fail=True);runtime.path.write_text('before')
+            bridge=Bridge(cfg,state,runtime)
+            with patch.object(runtime,'restore',side_effect=RuntimeError('restore failed')):
+                with self.assertRaisesRegex(RuntimeError,'恢复未确认'):bridge.reconcile()
+            calls=len(runtime.calls)
+            with self.assertRaisesRegex(RuntimeError,'未自动重试'):bridge.reconcile()
+            self.assertEqual(len(runtime.calls),calls)
+            task=dict(id=str(uuid.uuid4()),action='user_update',protocol='vless',core='xray',port=24443,params={'name':'default','enabled':False},revision=config_revision(read_db(cfg)))
+            with self.assertRaisesRegex(RuntimeError,'上次执行未确认'):bridge.execute(task)
+
 
 class MonitorTest(unittest.TestCase):
     def setUp(self):

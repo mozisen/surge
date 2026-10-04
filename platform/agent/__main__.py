@@ -94,6 +94,8 @@ class Agent:
             snapshot = inventory(self.cfg)
         except Exception:
             snapshot = {"error": "读取节点状态失败，请检查 db.json 和 Agent 日志", "instances": []}
+        if (self.state / "enforcement-pending.json").exists():
+            snapshot["error"] = "自动计费策略执行结果未确认，已停止自动重试；请在节点核对 enforcement-backup"
         if self.script_api:
             snapshot["script_api"] = self.script_api.status()
         task = self.api("/poll", {"snapshot": snapshot, "ready": future is None}).get("task")
