@@ -906,11 +906,17 @@ db_add_user() {
     # 添加用户 (支持多端口数组，包含 expire_date)
     _db_apply --arg c "$core" --arg p "$proto" --arg n "$name" --arg u "$uuid" \
        --argjson q "$quota" --arg cr "$created" --arg exp "$expire_date" '
+        def preserve_default:
+            if $p == "ss-legacy" and .users == null then
+                .users = [{name:"default",uuid:.password,quota:0,used:0,enabled:true,created:$cr}]
+            else . end;
         .[$c][$p] as $cfg |
         if ($cfg | type) == "array" then
+            .[$c][$p][0] |= preserve_default |
             # 多端口: 添加到第一个端口实例
             .[$c][$p][0].users = ((.[$c][$p][0].users // []) + [{name:$n,uuid:$u,quota:$q,used:0,enabled:true,created:$cr,expire_date:$exp}])
         else
+            .[$c][$p] |= preserve_default |
             # 单端口: 正常添加
             .[$c][$p].users = ((.[$c][$p].users // []) + [{name:$n,uuid:$u,quota:$q,used:0,enabled:true,created:$cr,expire_date:$exp}])
         end
@@ -2610,7 +2616,7 @@ _repair_singbox_stats_interactive() {
 _singbox_stats_config_ready() {
     [[ -f "$CFG/singbox.json" ]] || return 1
     local proto mappings name key keys="[]"
-    for proto in vless trojan hy2 tuic anytls; do
+    for proto in vless trojan hy2 tuic anytls ss-legacy; do
         mappings=$(_get_singbox_stat_user_mappings "$proto")
         [[ -n "$mappings" ]] || continue
         while IFS='|' read -r name key; do
@@ -3074,7 +3080,7 @@ _sync_all_user_traffic_unlocked() {
 
     # 所有支持命名用户计数的 Sing-box 协议。
     if [[ "$has_singbox" == "true" && "$singbox_failed" == false ]]; then
-        for proto in vless trojan hy2 tuic anytls; do
+        for proto in vless trojan hy2 tuic anytls ss-legacy; do
             db_exists "singbox" "$proto" || continue
             local mappings=$(_get_singbox_stat_user_mappings "$proto")
             [[ -z "$mappings" ]] && continue
@@ -3229,7 +3235,7 @@ get_all_traffic_stats() {
                     [[ "$xray_ok" == true ]] || status="统计不可用"
                 else
                     key=$(_singbox_stat_key_for_user "$proto" "$user"); raw="$singbox_stats"
-                    case "$proto" in vless|trojan|hy2|tuic|anytls) ;; *) supported=false ;; esac
+                    case "$proto" in vless|trojan|hy2|tuic|anytls|ss-legacy) ;; *) supported=false ;; esac
                     [[ "$singbox_ok" == true ]] || status="统计不可用"
                     [[ "$supported" == true ]] || status="统计不可用（未接入用户计数）"
                 fi
@@ -4897,6 +4903,43 @@ _add_single_xray_inbound() {
 }
 
 # 使用 jq 动态构建 inbound (重构版 - 只从数据库读取)
+# 普通 AEAD SS 的多用户配置不能复用 SS2022 的服务端密钥模型。
+# 只消费当前端口实例；显式空用户列表绝不能回退到原始密码。
+_ss_legacy_active_users() {
+    local cfg="$1" disabled_secret
+    disabled_secret=$(openssl rand -hex 32) || return 1
+    jq --arg today "$(date '+%Y-%m-%d')" --arg disabled "$disabled_secret" '
+        (if .users == null then [{name:"default", uuid:.password}]
+         else .users end) |
+        map(select(.enabled != false)
+            | select((.quota // 0) == 0 or (.used // 0) < .quota)
+            | select((.expire_date // "") == "" or .expire_date >= $today)
+            | {name:.name, password:.uuid}) |
+        if length == 0 then [{name:"disabled", password:$disabled}] else . end
+    ' <<< "$cfg"
+}
+
+_ss_legacy_xray_settings() {
+    local users
+    users=$(_ss_legacy_active_users "$1") || return 1
+    jq --argjson users "$users" '
+        .method as $method |
+        {network:"tcp,udp", clients:($users | map({
+            method:$method, password:.password, email:(.name + "@ss-legacy"), level:0
+        }))}
+    ' <<< "$1"
+}
+
+_ss_legacy_singbox_inbound() {
+    local users
+    users=$(_ss_legacy_active_users "$1") || return 1
+    jq --arg listen "$2" --argjson users "$users" '{
+        type:"shadowsocks", tag:("ss-legacy-in-" + (.port|tostring)),
+        listen:$listen, listen_port:(.port|tonumber), method:.method,
+        users:($users | map({name:("ss-legacy-" + .name), password:.password}))
+    }' <<< "$1"
+}
+
 add_xray_inbound_v2() {
     local protocol=$1
     
@@ -5456,7 +5499,14 @@ add_xray_inbound_v2() {
                 }' > "$tmp_inbound"
             fi
             ;;
-        ss2022|ss-legacy)
+        ss-legacy)
+            local ss_settings
+            ss_settings=$(_ss_legacy_xray_settings "$cfg") || return 1
+            jq -n --argjson port "$port" --arg tag "$inbound_tag" \
+                --arg listen_addr "$listen_addr" --argjson settings "$ss_settings" \
+                '{port:$port, listen:$listen_addr, protocol:"shadowsocks", settings:$settings, tag:$tag}' > "$tmp_inbound"
+            ;;
+        ss2022)
             jq -n \
                 --argjson port "$port" \
                 --arg method "$method" \
@@ -11655,7 +11705,10 @@ generate_singbox_config() {
                         tls:{enabled:true, certificate_path:$cert, key_path:$key}
                     }')
                 ;;
-            ss2022|ss-legacy)
+            ss-legacy)
+                inbound=$(_ss_legacy_singbox_inbound "$cfg" "$listen_addr") || return 1
+                ;;
+            ss2022)
                 local password=$(echo "$cfg" | jq -r '.password // empty')
                 local method=$(echo "$cfg" | jq -r '.method // empty')
                 inbound=$(jq -n \
@@ -22583,7 +22636,7 @@ do_install_server() {
                 esac
             done
             
-            local password=$(ask_password 16 "SS2022密码")
+            local password=$(ask_password 16 "SS密码")
             
             echo ""
             _line
@@ -27444,7 +27497,9 @@ _gen_user_share_link() {
         vless-ws-notls) link=$(gen_vless_ws_notls_link "$server_addr" "$display_port" "$credential" "$path" "$host" "$remark") ;;
         vmess-ws) link=$(gen_vmess_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
         ss2022) link=$(gen_ss2022_link "$server_addr" "$display_port" "$method" "$credential" "$remark") ;;
-        ss-legacy) link=$(gen_ss_legacy_link "$server_addr" "$display_port" "$method" "$credential" "$remark") ;;
+        ss-legacy)
+            link=$(gen_ss_legacy_link "$server_addr" "$display_port" "$method" "$credential" "$remark")
+            ;;
         hy2) link=$(gen_hy2_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
         trojan) link=$(gen_trojan_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
         trojan-ws) link=$(gen_trojan_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
@@ -28246,6 +28301,11 @@ _set_user_expire_date() {
 # 更新 Xray/Sing-box 配置文件中的用户列表、用户级路由规则、链式代理和负载均衡并重载服务
 _regenerate_config() {
     local core="$1" proto="$2"
+    if [[ "$core" == "xray" && "$proto" == "ss-legacy" ]]; then
+        # SS 必须使用完整生成器，不能落入下面 VLESS clients 的局部更新。
+        rebuild_and_reload_xray
+        return $?
+    fi
     if _snell_managed "$proto"; then
         # Snell 数据库操作已处理对应实例，不能顺便启动其他手动停止的用户。
         return 0
