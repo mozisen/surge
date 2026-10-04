@@ -1411,3 +1411,6 @@ pre {
     .tools .search { flex: 1; min-width: 0; }
     .tools .search input { width: 100%; }
 }
+
+.history-chart{padding:16px 0;border-bottom:1px solid var(--border,#e5e5e5)}.history-chart svg{width:100%;height:auto;display:block}.history-chart h3{margin:0}
+input[type="checkbox"]{accent-color:#181818}
