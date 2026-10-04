@@ -23,21 +23,21 @@ _build_singbox_stats_core() {
 }
 running=true
 _update_core_to_version Sing-box stable 1.15.0 vless-singbox install_singbox
-[[ "$(cat "$fixture/events")" == $'status\nbuild:1.15.0' ]]
+[[ "$(cat "$fixture/events")" == 'build:1.15.0' ]]
 : > "$fixture/events"
 update_singbox_core stable
-[[ "$(cat "$fixture/events")" == $'status\nbuild:1.15.0' ]]
+[[ "$(cat "$fixture/events")" == 'build:1.15.0' ]]
 : > "$fixture/events"
 install_singbox stable true 1.16.0
-[[ "$(cat "$fixture/events")" == $'status\nbuild:1.16.0' ]]
+[[ "$(cat "$fixture/events")" == 'build:1.16.0' ]]
 : > "$fixture/events"
 build_failed=true
 if _update_singbox_preserving_stats stable 1.15.0; then exit 1; fi
-[[ "$(cat "$fixture/events")" == $'status\nbuild:1.15.0' ]]
+[[ "$(cat "$fixture/events")" == 'build:1.15.0' ]]
 running=false; build_failed=false
 : > "$fixture/events"
 _update_singbox_preserving_stats stable 1.15.0
-[[ "$(cat "$fixture/events")" == $'status\nbuild:1.15.0\nstop' ]]
+[[ "$(cat "$fixture/events")" == 'build:1.15.0' ]]
 : > "$fixture/events"
 if _update_singbox_preserving_stats prerelease; then exit 1; fi
 [[ ! -s "$fixture/events" ]]
