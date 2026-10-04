@@ -1,4 +1,6 @@
-# 3.7.3-preview.quota.4
+# 3.7.3-preview.quota.5
+
+第五版补充：修复 Telegram 用户机器人启用时 cron 组件检查不完整、服务启动失败缺少诊断的问题；轮询就绪后再切换 webhook，失败不标记启用；菜单不再显示完整 Bot Token。详见 `TG-BOT-FIX.md`。保留此前 SS 多用户与配额修复。
 
 第四版补充：修复普通 SS 安装时误显示 SS2022 密码提示，以及新增用户独立密码未写入 Xray / Sing-box 入站的问题。有效用户按端口实例筛选，原节点端口和默认密码保留；Sing-box 普通 SS 用户纳入流量统计。详见 `SS-LEGACY-FIX.md`。
 

@@ -8,4 +8,6 @@
 
 如仍失败，请提供 `/etc/vless-reality/cron-service.log` 中的错误。该文件权限为 600，包含服务和包管理器诊断，不写入 Token。
 
-验证：`tests/tg-bot-cron.sh` 隔离模拟、现有 Shell 回归及语法检查。没有真实 VPS/Telegram 测试；需要真实统计核心的 `singbox-stats-live.sh` 未运行。当前为本地修复，尚未更新远程预览版或服务器。
+发布版本：`3.7.3-preview.quota.5`，GitHub 测试分支 `codex/ss-user-fix`，不创建 Release、不部署服务器。
+
+验证：`tests/tg-bot-cron.sh` 隔离模拟、现有 Shell 回归及语法检查。没有真实 VPS/Telegram 测试；需要真实统计核心的 `singbox-stats-live.sh` 未运行。
