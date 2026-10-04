@@ -3303,30 +3303,94 @@ cron_service_is_active() {
     if command -v rc-service >/dev/null 2>&1; then
         rc-service cronie status >/dev/null 2>&1 && return 0
         rc-service crond status >/dev/null 2>&1 && return 0
+        rc-service dcron status >/dev/null 2>&1 && return 0
+        rc-service cron status >/dev/null 2>&1 && return 0
     fi
     _pgrep crond && return 0
     _pgrep cron && return 0
     return 1
 }
 
-ensure_cron_service_running() {
-    cron_service_is_active && return 0
+_cron_daemon_path() {
+    local candidate
+    for candidate in "$(command -v cron 2>/dev/null)" "$(command -v crond 2>/dev/null)" /usr/sbin/cron /usr/sbin/crond /sbin/crond; do
+        [[ -n "$candidate" && -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    done
+    return 1
+}
 
+_install_cron_daemon() {
+    # 仅在用户主动启用定时任务时补装，不在后台修复中自动安装软件。
+    case "${DISTRO:-}" in
+        debian|ubuntu)
+            apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y cron
+            ;;
+        alpine)
+            apk add --no-cache cronie || apk add --no-cache dcron
+            ;;
+        centos|rhel|rocky|almalinux|fedora)
+            if command -v dnf >/dev/null 2>&1; then dnf install -y cronie
+            else yum install -y cronie; fi
+            ;;
+        *) _err "无法自动安装 cron，请安装系统对应的 cron/cronie 软件包"; return 1 ;;
+    esac
+}
+
+_start_cron_service() {
+    local unit daemon
+    if command -v systemctl >/dev/null 2>&1 && systemctl show-environment >/dev/null 2>&1; then
+        for unit in cron crond; do
+            # enable 失败不应短路 start（例如静态 unit）；不解除 masked 状态。
+            systemctl enable "$unit" || true
+            systemctl start "$unit" || continue
+            cron_service_is_active && return 0
+        done
+        return 1
+    fi
     if command -v rc-service >/dev/null 2>&1; then
-        rc-update add cronie default >/dev/null 2>&1 || rc-update add crond default >/dev/null 2>&1 || true
-        rc-service cronie start >/dev/null 2>&1 || rc-service crond start >/dev/null 2>&1 || true
+        for unit in cronie crond dcron cron; do
+            rc-update add "$unit" default || true
+            rc-service "$unit" start || continue
+            cron_service_is_active && return 0
+        done
+        return 1
     fi
-    if ! cron_service_is_active && command -v systemctl >/dev/null 2>&1; then
-        systemctl enable --now cron >/dev/null 2>&1 || systemctl enable --now crond >/dev/null 2>&1 || true
+    if command -v service >/dev/null 2>&1; then
+        service cron start || service crond start || true
+        cron_service_is_active && return 0
     fi
-    if ! cron_service_is_active && command -v service >/dev/null 2>&1; then
-        service cron start >/dev/null 2>&1 || service crond start >/dev/null 2>&1 || true
-    fi
-    if ! cron_service_is_active && command -v crond >/dev/null 2>&1; then
-        crond >/dev/null 2>&1 || true
-    fi
+    # 无 init 的精简容器同时兼容 Debian cron 和 BusyBox/cronie crond。
+    daemon=$(_cron_daemon_path) || return 1
+    "$daemon" || return 1
+    _warn "当前环境没有可用的服务管理器，cron 已直接启动；重启后的自动启动需由宿主环境配置"
+}
 
-    cron_service_is_active
+ensure_cron_service_running() {
+    local allow_install="${1:-false}" log_file="$CFG/cron-service.log" attempt
+    if cron_service_is_active && command -v crontab >/dev/null 2>&1; then return 0; fi
+    mkdir -p "$CFG" || return 1
+    (umask 077; touch "$log_file") && chmod 600 "$log_file" || return 1
+    printf '\n=== %s cron 检查 ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$log_file"
+    if ! _cron_daemon_path >/dev/null || ! command -v crontab >/dev/null 2>&1; then
+        if [[ "$allow_install" != true ]]; then
+            _err "cron 组件缺失，请在菜单中重新启用以安装依赖"
+            return 1
+        fi
+        _info "安装缺失的 cron 守护程序..."
+        if ! _install_cron_daemon >> "$log_file" 2>&1; then
+            _err "cron 安装失败，请查看 $log_file"
+            return 1
+        fi
+    fi
+    if _start_cron_service >> "$log_file" 2>&1; then
+        for attempt in 1 2 3; do
+            cron_service_is_active && return 0
+            sleep 1
+        done
+    fi
+    if cron_service_is_active; then return 0; fi
+    _err "cron 启动失败，请查看 ${log_file}（检查服务是否被屏蔽、权限及系统限制）"
+    return 1
 }
 
 install_cron_entry() {
@@ -3364,6 +3428,7 @@ setup_traffic_cron() {
     log_file="$CFG/traffic-sync.log"
     cron_cmd="$(build_cron_command "*/$interval * * * *" "$script_path" "--sync-traffic" "$log_file") # sync-traffic"
 
+    ensure_cron_service_running "$([[ "$silent" == true ]] && echo false || echo true)" || return 1
     if install_cron_entry "sync-traffic" "$cron_cmd"; then
         set_traffic_interval "$interval"
         if ! ensure_cron_service_running; then
@@ -3399,6 +3464,7 @@ setup_tg_user_bot_cron() {
     log_file="$CFG/tg-user-bot.log"
     cron_cmd="$(build_cron_command "* * * * *" "$script_path" "--tg-bot-poll" "$log_file") # tg-user-bot"
 
+    ensure_cron_service_running "$([[ "$silent" == true ]] && echo false || echo true)" || return 1
     if install_cron_entry "tg-user-bot" "$cron_cmd"; then
         if ! ensure_cron_service_running; then
             [[ "$silent" == "true" ]] || _err "机器人规则已写入，但 cron 服务未运行"
@@ -28688,6 +28754,39 @@ _tg_unbind_user() {
     fi
 }
 
+_enable_tg_user_bot() {
+    local response bot_username
+    _info "验证 Telegram Bot Token..."
+    response=$(tg_bot_api_request "getMe") || { _err "Bot Token 验证请求失败"; return 1; }
+    jq -e '.ok == true' >/dev/null 2>&1 <<< "$response" || { _err "Bot Token 验证失败"; return 1; }
+    bot_username=$(jq -r '.result.username // empty' <<< "$response")
+    # 先确认本地轮询可运行，再切换 webhook，避免本地失败影响原来的机器人。
+    if ! setup_tg_user_bot_cron; then
+        tg_set_config "user_bot_enabled" "false"
+        return 1
+    fi
+    response=$(tg_bot_api_request "deleteWebhook" --data-urlencode "drop_pending_updates=false") || response=""
+    if ! jq -e '.ok == true' >/dev/null 2>&1 <<< "$response"; then
+        remove_tg_user_bot_cron
+        tg_set_config "user_bot_enabled" "false"
+        _err "切换 Telegram 轮询失败，用户机器人未启用"
+        return 1
+    fi
+    if ! tg_set_config "user_bot_enabled" "true"; then
+        remove_tg_user_bot_cron
+        _err "保存机器人启用状态失败"
+        return 1
+    fi
+    tg_bot_api_request "setMyCommands" --data-urlencode 'commands=[{"command":"traffic","description":"查询个人流量"},{"command":"status","description":"查询账号状态"},{"command":"bind","description":"绑定代理账号"},{"command":"unbind","description":"解除绑定"},{"command":"help","description":"查看帮助"}]' >/dev/null 2>&1 || true
+    _ok "用户机器人已启用${bot_username:+: @${bot_username}}"
+    if ! traffic_cron_entry_exists; then
+        setup_traffic_cron "$(get_traffic_interval)" || \
+            _warn "流量同步任务启用失败，机器人将显示数据库中的已有统计"
+    fi
+    return 0
+}
+
+
 _configure_tg_user_bot() {
     init_tg_config
     while true; do
@@ -28712,7 +28811,11 @@ _configure_tg_user_bot() {
         echo -e "  用户机器人: $bot_status"
         echo -e "  轮询任务: $cron_status"
         echo -e "  已绑定用户: ${G}$binding_count${NC}"
-        echo -e "  Bot Token: ${bot_token:+${G}复用管理员配置${NC}}${bot_token:-${D}未配置${NC}}"
+        if [[ -n "$bot_token" ]]; then
+            echo -e "  Bot Token: ${G}复用管理员配置（已隐藏）${NC}"
+        else
+            echo -e "  Bot Token: ${D}未配置${NC}"
+        fi
         [[ "$enabled" != "true" ]] && echo -e "  ${D}提示: 启用后使用 getUpdates 轮询，并移除该 Bot 的现有 webhook${NC}"
         _line
         if [[ "$enabled" == "true" ]]; then
@@ -28740,27 +28843,7 @@ _configure_tg_user_bot() {
                     if [[ -z "$bot_token" ]]; then
                         _err "请先在上级 TG 通知配置中设置 Bot Token"
                     else
-                        _info "验证 Telegram Bot Token..."
-                        response=$(tg_bot_api_request "getMe")
-                        if ! jq -e '.ok == true' >/dev/null 2>&1 <<< "$response"; then
-                            _err "Bot Token 验证失败"
-                        else
-                            bot_username=$(jq -r '.result.username // empty' <<< "$response")
-                            # getUpdates 与 webhook 不能同时使用；启用时切换到轮询模式。
-                            tg_bot_api_request "deleteWebhook" --data-urlencode "drop_pending_updates=false" >/dev/null 2>&1 || true
-                            tg_bot_api_request "setMyCommands" --data-urlencode 'commands=[{"command":"traffic","description":"查询个人流量"},{"command":"status","description":"查询账号状态"},{"command":"bind","description":"绑定代理账号"},{"command":"unbind","description":"解除绑定"},{"command":"help","description":"查看帮助"}]' >/dev/null 2>&1 || true
-                            tg_set_config "user_bot_enabled" "true"
-                            if setup_tg_user_bot_cron; then
-                                _ok "用户机器人已启用${bot_username:+: @${bot_username}}"
-                                if ! crontab -l 2>/dev/null | grep -q "sync-traffic"; then
-                                    _info "启用流量同步任务，供用户查询最新累计流量..."
-                                    setup_traffic_cron "$(get_traffic_interval)" || \
-                                        _warn "流量同步任务启用失败，机器人将显示数据库中的已有统计"
-                                fi
-                            else
-                                tg_set_config "user_bot_enabled" "false"
-                            fi
-                        fi
+                        _enable_tg_user_bot
                     fi
                 fi
                 _pause
@@ -28826,7 +28909,11 @@ _configure_tg_notify() {
         echo -e "  流量检测: $cron_status"
         echo -e "  每日报告: $daily_status"
         echo -e "  用户查询机器人: $user_bot_status"
-        echo -e "  Bot Token: ${bot_token:+${G}已配置${NC}}${bot_token:-${D}未配置${NC}}"
+        if [[ -n "$bot_token" ]]; then
+            echo -e "  Bot Token: ${G}已配置（已隐藏）${NC}"
+        else
+            echo -e "  Bot Token: ${D}未配置${NC}"
+        fi
         echo -e "  Chat ID: ${chat_id:+${G}$chat_id${NC}}${chat_id:-${D}未配置${NC}}"
         echo -e "  服务器名: ${server_name:+${G}$server_name${NC}}${server_name:-${D}未设置${NC}}"
         _line
