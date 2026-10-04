@@ -1,6 +1,6 @@
 # 普通 Shadowsocks 用户修复
 
-基于 `codex/quota-enforcement-preview` 的 `28ccfe5`，不修改版本号、不创建 Release。
+基于 `codex/quota-enforcement-preview` 的 `28ccfe5`，发布预览版本 `3.7.3-preview.quota.4`，分支 `codex/ss-user-fix`，不创建 Release。
 
 ## 修复
 
