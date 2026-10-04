@@ -10,10 +10,29 @@ from .store import Store
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description="Vaio Panel 管理工具")
-    parser.add_argument("command", choices=["init", "serve"])
+    parser.add_argument("command", choices=["init", "serve", "backup", "verify-backup", "restore"])
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--name", help="备份文件名")
     args = parser.parse_args()
+    path = os.environ.get("VAIO_DATABASE", str(Path(__file__).resolve().parent.parent / "data/panel.sqlite"))
+    if args.command in ("backup", "verify-backup", "restore"):
+        from . import backups
+        store = Store(path)
+        if args.command == "backup":
+            print(backups.create(store))
+        elif args.command == "verify-backup":
+            print(backups.drill(store, args.name))
+        else:
+            import fcntl
+            with open(path + ".monitor.lock", "a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise SystemExit("请先停止面板服务，再执行恢复")
+                backups.restore(store, args.name)
+            print("数据库已恢复；旧会话已失效，请核对未知任务")
+        return
     if args.command == "init":
         username = input("管理员账号 [admin]: ").strip() or "admin"
         if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):

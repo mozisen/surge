@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.3-preview.2"
+readonly VERSION="3.7.3-preview.3"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2890,6 +2890,8 @@ _sync_all_user_traffic_unlocked() {
             jq -r '.stat[]? | "\(.name // .Name) \(.value // .Value // 0)"' >> "$tmp_stats" 2>/dev/null || true
     fi
 
+    local xray_stats_ok=false
+    [[ -s "$tmp_stats" ]] && xray_stats_ok=true
     local singbox_failed=false
     if [[ "$has_singbox" == "true" ]]; then
         if ! singbox_stats_available || ! singbox_api_query "user>>>" "$reset" >> "$tmp_stats"; then
@@ -3020,6 +3022,12 @@ _sync_all_user_traffic_unlocked() {
         done
     fi
     
+    if [[ "$xray_stats_ok" == true ]]; then
+        _db_apply --argjson at "$(date +%s)" '.meta.traffic_observed_xray = $at' || return 1
+    fi
+    if [[ "$has_singbox" == true && "$singbox_failed" == false ]]; then
+        _db_apply --argjson at "$(date +%s)" '.meta.traffic_observed_singbox = $at' || return 1
+    fi
     rm -f "$tmp_stats"
     
     # 批量处理完成后统一重载配置（避免循环内多次重启）
@@ -3336,22 +3344,23 @@ reset_monthly_user_traffic() {
     [[ ! -f "$DB_FILE" ]] && return 0
     local month_key
     month_key=$(date +%Y-%m)
-    echo "$month_key" > "$TRAFFIC_MONTHLY_RESET_LAST_FILE"
-
     _db_apply '
       if .xray then
         .xray |= with_entries(
           .value |= (
             if type == "array" then
-              map(if .users then .users |= map(.used = 0 | .enabled = true | del(.alert.last_alert_percent, .alert.quota_exceeded_notified)) else . end)
+              map(if .users then .users |= map(if has("panel_quota") then . else .used = 0 | .enabled = true | del(.alert.last_alert_percent, .alert.quota_exceeded_notified) end) else . end)
             else
-              if .users then .users |= map(.used = 0 | .enabled = true | del(.alert.last_alert_percent, .alert.quota_exceeded_notified)) else . end
+              if .users then .users |= map(if has("panel_quota") then . else .used = 0 | .enabled = true | del(.alert.last_alert_percent, .alert.quota_exceeded_notified) end) else . end
             end
           )
         )
       else . end
     '
-    _ok "已按月重置 Xray 用户流量"
+    local rc=$?
+    [[ "$rc" == 0 ]] || return "$rc"
+    echo "$month_key" > "$TRAFFIC_MONTHLY_RESET_LAST_FILE"
+    _ok "已按月重置 Xray 用户流量（面板计费用户独立重置）"
 }
 
 check_monthly_traffic_reset() {
@@ -4155,7 +4164,9 @@ _platform_render_inbound() {
       ($r.users // [{name:"default",uuid:($r.uuid // $r.password // $r.psk),enabled:true}]) as $all |
       [$all[] | select(.enabled != false) |
         select((.expire_date // "") == "" or .expire_date >= $today) |
-        select((.quota // 0) == 0 or (.used // 0) < .quota)] as $users |
+        select((.quota // 0) == 0 or (.used // 0) < .quota) |
+        select((.panel_quota // 0) == 0 or ((.panel_used // 0) +
+          (if (.used // 0) >= (.panel_last_used // .used // 0) then (.used // 0) - (.panel_last_used // .used // 0) else (.used // 0) end)) < .panel_quota)] as $users |
       if ($p != "vless" and $p != "trojan" and $p != "hy2" and $p != "anytls") or
          ($core != "xray" and $core != "singbox") or
          ($core == "xray" and $p != "vless" and $p != "trojan") then error("unsupported managed inbound")
@@ -30529,6 +30540,9 @@ _snell_prepare_user() {
     expire=$(jq -r '.users[0].expire_date // ""' <<< "$row")
     [[ "$enabled" == true ]] || return 2
     (( quota == 0 || used < quota )) || return 2
+    quota=$(jq -r '.users[0].panel_quota // 0' <<< "$row")
+    used=$(jq -r '.users[0] | (.panel_used // 0) + (if (.used // 0) >= (.panel_last_used // .used // 0) then (.used // 0) - (.panel_last_used // .used // 0) else (.used // 0) end)' <<< "$row")
+    (( quota == 0 || used < quota )) || return 2
     [[ -z "$expire" || "$expire" > "$(date +%F)" || "$expire" == "$(date +%F)" ]] || return 2
     _snell_counter_prepare "$id" "$(jq -r .port <<< "$row")"
 }
@@ -30605,13 +30619,13 @@ _snell_sync_traffic() {
             [[ -n "$generation" ]] || continue
             # 累计值与基线在同一个数据库事务中提交。重启/规则重建后 generation
             # 改变，新计数从零累计；从不 reset 内核计数器，避免读取窗口丢流量。
-            _db_apply --arg p "$proto" --arg id "$id" --arg g "$generation" --argjson up "$up" --argjson down "$down" '
+            _db_apply --arg p "$proto" --arg id "$id" --arg g "$generation" --argjson up "$up" --argjson down "$down" --argjson at "$(date +%s)" '
                 .xray[$p] |= map(if .snell_id == $id then
                     .users[0] |= (
                         (if .counter_generation == $g then (.counter_up // 0) else 0 end) as $u |
                         (if .counter_generation == $g then (.counter_down // 0) else 0 end) as $d |
                         .used = ((.used // 0) + ([$up - $u, 0]|max) + ([$down - $d, 0]|max)) |
-                        .counter_up = $up | .counter_down = $down | .counter_generation = $g
+                        .counter_up = $up | .counter_down = $down | .counter_generation = $g | .traffic_observed_at = $at
                     ) else . end)' || return 1
         done <<< "$(_snell_rows "$proto")"
         while IFS= read -r row; do

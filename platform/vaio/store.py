@@ -26,6 +26,8 @@ class Store:
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), mode=0o700, exist_ok=True)
         with self.connect() as db:
             db.executescript(SCHEMA)
+            from .monitor import SCHEMA as MONITOR_SCHEMA
+            db.executescript(MONITOR_SCHEMA)
             db.execute("BEGIN IMMEDIATE")
             if db.execute("PRAGMA user_version").fetchone()[0] > 1:
                 raise RuntimeError("数据库来自更新版本，请使用对应版本面板")

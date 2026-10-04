@@ -53,8 +53,8 @@ def validate_task(data):
     if not isinstance(params, dict):
         raise ValueError("参数无效")
     allowed = {"install": {"sni", "name"} | ADVANCED_INSTALL_FIELDS, "update": {"port"},
-               "user_add": {"name", "quota_gb", "expire_date"},
-               "user_update": {"name", "quota_gb", "expire_date", "enabled", "reset_credentials"},
+               "user_add": {"name", "quota_gb", "reset_day", "expire_date"},
+               "user_update": {"name", "quota_gb", "reset_day", "expire_date", "enabled", "reset_credentials"},
                "user_delete": {"name"}, "share": {"name", "host"}}
     if set(params) - allowed.get(action, set()):
         raise ValueError("不支持的参数")
@@ -73,6 +73,8 @@ def validate_task(data):
         raise ValueError("用户状态无效")
     if "quota_gb" in params and (type(params["quota_gb"]) is not int or not 0 <= params["quota_gb"] <= 999999):
         raise ValueError("配额必须为 0–999999 GiB")
+    if "reset_day" in params and (type(params["reset_day"]) is not int or not 0 <= params["reset_day"] <= 28):
+        raise ValueError("月度重置日必须为 1–28，0 表示不自动重置")
     if params.get("expire_date"):
         try:
             datetime.date.fromisoformat(params["expire_date"])
@@ -90,7 +92,8 @@ def validate_task(data):
 def config_revision(db):
     # Counters and notification metadata change independently of configuration.
     volatile = {"used", "counter_up", "counter_down", "counter_generation", "last_alert_percent",
-                "last_alert_date", "last_expire_notice", "updated", "last_sync"}
+                "last_alert_date", "last_expire_notice", "updated", "last_sync", "traffic_observed_at",
+                "traffic_observed_xray", "traffic_observed_singbox", "panel_used", "panel_last_used", "panel_cycle"}
     def clean(value):
         if isinstance(value, dict):
             return {k: clean(v) for k, v in value.items() if k not in volatile and not k.startswith("last_traffic_")}

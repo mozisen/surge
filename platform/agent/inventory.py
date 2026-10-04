@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .billing import effective_usage, traffic_state
 from vaio import __version__
 from vaio.common import PROTOCOLS, PROTOCOL_CORES, config_revision, write_capabilities
 
@@ -78,11 +79,11 @@ def inventory(cfg, status=service_status):
             services[service] = status(service)
         instances.append({"core": core, "protocol": proto, "port": row["port"],
                           "service": service, "status": services[service], "managed": mutable(core, proto, row),
-                          "sni": row.get("sni", ""), "users": [
-                              {k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("used", 0), ("quota", 0), ("expire_date", ""))}
+                          "sni": row.get("sni", ""), "traffic_state": traffic_state(db, core, proto, row), "users": [
+                              {**{k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("expire_date", ""))}, "used": effective_usage(u)[0], "quota": effective_usage(u)[1], "reset_day": u.get("panel_reset_day", 0)}
                               for u in users_for(row)]})
     return {"revision": config_revision(db), "instances": instances, "write_capabilities": write_capabilities(), "task_api_version": 2,
-            "install_options_version": 2,
+            "install_options_version": 2, "billing_version": 1,
             "hostname": platform.node(), "os": platform.system() + " " + platform.release(),
             "arch": platform.machine(), "agent_version": __version__, "metrics": metrics(),
             "traffic_status": db.get("meta", {}).get("last_traffic_sync_status", "unavailable"), "at": time.time()}
@@ -126,6 +127,7 @@ def sanitize_snapshot(snapshot):
         for key in ("protocol_count", "instance_count"):
             if type(api.get(key)) is int and 0 <= api[key] <= 1000:
                 clean["script_api"][key] = api[key]
+    clean["billing_version"] = 1 if snapshot.get("billing_version") == 1 else 0
     clean["instances"] = []
     clean["task_api_version"] = 2 if snapshot.get("task_api_version") == 2 else 1
     clean["install_options_version"] = snapshot.get("install_options_version") if type(snapshot.get("install_options_version")) is int and snapshot["install_options_version"] in (1, 2) else 0
@@ -138,10 +140,11 @@ def sanitize_snapshot(snapshot):
         if not isinstance(item, dict) or type(item.get("port")) is not int or not 1 <= item["port"] <= 65535:
             raise ValueError("实例端口无效")
         clean_item = {k: text(item.get(k), 100) for k in ("core", "protocol", "service", "status", "sni")}
+        clean_item["traffic_state"] = item.get("traffic_state") if item.get("traffic_state") in ("ready", "unavailable", "unsupported") else "unavailable"
         clean_item.update(port=item["port"], managed=item.get("managed") is True, users=[])
         for user in item.get("users", [])[:1000]:
             clean_item["users"].append({"name": text(user.get("name"), 32), "enabled": user.get("enabled") is True,
                                         "used": max(0, int(user.get("used", 0))), "quota": max(0, int(user.get("quota", 0))),
-                                        "expire_date": text(user.get("expire_date"), 10)})
+                                        "reset_day": max(0, min(28, int(user.get("reset_day", 0)))), "expire_date": text(user.get("expire_date"), 10)})
         clean["instances"].append(clean_item)
     return clean

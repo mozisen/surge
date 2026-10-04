@@ -4,7 +4,9 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 load() { eval "$(awk -v fn="$1" 'index($0, fn "() {") == 1 {on=1} on {print} on && $0 == "}" {exit}' "$repo/vless-server.sh")"; }
-for fn in singbox_api_query _singbox_stats_proto _sync_all_user_traffic_unlocked _get_singbox_stat_user_mappings db_exists db_get_user_field db_list_protocols _singbox_stats_config_ready; do load "$fn"; done
+for fn in _db_apply singbox_api_query _singbox_stats_proto _sync_all_user_traffic_unlocked _get_singbox_stat_user_mappings db_exists db_get_user_field db_list_protocols _singbox_stats_config_ready; do load "$fn"; done
+_db_lock_acquire() { :; }
+_db_lock_release() { :; }
 SINGBOX_V2RAY_API_PORT=10086
 grpcurl() {
     printf '%s\n' "$*" > "$fixture/args"
@@ -47,6 +49,7 @@ mock_response=$(jq -n '{stat:(["vless","trojan","hy2","tuic","anytls"] | map({na
 _sync_all_user_traffic_unlocked true
 jq -e '[.singbox[].users[0].used] | all(. == 123)' "$DB_FILE" >/dev/null
 [[ "$(cat "$fixture/result")" == ok ]]
+jq -e ".meta.traffic_observed_singbox > 0" "$DB_FILE" >/dev/null
 mock_response='{}'
 _sync_all_user_traffic_unlocked true
 jq -e '[.singbox[].users[0].used] | all(. == 123)' "$DB_FILE" >/dev/null

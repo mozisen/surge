@@ -14,9 +14,10 @@ import uuid
 from pathlib import Path
 
 from .inventory import read_db, rows, service_for, users_for
+from .billing import effective_usage
 
 ROOT = Path(__file__).resolve().parent.parent
-UPSTREAM_SHA = "4c83a5cda311efd5969906467088b49e0daeea5d97ffd8cc0b57c7369788e1f8"
+UPSTREAM_SHA = "100a35a6fd71595a58aba0d2b79ad71d6c59e6d4e7844f7398a32b24388b0e61"
 
 
 def atomic_write(path, content):
@@ -44,7 +45,7 @@ def active_users(row):
     today = datetime.date.today().isoformat()
     return [u for u in users_for(row) if u.get("enabled", True)
             and (not u.get("expire_date") or u["expire_date"] >= today)
-            and (not u.get("quota") or u.get("used", 0) < u["quota"])]
+            and (not effective_usage(u)[1] or effective_usage(u)[0] < effective_usage(u)[1])]
 
 
 def render_inbound(proto, row, previous=None, core=None):

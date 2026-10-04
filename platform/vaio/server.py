@@ -51,6 +51,9 @@ def create_app(config=None):
         raise ValueError("公网面板必须设置 HTTPS 地址")
     store = Store(app.config["DATABASE"])
     app.extensions["store"] = store
+    if not app.config["TESTING"] and os.environ.get("VAIO_MONITOR", "1") != "0":
+        from .monitor import start
+        start(store)
     secure = url.scheme == "https"
     bundle = None
 
@@ -112,6 +115,67 @@ def create_app(config=None):
     @app.get("/")
     def index():
         return send_file(ROOT / "web/index.html")
+
+    @app.get("/api/monitor")
+    @admin
+    def monitor_get():
+        from .monitor import settings
+        with store.connect() as db:
+            events = [dict(r) for r in db.execute("SELECT * FROM notifications ORDER BY id DESC LIMIT 100")]
+        return jsonify(config=settings(store), events=events, heartbeat=store.setting("monitor_heartbeat"))
+
+    @app.post("/api/monitor")
+    @admin
+    def monitor_save():
+        from .monitor import save_settings
+        save_settings(store, body())
+        with store.connect() as db:
+            audit(db, "notification.settings")
+        return jsonify(ok=True)
+
+    @app.post("/api/monitor/test")
+    @admin
+    def monitor_test():
+        from .monitor import settings
+        if not settings(store, True).get("enabled"):
+            raise ValueError("请先保存并启用通知渠道")
+        with store.connect() as db:
+            recent = db.execute("SELECT 1 FROM notifications WHERE title='通知渠道测试' AND at>?", (time.time()-60,)).fetchone()
+            if recent:
+                raise ValueError("请等待一分钟后再发送测试")
+            db.execute("INSERT INTO notifications(at,title,status) VALUES(?,?,'pending')", (time.time(), "通知渠道测试"))
+        return jsonify(ok=True)
+
+    @app.get("/api/nodes/<node_id>/history")
+    @admin
+    def node_history(node_id):
+        with store.connect() as db:
+            data = [{"at": r["bucket"] * 60, **json.loads(r["metrics"])} for r in db.execute("SELECT bucket,metrics FROM samples WHERE node_id=? AND bucket>=? ORDER BY bucket", (node_id, int(time.time()//60)-1440))]
+        return jsonify(samples=data)
+
+    @app.get("/api/backups")
+    @admin
+    def backup_list():
+        from .backups import listing
+        return jsonify(backups=listing(store))
+
+    @app.post("/api/backups")
+    @admin
+    def backup_create():
+        from .backups import create
+        name = create(store)
+        with store.connect() as db:
+            audit(db, "backup.create", detail=name)
+        return jsonify(name=name)
+
+    @app.post("/api/backups/verify")
+    @admin
+    def backup_verify():
+        from .backups import drill
+        data = drill(store, body().get("name"))
+        with store.connect() as db:
+            audit(db, "backup.verify")
+        return jsonify(ok=True, **data)
 
     @app.get("/healthz")
     def health():
@@ -426,6 +490,7 @@ def create_app(config=None):
             if not current:
                 return jsonify(error="节点身份已失效"), 401
             db.execute("UPDATE nodes SET last_seen=?,snapshot=? WHERE id=?", (time.time(), json.dumps(snapshot), node_id))
+            db.execute("INSERT OR IGNORE INTO samples VALUES(?,?,?)", (node_id, int(time.time() // 60), json.dumps(snapshot.get("metrics", {}))))
             # Ambiguous tasks are never automatically replayed.
             db.execute("UPDATE tasks SET status='unknown',message='执行结果未确认；请核对节点后重新操作',finished=? WHERE node_id=? AND status='running' AND started<?",
                        (time.time(), node_id, time.time() - 2100))
@@ -481,6 +546,8 @@ def create_app(config=None):
             node = db.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
             if not node or node["deleted"] or node["revoked"] or not node["last_seen"] or time.time() - node["last_seen"] > 45:
                 return jsonify(error="节点离线或身份已撤销"), 409
+            if ("quota_gb" in task["params"] or "reset_day" in task["params"]) and json.loads(node["snapshot"]).get("billing_version") != 1:
+                return jsonify(error="请先升级节点程序以使用计费管理"), 409
             if node["maintenance"]:
                 return jsonify(error="节点正在维护，请稍后再试"), 409
             capabilities = json.loads(node["snapshot"]).get("write_capabilities", [])

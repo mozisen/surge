@@ -14,6 +14,7 @@ from urllib.parse import quote, urlencode
 from vaio.common import MUTATIONS, config_revision, validate_task
 from .inventory import mutable, read_db, rows, service_for, users_for
 from .runtime import Runtime, active_users, atomic_write
+from .billing import advance, configure, traffic_state
 
 
 class TransactionUnknown(RuntimeError):
@@ -210,8 +211,10 @@ class Bridge:
                         raise ValueError("默认用户请禁用；保留记录以兼容原脚本")
                     users.remove(user)
                 else:
-                    if params.get("quota_gb", 0) > 0:
-                        raise ValueError("首版配额为只读：请在原脚本配置并确认统计接口；面板支持用户启停与到期日期")
+                    if "quota_gb" in params or "reset_day" in params:
+                        if (params.get("quota_gb", user.get("panel_quota", 0)) or params.get("reset_day", 0)) and traffic_state(db, core, proto, before or after) != "ready":
+                            raise ValueError("此实例没有最近 15 分钟内的可靠流量统计，请先检查原脚本的定时统计任务")
+                        configure(user, params)
                     if "expire_date" in params:
                         user["expire_date"] = params["expire_date"]
                     if "enabled" in params:
@@ -223,6 +226,8 @@ class Bridge:
                             if old_credential is not None and after.get(field) == old_credential:
                                 after[field] = user["uuid"]
             if after:
+                for billing_user in users_for(after):
+                    advance(billing_user)
                 after["panel_managed"] = True
                 if not proto.startswith("snell"):
                     # Keep routing tags stable when the CLI subsequently changes a port.
@@ -309,23 +314,48 @@ class Bridge:
         """Locally enforce expiry / externally collected quotas even if the panel is offline."""
         with self.locked():
             db = read_db(self.cfg)
+            original = copy.deepcopy(db)
+            for _, _, item in rows(db):
+                for user in users_for(item):
+                    advance(user)
             statepath = self.state / "enforcement.json"
             state = json.loads(statepath.read_text()) if statepath.exists() else {}
+            plans, saved = [], {}
             for core, proto, row in rows(db):
                 if not row.get("panel_managed") or not mutable(core, proto, row):
                     continue
-                if service_for(core, proto, row) in db.get("meta", {}).get("panel_paused_services", []):
+                service = service_for(core, proto, row)
+                if service in db.get("meta", {}).get("panel_paused_services", []):
                     continue
                 key = f'{core}:{proto}:{row["port"]}'
                 allowed = [u["name"] for u in active_users(row)]
                 if state.get(key) != allowed:
-                    service = service_for(core, proto, row)
-                    files = {str(p): p.read_bytes() if p.exists() else None for p in self.runtime.paths(core, proto, row)}
-                    running, enabled = self.runtime.is_running(service), self.runtime.is_enabled(service)
-                    try:
-                        self.runtime.apply(core, proto, row, row, db)
-                    except Exception:
-                        self.runtime.restore(service, files, running, enabled)
-                        raise
+                    if service not in saved:
+                        saved[service] = ({}, self.runtime.is_running(service), self.runtime.is_enabled(service))
+                    for path in self.runtime.paths(core, proto, row):
+                        saved[service][0].setdefault(str(path), path.read_bytes() if path.exists() else None)
+                    plans.append((core, proto, row))
                     state[key] = allowed
+            if db != original or plans:
+                backup = self.state / "enforcement-backup"
+                backup.mkdir(mode=0o700, exist_ok=True)
+                atomic_write(backup / "db.json", json.dumps(original))
+                manifest = {}
+                for service, (files, running, enabled) in saved.items():
+                    manifest[service] = dict(running=running, enabled=enabled, files={})
+                    for path, content in files.items():
+                        name = hashlib.sha256(path.encode()).hexdigest()
+                        if content is not None:
+                            atomic_write(backup / name, content)
+                        manifest[service]["files"][path] = name if content is not None else None
+                atomic_write(backup / "manifest.json", json.dumps(manifest))
+                self.write(db)
+                try:
+                    for core, proto, row in plans:
+                        self.runtime.apply(core, proto, row, row, db)
+                except Exception:
+                    self.write(original)
+                    for service, (files, running, enabled) in saved.items():
+                        self.runtime.restore(service, files, running, enabled)
+                    raise
             atomic_write(statepath, json.dumps(state))
