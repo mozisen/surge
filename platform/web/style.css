@@ -1423,3 +1423,7 @@ input[type="checkbox"]{accent-color:#181818}
 .connection-qr { display: block; max-width: 100%; height: auto; background: white; padding: 12px; }
 
 #config-details { white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 2; line-height: 1.65; }
+
+.node-traffic { display:flex; flex-wrap:wrap; gap:8px 24px; margin:16px 0; color:var(--muted); font-size:13px; }
+.traffic-note { margin:12px 0 24px; line-height:1.7; }
+button[aria-current="true"] { font-weight:700; text-decoration:underline; }

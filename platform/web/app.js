@@ -176,7 +176,7 @@ function login() {
 }
 
 function shell(content, section) {
-    $('#app').innerHTML = `<div class="shell"><aside class="sidebar"><nav class="nav" aria-label="主导航"><a href="#overview" class="${section==='overview'?'active':''}">${icon('grid')}总览</a><a href="#nodes" class="${section==='nodes'?'active':''}">${icon('server')}服务器节点</a><a href="#tasks" class="${section==='tasks'?'active':''}">${icon('tasks')}任务记录</a><a href="#monitor" class="${section==='monitor'?'active':''}">${icon('pulse')}监控与通知</a><a href="#backups" class="${section==='backups'?'active':''}">${icon('server')}备份恢复</a><a href="#audit" class="${section==='audit'?'active':''}">${icon('shield')}操作审计</a></nav></aside><div class="workspace"><header class="topbar">${brand}<div class="breadcrumbs"><strong>${({overview:'运行总览',nodes:'服务器节点',tasks:'任务记录',audit:'操作审计',monitor:'监控与通知',backups:'备份恢复'})[section]}</strong></div><div class="top-actions"><span class="live"><span class="dot"></span>更新于 ${esc(lastRefresh)}</span><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></header><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div></div>`;
+    $('#app').innerHTML = `<div class="shell"><aside class="sidebar"><nav class="nav" aria-label="主导航"><a href="#overview" class="${section==='overview'?'active':''}">${icon('grid')}总览</a><a href="#nodes" class="${section==='nodes'?'active':''}">${icon('server')}服务器节点</a><a href="#tasks" class="${section==='tasks'?'active':''}">${icon('tasks')}任务记录</a><a href="#traffic" class="${section==='traffic'?'active':''}">${icon('pulse')}流量统计</a><a href="#monitor" class="${section==='monitor'?'active':''}">${icon('pulse')}监控与通知</a><a href="#backups" class="${section==='backups'?'active':''}">${icon('server')}备份恢复</a><a href="#audit" class="${section==='audit'?'active':''}">${icon('shield')}操作审计</a></nav></aside><div class="workspace"><header class="topbar">${brand}<div class="breadcrumbs"><strong>${({traffic:'流量统计',overview:'运行总览',nodes:'服务器节点',tasks:'任务记录',audit:'操作审计',monitor:'监控与通知',backups:'备份恢复'})[section]}</strong></div><div class="top-actions"><span class="live"><span class="dot"></span>更新于 ${esc(lastRefresh)}</span><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></header><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div></div>`;
 }
 
 function stat(title, value, foot, ico, positive = false) {
@@ -199,7 +199,7 @@ function card(node) {
         instances = s.instances || [];
     const memory = m.memory_total ? Math.min(100, m.memory_used / m.memory_total * 100) : null;
     const disk = m.disk_total ? Math.min(100, m.disk_used / m.disk_total * 100) : null;
-    return `<article class="node-card"><div class="node-top"><div class="node-symbol">${icon('server')}</div>${badge(node.status)}</div><h3><a href="#nodes/${node.id}">${esc(node.name)}</a></h3><div class="node-group">${esc(node.group_name)} · ${esc(s.hostname || '等待首次连接')}</div><div class="node-metrics"><div><div class="metric-caption"><span>内存</span><span>${memory==null?'—':memory.toFixed(0)+'%'}</span></div><progress value="${memory||0}" max="100" aria-label="内存使用率"></progress></div><div><div class="metric-caption"><span>磁盘</span><span>${disk==null?'—':disk.toFixed(0)+'%'}</span></div><progress value="${disk||0}" max="100" aria-label="磁盘使用率"></progress></div></div><div class="node-footer"><div class="protocol-chips">${[...new Set(instances.map(i=>i.protocol))].slice(0,3).map(p=>`<span>${esc(p.toUpperCase())}</span>`).join('')||'<span>暂无协议</span>'}</div><span>${instances.length} 个实例 ${icon('arrow')}</span></div></article>`;
+    return `<article class="node-card"><div class="node-top"><div class="node-symbol">${icon('server')}</div>${badge(node.status)}</div><h3><a href="#nodes/${node.id}">${esc(node.name)}</a></h3><div class="node-group">${esc(node.group_name)} · ${esc(s.hostname || '等待首次连接')}</div><div class="node-metrics"><div><div class="metric-caption"><span>内存</span><span>${memory==null?'—':memory.toFixed(0)+'%'}</span></div><progress value="${memory||0}" max="100" aria-label="内存使用率"></progress></div><div><div class="metric-caption"><span>磁盘</span><span>${disk==null?'—':disk.toFixed(0)+'%'}</span></div><progress value="${disk||0}" max="100" aria-label="磁盘使用率"></progress></div></div><div class="node-traffic"><span>接收 ${trafficValue(m.network_rx)}</span><span>发送 ${trafficValue(m.network_tx)}</span></div><div class="node-footer"><div class="protocol-chips">${[...new Set(instances.map(i=>i.protocol))].slice(0,3).map(p=>`<span>${esc(p.toUpperCase())}</span>`).join('')||'<span>暂无协议</span>'}</div><span>${instances.length} 个实例 ${icon('arrow')}</span></div></article>`;
 }
 
 function nodeCards() {
@@ -220,9 +220,49 @@ function overview(section) {
     });
 }
 
+let trafficNodeId = '';
+function trafficUsage(instance) {
+    const supported = instance.traffic_state !== 'unsupported';
+    const users = instance.users || [];
+    const total = users.reduce((sum,u)=>sum+(Number.isFinite(u.used)&&u.used>=0?u.used:0),0);
+    return {value: supported && (instance.traffic_state === 'ready' || total > 0) ? total : null,
+        ready: instance.traffic_state === 'ready', supported};
+}
+function trafficValue(value) { return Number.isFinite(value) && value >= 0 ? (value < 1024 ? value + ' B' : bytes(value)) : '—'; }
+function trafficStatus(instance, node) {
+    if (instance.traffic_state === 'unsupported') return '暂不支持统计';
+    if (node.status !== 'online') return '离线快照';
+    return instance.traffic_state === 'ready' ? '正常' : '等待有效采样';
+}
+function trafficTotal(instances) {
+    const data = instances.map(trafficUsage), known = data.filter(x=>x.value !== null);
+    return {value:known.length ? known.reduce((sum,x)=>sum+x.value,0) : null,
+        partial: data.some(x=>!x.ready), count: known.length, all: data.length};
+}
+function trafficPage() {
+    const node = nodes.find(n=>n.id===trafficNodeId) || nodes[0];
+    const instances = node?.snapshot.instances || [];
+    const total = trafficTotal(instances);
+    const coreName = p => p.protocol.startsWith('snell') ? '独立核心' : p.core==='singbox' ? 'Sing-box' : 'Xray';
+    shell(`<div class="heading"><div><h1>流量统计</h1><p class="subtext">查看每台服务器、协议实例和用户的流量情况。</p></div><button data-action="refresh">${icon('refresh')}刷新</button></div>
+    <div class="section-label"><h2>服务器流量</h2></div><div class="panel table-wrap"><table><thead><tr><th>服务器</th><th>状态</th><th>网卡接收</th><th>网卡发送</th><th>网卡合计</th><th>用户用量汇总</th><th>上报时间</th></tr></thead><tbody>${nodes.map(n=>{
+        const m=n.snapshot.metrics||{}, sum=trafficTotal(n.snapshot.instances||[]);
+        const network = Number.isFinite(m.network_rx)&&Number.isFinite(m.network_tx)?m.network_rx+m.network_tx:null;
+        return `<tr><td><button class="quiet small" data-action="traffic-node" data-id="${esc(n.id)}" ${n.id===node?.id?'aria-current="true"':''}>${esc(n.name)}</button></td><td>${badge(n.status)}</td><td>${trafficValue(m.network_rx)}</td><td>${trafficValue(m.network_tx)}</td><td>${trafficValue(network)}</td><td>${trafficValue(sum.value)}${sum.partial?'<br><span class="muted">部分统计可用</span>':''}</td><td>${date(n.last_seen)}${n.status!=='online'?'<br><span class="muted">离线快照</span>':''}</td></tr>`;
+    }).join('')||'<tr><td colspan="7">暂无服务器</td></tr>'}</tbody></table></div>
+    <p class="helper traffic-note">网卡收发量来自系统累计计数，包含其他服务与虚拟网卡流量，重启或接口重建可能清零；不等同于代理用户用量或服务商账单。</p>
+    ${node?`<div class="section-label"><h2>${esc(node.name)} · 协议流量</h2><span>用户用量汇总 ${trafficValue(total.value)}${total.partial?'（部分统计）':''}</span><a href="#nodes/${esc(node.id)}">管理服务器 →</a></div>
+    <div class="panel table-wrap"><table><thead><tr><th>协议 / 内核</th><th>端口</th><th>用户数</th><th>用户用量合计</th><th>统计状态</th></tr></thead><tbody>${instances.map(p=>`<tr><td><strong>${esc(names[p.protocol]||p.protocol)}</strong><br><span class="muted">${coreName(p)}</span></td><td>${p.port}</td><td>${(p.users||[]).length}</td><td>${trafficValue(trafficUsage(p).value)}</td><td>${trafficStatus(p,node)}</td></tr>`).join('')||'<tr><td colspan="5">暂无协议实例</td></tr>'}</tbody></table></div>
+    <div class="section-label"><h2>用户流量</h2></div><div class="panel table-wrap"><table><thead><tr><th>用户</th><th>协议 / 端口</th><th>当前用量</th><th>配额</th><th>剩余</th><th>统计周期</th><th>统计状态</th></tr></thead><tbody>${instances.flatMap(p=>(p.users||[]).map(u=>{
+        const available=p.traffic_state!=='unsupported'&&(p.traffic_state==='ready'||u.used>0);
+        return `<tr><td>${esc(u.name)}</td><td>${esc(names[p.protocol]||p.protocol)} · ${p.port}<br><span class="muted">${coreName(p)}</span></td><td>${available?trafficValue(u.used):'—'}</td><td>${u.quota?bytes(u.quota):'不限'}</td><td>${available&&u.quota?bytes(Math.max(0,u.quota-u.used)):u.quota?'—':'不限'}</td><td>${u.reset_day?`每月 ${u.reset_day} 日重置`:'累计（按脚本计数）'}</td><td>${trafficStatus(p,node)}${available&&u.quota&&u.used>=u.quota?'<br>已达配额':''}</td></tr>`;
+    })).join('')||'<tr><td colspan="7">暂无用户</td></tr>'}</tbody></table></div>
+    <p class="helper traffic-note">协议与服务器的用户用量合计为当前用户计费周期之和，不同用户的重置日可能不同，删除的用户不计入。用户统计来自节点脚本采样；暂不提供未采集的上传、下载拆分。等待采样时如有历史值，会保留显示；“—”表示未获得数据。</p>`:''}`, 'traffic');
+}
+
 function protocolTable(node) {
     const instances = node.snapshot.instances || [];
-    return instances.length ? `<div class="table-wrap"><table><thead><tr><th>协议 / 内核</th><th>监听端口</th><th>服务状态</th><th>用户</th><th>管理</th></tr></thead><tbody>${instances.map((p,index)=>`<tr><td><strong>${esc(names[p.protocol]||p.protocol)}</strong><br><span class="muted">${esc(p.core==='xray'&&!p.protocol.startsWith('snell')?'Xray':p.core==='singbox'?'Sing-box':'独立进程')}</span></td><td class="mono">${p.port}</td><td>${badge(p.status)}</td><td>${(p.users||[]).length} 位</td><td><button class="small" data-action="instance" data-index="${index}">${p.managed?'管理实例':'查看实例'}</button></td></tr>`).join('')}</tbody></table></div>` : `<div class="empty"><div class="empty-icon">${icon('globe')}</div><h3>尚未发现协议实例</h3><p>确认接管后，可选择节点支持的协议进行安装。</p><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div>`;
+    return instances.length ? `<div class="table-wrap"><table><thead><tr><th>协议 / 内核</th><th>监听端口</th><th>服务状态</th><th>用户</th><th>用户用量合计</th><th>管理</th></tr></thead><tbody>${instances.map((p,index)=>`<tr><td><strong>${esc(names[p.protocol]||p.protocol)}</strong><br><span class="muted">${esc(p.core==='xray'&&!p.protocol.startsWith('snell')?'Xray':p.core==='singbox'?'Sing-box':'独立进程')}</span></td><td class="mono">${p.port}</td><td>${badge(p.status)}</td><td>${(p.users||[]).length} 位</td><td>${trafficValue(trafficUsage(p).value)}<br><span class="muted">${trafficStatus(p,node)}</span></td><td><button class="small" data-action="instance" data-index="${index}">${p.managed?'管理实例':'查看实例'}</button></td></tr>`).join('')}</tbody></table></div>` : `<div class="empty"><div class="empty-icon">${icon('globe')}</div><h3>尚未发现协议实例</h3><p>确认接管后，可选择节点支持的协议进行安装。</p><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div>`;
 }
 
 function detail(node) {
@@ -239,6 +279,8 @@ async function render() {
         else shell('<div class="empty"><h3>节点不存在</h3><a href="#nodes">返回节点列表</a></div>', 'nodes');
     } else if (route === 'tasks') {
         shell(`<div class="heading"><div><h1>任务记录</h1><p class="subtext">安装、修改与卸载的执行结果，集中追溯。</p></div><button data-action="refresh">${icon('refresh')}刷新</button></div><div class="notice">执行结果未确认的任务不会自动重试。请检查节点实际状态后再发起新操作。</div><div class="panel">${taskTable(tasks)}</div>`, 'tasks');
+    } else if (route === 'traffic') {
+        trafficPage();
     } else if (route === 'monitor') {
         await monitorPage();
     } else if (route === 'backups') {
@@ -727,6 +769,9 @@ document.addEventListener('click', async e => {
                     b.disabled = false;
                 }
             };
+        } else if (action === 'traffic-node') {
+            trafficNodeId = b.dataset.id;
+            trafficPage();
         } else if (action === 'copy-config-details') {
             await navigator.clipboard.writeText($('#config-details').value);
             toast('配置详情已复制');
