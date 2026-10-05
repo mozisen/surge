@@ -14,6 +14,7 @@ from urllib.parse import quote, urlencode
 
 from vaio.install_options import SS_METHODS
 from vaio.common import MUTATIONS, config_revision, validate_task
+from .config_details import config_details
 from .inventory import mutable, read_db, rows, service_for, users_for
 from .runtime import Runtime, active_users, atomic_write
 from .billing import advance, configure, traffic_state
@@ -145,7 +146,8 @@ class Bridge:
             if action == "inspect":
                 return {"steps": ["已读取数据库并验证目标实例"], "affected": [service_for(core, proto, before)]}
             if action == "share":
-                return {"connection": self.share(proto, before, task["params"])}
+                return {"connection": self.share(proto, before, task["params"]),
+                        "config_details": config_details(core, proto, before, task["params"])}
             if action.startswith("user_") and proto.startswith("snell") and action != "user_update":
                 raise ValueError("Snell 一用户一端口，请通过新增或卸载协议实例管理")
             original = copy.deepcopy(db)

@@ -523,9 +523,10 @@ def create_app(config=None):
             if not isinstance(detail, dict) or len(json.dumps(detail)) > 32000:
                 raise ValueError("结果过大")
             # Keep only intentionally supported result fields; raw logs never enter the panel DB.
-            detail = {k: v for k, v in detail.items() if k in ("connection", "backup", "steps", "affected")}
+            detail = {k: v for k, v in detail.items() if k in ("connection", "config_details", "backup", "steps", "affected")}
             if task["action"] != "share":
                 detail.pop("connection", None)
+                detail.pop("config_details", None)
             db.execute("UPDATE tasks SET status=?,finished=?,message=?,result=? WHERE id=?",
                        (data["status"], time.time(), message, json.dumps(detail), task_id))
             audit(db, "task." + data["status"], node_id, task_id)
@@ -596,6 +597,27 @@ def create_app(config=None):
                 item["result"] = {}
             output.append(item)
         return jsonify(tasks=output)
+
+    @app.get("/api/tasks/<task_id>/qr")
+    @admin
+    def connection_qr(task_id):
+        import qrcode
+        import qrcode.image.svg
+        with store.connect() as db:
+            row = db.execute("SELECT * FROM tasks WHERE id=? AND action='share' AND status='succeeded'", (task_id,)).fetchone()
+        if not row or not row['finished'] or row['finished'] < time.time() - 600:
+            return jsonify(error="连接信息不存在或已过期"), 404
+        connection = json.loads(row['result'] or '{}').get('connection')
+        if not isinstance(connection, str) or not connection or len(connection) > 4096:
+            return jsonify(error="没有可生成二维码的连接信息"), 404
+        output = io.BytesIO()
+        try:
+            qrcode.make(connection, image_factory=qrcode.image.svg.SvgPathImage).save(output)
+        except qrcode.exceptions.DataOverflowError:
+            return jsonify(error="连接信息过长，请复制配置"), 400
+        response = app.response_class(output.getvalue(), mimetype="image/svg+xml")
+        response.headers['Cache-Control'] = 'no-store'
+        return response
 
     @app.post("/api/tasks/<task_id>/resolve")
     @admin

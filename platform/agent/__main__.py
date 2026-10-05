@@ -89,6 +89,7 @@ class Agent:
                 item["sent"] = True
                 # Credentials need not remain on disk after acknowledged delivery.
                 item["result"].pop("connection", None)
+                item["result"].pop("config_details", None)
                 self.save()
         try:
             snapshot = inventory(self.cfg)
