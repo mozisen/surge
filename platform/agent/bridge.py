@@ -1,3 +1,4 @@
+import base64
 import copy
 import fcntl
 import json
@@ -11,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
+from vaio.install_options import SS_METHODS
 from vaio.common import MUTATIONS, config_revision, validate_task
 from .inventory import mutable, read_db, rows, service_for, users_for
 from .runtime import Runtime, active_users, atomic_write
@@ -147,6 +149,8 @@ class Bridge:
             if action.startswith("user_") and proto.startswith("snell") and action != "user_update":
                 raise ValueError("Snell 一用户一端口，请通过新增或卸载协议实例管理")
             original = copy.deepcopy(db)
+            if proto in SS_METHODS and action in ("user_add", "user_delete"):
+                raise ValueError("SS 系列采用一用户一端口，请新增或卸载实例；现有用户可编辑")
             params = task["params"]
             after = copy.deepcopy(before)
             if action == "install":
@@ -154,7 +158,7 @@ class Bridge:
                 # Do not mix legacy and independently managed Snell layouts without migration.
                 if proto.startswith("snell") and any(p == proto and not r.get("snell_id") for _, p, r in rows(db)):
                     raise ValueError("已有旧版 Snell，请先用原脚本迁移多用户后再添加实例")
-                self.runtime.install(proto, core) if proto in ("trojan", "anytls") or (proto == "vless" and core == "singbox") else self.runtime.install(proto)
+                self.runtime.install(proto, core) if proto in ("trojan", "anytls", "ss-legacy", "ss2022") or (proto == "vless" and core == "singbox") else self.runtime.install(proto)
                 name = params.get("name", "default")
                 if not proto.startswith("snell") and any(u.get("name") == name for c, p, r in rows(db) if (c, p) == (core, proto) for u in users_for(r)):
                     if "name" in params:
@@ -163,6 +167,8 @@ class Bridge:
                     if any(u.get("name") == name for c, p, r in rows(db) if (c, p) == (core, proto) for u in users_for(r)):
                         raise ValueError("自动生成的用户名已存在，请选择其他端口")
                 credential = params.get("credential") or (str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16))
+                if proto == "ss2022" and not params.get("credential"):
+                    credential = base64.b64encode(secrets.token_bytes(16 if "128" in params.get("method", SS_METHODS[proto][0]) else 32)).decode()
                 after = {"port": task["port"], "instance_id": str(uuid.uuid4()), "panel_managed": True, "users": [
                     {"name": name, "uuid": credential, "enabled": True, "used": 0, "quota": 0, "expire_date": ""}]}
                 if proto == "vless":
@@ -172,6 +178,8 @@ class Bridge:
                         private, public = self.runtime.keys(core) if core == "singbox" else self.runtime.keys()
                     after.update(uuid=credential, private_key=private, public_key=public, short_id=params.get("short_id", secrets.token_hex(4)).lower(),
                                  sni=params["sni"], security_mode="reality")
+                elif proto in SS_METHODS:
+                    after.update(password=credential, method=params.get("method", SS_METHODS[proto][0]))
                 elif proto in ("hy2", "trojan", "anytls"):
                     after.update(password=credential, sni=params["sni"], hop_enable="0")
                     after["certificate_mode"] = params.get("certificate_mode", "self")
@@ -226,6 +234,8 @@ class Bridge:
                     if params.get("reset_credentials"):
                         old_credential = user.get("uuid")
                         user["uuid"] = str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16)
+                        if proto == "ss2022":
+                            user["uuid"] = base64.b64encode(secrets.token_bytes(16 if "128" in after["method"] else 32)).decode()
                         for field in ("uuid", "password", "psk"):
                             if old_credential is not None and after.get(field) == old_credential:
                                 after[field] = user["uuid"]
@@ -298,6 +308,9 @@ class Bridge:
         host = params["host"]
         host = "[" + host + "]" if ":" in host else host
         address = host + ":" + str(row["port"])
+        if proto in SS_METHODS:
+            auth = quote(row["method"] + ":" + credential, safe="") if proto == "ss2022" else base64.urlsafe_b64encode((row["method"] + ":" + credential).encode()).decode().rstrip("=")
+            return "ss://" + auth + "@" + address + "#" + quote(params["name"])
         if proto == "vless":
             query = urlencode({"encryption": "none", "security": "reality", "type": "tcp", "flow": "xtls-rprx-vision",
                                "sni": row["sni"], "fp": "chrome", "pbk": row["public_key"], "sid": row["short_id"]})

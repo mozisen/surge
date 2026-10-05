@@ -17,7 +17,7 @@ from .inventory import read_db, rows, service_for, users_for
 from .billing import effective_usage
 
 ROOT = Path(__file__).resolve().parent.parent
-UPSTREAM_SHA = "be3eb6d71ef9bf3eee0d3ac06fdefa5dd01ad214416e93ea5ed204dd5903239a"
+UPSTREAM_SHA = "c38e64b01875047b28beb41645f054ff59a9bc53bca17bfd0a8b763e865c06cd"
 
 
 def atomic_write(path, content):
@@ -106,7 +106,7 @@ class Runtime:
 
     def install(self, proto, core=None):
         self.ensure_main_script()
-        if proto in ("trojan", "anytls") or (proto == "vless" and core == "singbox"):
+        if proto in ("trojan", "anytls", "ss-legacy", "ss2022") or (proto == "vless" and core == "singbox"):
             return self.upstream("install_singbox" if core == "singbox" else "install_xray")
         operation = {"vless": "install_xray", "hy2": "install_singbox", "snell": "install_snell",
                      "snell-v5": "install_snell_v5", "snell-v6": "install_snell_v6"}[proto]
@@ -349,6 +349,8 @@ class Runtime:
                 raise ValueError("运行配置与数据库不一致，无法唯一定位端口")
             old = config["inbounds"][matches[0]] if matches else None
             if old:
+                if proto in ("ss-legacy", "ss2022") and (old.get("type") != "shadowsocks" or old.get("users") or old.get("destinations")):
+                    raise ValueError("运行配置不是受管的单用户 SS 实例")
                 if (proto == "vless" and core == "xray" and (old.get("protocol") != "vless" or old.get("streamSettings", {}).get("security") != "reality")) or (proto == "hy2" and old.get("type") != "hysteria2"):
                     raise ValueError("运行协议与数据库不一致")
                 if proto == "vless" and core == "singbox" and (old.get("type") != "vless" or not old.get("tls", {}).get("reality", {}).get("enabled")):

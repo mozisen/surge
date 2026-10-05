@@ -4,15 +4,30 @@ import ipaddress
 import re
 import uuid
 
+SS_METHODS = {"ss-legacy": ("aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305"),
+              "ss2022": ("2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm")}
+
 TLS_PROTOCOLS = {"hy2", "trojan", "anytls"}
 ADVANCED_INSTALL_FIELDS = {"credential", "certificate_mode", "acme_email",
-                           "mode", "dns", "dns_ip_preference", "tfo", "private_key", "short_id"}
+                           "method", "mode", "dns", "dns_ip_preference", "tfo", "private_key", "short_id"}
 
 REALITY_INSTALL_FIELDS = {"private_key", "short_id"}
 
 
 def validate_install_options(proto, params):
     allowed = {"name", "credential"}
+    if proto in SS_METHODS:
+        allowed.add("method")
+        method = params.get("method", SS_METHODS[proto][0])
+        if method not in SS_METHODS[proto]:
+            raise ValueError("SS 加密方式不受支持")
+        if proto == "ss2022" and "credential" in params:
+            try:
+                raw = base64.b64decode(params["credential"], validate=True)
+                if len(raw) != (16 if "128" in method else 32) or base64.b64encode(raw).decode() != params["credential"]:
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise ValueError("SS2022 密钥必须是对应长度的标准 Base64；可留空自动生成")
     if proto == "vless" or proto in TLS_PROTOCOLS:
         allowed.add("sni")
     if proto == "vless":

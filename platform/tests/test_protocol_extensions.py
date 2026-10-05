@@ -47,7 +47,7 @@ class ProtocolExtensions(unittest.TestCase):
                 self.bridge.write({'xray': {}, 'singbox': {}, 'meta': {}})
                 for port in (30001, 30002):
                     self.bridge.execute(self.task(core, proto, 'install', port, **(
-                        {'name': 'u' + str(port)} if proto.startswith('snell') else {'sni': 'example.com'})))
+                        {'name': 'u' + str(port)} if proto.startswith('snell') or proto in ('ss-legacy','ss2022') else {'sni': 'example.com'})))
                 db = read_db(self.cfg)
                 sibling = copy.deepcopy(db[core][proto][1])
                 first = db[core][proto][0]
@@ -60,7 +60,7 @@ class ProtocolExtensions(unittest.TestCase):
                 changed = read_db(self.cfg)[core][proto][0]['users'][0]
                 self.assertNotEqual(changed['uuid'], old_secret)
                 self.assertEqual((changed['used'], changed['telegram_chat_id'], changed['quota']), (765, 'binding', 123456789))
-                if not proto.startswith('snell'):
+                if not proto.startswith('snell') and proto not in ('ss-legacy','ss2022'):
                     self.bridge.execute(self.task(core, proto, 'user_add', name='additional'))
                     self.bridge.execute(self.task(core, proto, 'user_delete', name='additional'))
                 task = self.task(core, proto, 'update')

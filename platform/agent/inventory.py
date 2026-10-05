@@ -53,6 +53,8 @@ def service_status(name):
 
 
 def mutable(core, proto, row):
+    if proto in ("ss-legacy", "ss2022") and (not row.get("panel_managed") or len(row.get("users", [])) != 1):
+        return False
     if proto not in PROTOCOLS or core not in PROTOCOL_CORES[proto]:
         return False
     if proto == "vless" and row.get("security_mode", "reality") != "reality":

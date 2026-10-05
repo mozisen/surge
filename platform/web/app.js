@@ -38,6 +38,8 @@ const states = {
 };
 const badge = status => `<span class="badge ${esc(status)}">${status === 'online' ? '<span class="dot"></span>' : ''}${esc(states[status] || status)}</span>`;
 const names = {
+    'ss-legacy': 'SS',
+    ss2022: 'SS2022',
     vless: 'VLESS Reality',
     hy2: 'Hysteria2',
     trojan: 'Trojan',
@@ -331,7 +333,7 @@ function showInstance(index) {
     const p = selected.snapshot.instances[index];
     if (!p) return;
     const writable = p.managed && selected.adopted && selected.status === 'online' && !selected.maintenance;
-    modal(`${names[p.protocol]||p.protocol} · ${p.port}`, `<p>服务：<code>${esc(p.service)}</code> ${badge(p.status)}</p>${!p.managed?'<div class="notice warn">此实例尚未适配安全写入，当前仅可查看；安装列表按节点已声明的协议与内核能力展示。</div>':''}<div class="action-row"><button data-action="edit-port" data-index="${index}" ${writable?'':'disabled'}>修改端口</button><button data-action="${p.status==='running'?'stop':'start'}" data-index="${index}" ${writable?'':'disabled'}>${p.status==='running'?'停止服务':'启动服务'}</button><button data-action="restart" data-index="${index}" ${writable?'':'disabled'}>重启服务</button><button class="danger" data-action="delete" data-index="${index}" ${writable?'':'disabled'}>卸载此实例</button></div><label>实例用户</label><div class="table-wrap"><table><thead><tr><th>用户</th><th>已用 / 配额</th><th>状态</th><th>操作</th></tr></thead><tbody>${(p.users||[]).map((u,i)=>`<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.expire_date||'永不过期')}</span></td><td>${p.traffic_state==='ready'?bytes(u.used):'统计不可用'} / ${u.quota?bytes(u.quota):'不限'}${u.reset_day?`<br><span class="muted">每月 ${u.reset_day} 日重置</span>`:''}</td><td>${badge(u.enabled?'running':'stopped')}${u.quota&&u.used>=u.quota?'<br>已超额':u.expire_date&&u.expire_date<new Date().toLocaleDateString('sv')?'<br>已到期':''}</td><td><button class="small" data-action="edit-user" data-index="${index}" data-user="${i}" ${writable?'':'disabled'}>编辑</button><button class="small" data-action="share" data-index="${index}" data-user="${i}" ${p.managed&&selected.status==='online'?'':'disabled'}>连接</button></td></tr>`).join('')}</tbody></table></div><p class="helper">用户流量来自节点数据库，依赖原脚本统计任务；无统计接口时不代表真实用量为零。</p><div class="modal-foot"><button data-action="add-user" data-index="${index}" ${writable&&!p.protocol.startsWith('snell')?'':'disabled'}>新增用户</button><button data-action="close">关闭</button></div>`, true);
+    modal(`${names[p.protocol]||p.protocol} · ${p.port}`, `<p>服务：<code>${esc(p.service)}</code> ${badge(p.status)}</p>${!p.managed?'<div class="notice warn">此实例尚未适配安全写入，当前仅可查看；安装列表按节点已声明的协议与内核能力展示。</div>':''}<div class="action-row"><button data-action="edit-port" data-index="${index}" ${writable?'':'disabled'}>修改端口</button><button data-action="${p.status==='running'?'stop':'start'}" data-index="${index}" ${writable?'':'disabled'}>${p.status==='running'?'停止服务':'启动服务'}</button><button data-action="restart" data-index="${index}" ${writable?'':'disabled'}>重启服务</button><button class="danger" data-action="delete" data-index="${index}" ${writable?'':'disabled'}>卸载此实例</button></div><label>实例用户</label><div class="table-wrap"><table><thead><tr><th>用户</th><th>已用 / 配额</th><th>状态</th><th>操作</th></tr></thead><tbody>${(p.users||[]).map((u,i)=>`<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.expire_date||'永不过期')}</span></td><td>${p.traffic_state==='ready'?bytes(u.used):'统计不可用'} / ${u.quota?bytes(u.quota):'不限'}${u.reset_day?`<br><span class="muted">每月 ${u.reset_day} 日重置</span>`:''}</td><td>${badge(u.enabled?'running':'stopped')}${u.quota&&u.used>=u.quota?'<br>已超额':u.expire_date&&u.expire_date<new Date().toLocaleDateString('sv')?'<br>已到期':''}</td><td><button class="small" data-action="edit-user" data-index="${index}" data-user="${i}" ${writable?'':'disabled'}>编辑</button><button class="small" data-action="share" data-index="${index}" data-user="${i}" ${p.managed&&selected.status==='online'?'':'disabled'}>连接</button></td></tr>`).join('')}</tbody></table></div><p class="helper">用户流量来自节点数据库，依赖原脚本统计任务；无统计接口时不代表真实用量为零。</p><div class="modal-foot"><button data-action="add-user" data-index="${index}" ${writable&&!p.protocol.startsWith('snell')&&!['ss-legacy','ss2022'].includes(p.protocol)?'':'disabled'}>新增用户</button><button data-action="close">关闭</button></div>`, true);
 }
 async function submitTask(action, p, params = {}) {
     const data = await post('/nodes/' + selected.id + '/tasks', {
@@ -395,6 +397,8 @@ function installProtocolGuidance(protocol) {
         vless: 'Reality 模式：目标 SNI 需支持 TLS 1.3，且节点可以访问。自动生成仅选择脚本候选域名，不代表已验证连通性。不使用自签证书。',
         hy2: 'Hysteria2 使用 UDP，请放行 UDP 监听端口。当前安装不启用端口跳跃。' + tls,
         trojan: 'Trojan 使用 TCP + TLS；当前安装为原生 TCP，不是 WebSocket。' + tls,
+        'ss-legacy': 'SS 使用独立端口和密码，无需 SNI 或证书。请放行 TCP 和 UDP；当前一用户一端口，用户流量统计暂不可用。',
+        ss2022: 'SS2022 使用标准 Base64 密钥，无需 SNI 或证书。请放行 TCP 和 UDP；当前一用户一端口，用户流量统计暂不可用。',
         anytls: 'AnyTLS 使用 TCP + TLS。' + tls,
         snell: 'Snell v4 使用独立核心和 PSK，无需 SNI。当前安装不附加 ShadowTLS。',
         'snell-v5': 'Snell v5 使用独立核心和 PSK，无需 SNI。当前安装不附加 ShadowTLS。',
@@ -408,22 +412,26 @@ function install() {
         ? (selected.snapshot.write_capabilities || []).map(c=>`${c.core}:${c.protocol}`)
         : legacy;
     // Only render combinations with an implemented installation form.
-    const supported = ['xray:vless', 'singbox:vless', 'singbox:hy2', 'xray:trojan',
+    const supported = ['singbox:ss-legacy', 'singbox:ss2022', 'xray:vless', 'singbox:vless', 'singbox:hy2', 'xray:trojan',
         'singbox:trojan', 'singbox:anytls', 'xray:snell', 'xray:snell-v5', 'xray:snell-v6'];
     combinations.splice(0, combinations.length, ...combinations.filter(k => supported.includes(k)));
     if (!combinations.length) return modal('暂不可安装', '<p>节点未声明可用写入能力，请先升级 Agent。</p>');
-    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required><button type="button" id="generate-port" class="install-generate">自动生成端口</button><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div id="sni-field"><label for="sni" id="sni-label">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="generate-sni" class="install-generate">自动生成 SNI</button></div></div><div id="snell-name-field" hidden><label for="install-name">用户名</label><input id="install-name" value="u24443" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32"><button type="button" id="generate-name" class="install-generate">自动生成用户名</button></div><fieldset class="install-options"><legend>凭据与证书</legend><p id="install-options-status" class="helper"></p><label for="credential">UUID / 密码 / PSK（留空自动生成）</label><input id="credential" type="password" autocomplete="new-password" maxlength="128"><button type="button" id="generate-credential" class="install-generate">自动生成凭据</button><label for="certificate-mode">证书方式</label><select id="certificate-mode"><option value="self">生成自签证书</option><option value="acme">自有域名 · 申请 Let’s Encrypt 证书（HTTP）</option><option value="existing">使用节点已有证书</option></select><label for="acme-email">证书联系邮箱</label><input id="acme-email" type="email" maxlength="254"><p id="certificate-help" class="helper"></p></fieldset><fieldset class="install-options"><legend>Reality 参数</legend><label for="reality-private">Reality 私钥（留空自动生成）</label><input id="reality-private" type="password" autocomplete="new-password" maxlength="43"><p class="helper">公钥由节点从私钥推导，不需另填。仅 VLESS Reality 可用，需要新版 Agent。</p><label for="reality-short-id">Short ID（留空自动生成）</label><input id="reality-short-id" maxlength="16" pattern="([0-9a-fA-F]{2}){1,8}"><button type="button" id="generate-short-id" class="install-generate">自动生成 Short ID</button></fieldset><fieldset class="install-options"><legend>Snell v6 设置</legend><label for="snell-mode">混淆模式</label><select id="snell-mode"><option value="default">default</option><option value="unshaped">unshaped</option><option value="unsafe-raw">unsafe-raw</option></select><label for="dns">DNS 服务器（逗号分隔；留空使用系统 DNS）</label><input id="dns" maxlength="512" placeholder="1.1.1.1,8.8.8.8"><label for="dns-preference">DNS IP 偏好</label><select id="dns-preference"><option value="default">default</option><option value="prefer-ipv4">prefer-ipv4</option><option value="prefer-ipv6">prefer-ipv6</option><option value="ipv4-only">ipv4-only</option><option value="ipv6-only">ipv6-only</option></select><label for="tfo">客户端 TCP Fast Open</label><select id="tfo"><option value="true">启用</option><option value="false">关闭</option></select></fieldset><p id="generated-credentials" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><p id="protocol-guidance" class="helper"></p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
+    modal('安装协议实例', `<form id="install-form"><p>新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><label for="protocol">协议与运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${p.startsWith('snell')?'独立核心':core==='xray'?'Xray':'Sing-box'}</option>`;}).join('')}</select><div class="form-grid"><div><label for="port">监听端口</label><input id="port" name="port" type="number" min="1" max="65535" value="24443" required><button type="button" id="generate-port" class="install-generate">自动生成端口</button><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div id="sni-field"><label for="sni" id="sni-label">SNI 域名</label><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="generate-sni" class="install-generate">自动生成 SNI</button></div></div><div id="snell-name-field" hidden><label for="install-name">用户名</label><input id="install-name" value="u24443" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32"><button type="button" id="generate-name" class="install-generate">自动生成用户名</button></div><fieldset class="install-options"><legend>凭据与证书</legend><p id="install-options-status" class="helper"></p><label for="ss-method">SS 加密方式</label><select id="ss-method" disabled></select><label for="credential">UUID / 密码 / PSK（留空自动生成）</label><input id="credential" type="password" autocomplete="new-password" maxlength="128"><button type="button" id="generate-credential" class="install-generate">自动生成凭据</button><label for="certificate-mode">证书方式</label><select id="certificate-mode"><option value="self">生成自签证书</option><option value="acme">自有域名 · 申请 Let’s Encrypt 证书（HTTP）</option><option value="existing">使用节点已有证书</option></select><label for="acme-email">证书联系邮箱</label><input id="acme-email" type="email" maxlength="254"><p id="certificate-help" class="helper"></p></fieldset><fieldset class="install-options"><legend>Reality 参数</legend><label for="reality-private">Reality 私钥（留空自动生成）</label><input id="reality-private" type="password" autocomplete="new-password" maxlength="43"><p class="helper">公钥由节点从私钥推导，不需另填。仅 VLESS Reality 可用，需要新版 Agent。</p><label for="reality-short-id">Short ID（留空自动生成）</label><input id="reality-short-id" maxlength="16" pattern="([0-9a-fA-F]{2}){1,8}"><button type="button" id="generate-short-id" class="install-generate">自动生成 Short ID</button></fieldset><fieldset class="install-options"><legend>Snell v6 设置</legend><label for="snell-mode">混淆模式</label><select id="snell-mode"><option value="default">default</option><option value="unshaped">unshaped</option><option value="unsafe-raw">unsafe-raw</option></select><label for="dns">DNS 服务器（逗号分隔；留空使用系统 DNS）</label><input id="dns" maxlength="512" placeholder="1.1.1.1,8.8.8.8"><label for="dns-preference">DNS IP 偏好</label><select id="dns-preference"><option value="default">default</option><option value="prefer-ipv4">prefer-ipv4</option><option value="prefer-ipv6">prefer-ipv6</option><option value="ipv4-only">ipv4-only</option><option value="ipv6-only">ipv6-only</option></select><label for="tfo">客户端 TCP Fast Open</label><select id="tfo"><option value="true">启用</option><option value="false">关闭</option></select></fieldset><p id="generated-credentials" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><p id="protocol-guidance" class="helper"></p><div class="notice warn">安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。</div><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">安装实例</button></div></form>`);
     const updateFields = () => {
-        const p = $('#protocol').value.split(':')[1], snell = p.startsWith('snell');
+        const p = $('#protocol').value.split(':')[1], snell = p.startsWith('snell'), ss = ['ss-legacy','ss2022'].includes(p), noSni = snell || ss;
+        const methods = p==='ss2022' ? ['2022-blake3-aes-128-gcm','2022-blake3-aes-256-gcm'] : ['aes-256-gcm','aes-128-gcm','chacha20-ietf-poly1305'];
+        const method = methods.includes($('#ss-method').value) ? $('#ss-method').value : methods[0];
+        $('#ss-method').innerHTML = methods.map(m=>`<option value="${m}">${m}</option>`).join('');
+        $('#ss-method').value = method; $('#ss-method').disabled = !ss;
         const advanced = [1, 2].includes(selected.snapshot.install_options_version);
         for (const id of ['reality-private', 'reality-short-id', 'generate-short-id'])
             $('#'+id).disabled = !(p === 'vless' && selected.snapshot.install_options_version === 2);
         const tls = ['hy2', 'trojan', 'anytls'].includes(p);
-        $('#sni').disabled = snell;
-        $('#sni').required = !snell;
+        $('#sni').disabled = noSni;
+        $('#sni').required = !noSni;
         $('#sni-field').hidden = false;
-        $('#generate-sni').disabled = snell;
-        $('#sni-label').textContent = snell ? 'SNI 域名（此协议不适用）' : p === 'vless' ? 'Reality 目标 SNI（必填）' : '证书 SNI / 自有域名（必填）';
+        $('#generate-sni').disabled = noSni;
+        $('#sni-label').textContent = noSni ? 'SNI 域名（此协议不适用）' : p === 'vless' ? 'Reality 目标 SNI（必填）' : '证书 SNI / 自有域名（必填）';
         $('#protocol-guidance').textContent = installProtocolGuidance(p);
         $('#snell-name-field').hidden = false;
         $('#install-name').disabled = !(snell || advanced);
@@ -435,7 +443,7 @@ function install() {
         const certificate = $('#certificate-mode').value;
         $('#acme-email').disabled = !(advanced && tls && certificate === 'acme');
         $('#acme-email').required = !$('#acme-email').disabled;
-        $('#generate-sni').disabled = snell || (tls && advanced && certificate !== 'self');
+        $('#generate-sni').disabled = noSni || (tls && advanced && certificate !== 'self');
         $('#install-options-status').textContent = advanced
             ? '灰色字段不适用于当前协议。凭据留空自动生成；首次安装同时补齐主脚本和 vless 命令，不覆盖已有脚本。'
             : '此节点 Agent 尚未支持高级参数，请先升级 Agent；当前仅可使用基础安装。';
@@ -445,6 +453,7 @@ function install() {
             : '可填写自有域名或生成候选域名。节点生成带 SAN 的自签证书，无需域名解析；客户端需跳过证书验证。';
         $('#generated-credentials').textContent = p === 'vless'
             ? 'UUID、Reality 私钥及 Short ID 留空时由节点自动生成；公钥始终从私钥推导。'
+            : ss ? '凭据可留空由节点生成；SS2022 会按加密方式生成对应长度的 Base64 密钥。'
             : snell ? 'PSK 留空时由节点自动生成。'
             : '凭据留空时自动生成。证书按所选方式在节点准备，不覆盖其他实例的证书。';
         $('#generation-feedback').textContent = '';
@@ -460,6 +469,7 @@ function install() {
         $('#credential').value = $('#protocol').value.split(':')[1] === 'vless'
             ? crypto.randomUUID()
             : Array.from(crypto.getRandomValues(new Uint8Array(24)), n => n.toString(16).padStart(2, '0')).join('');
+        if ($('#protocol').value.split(':')[1] === 'ss2022') $('#credential').value = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array($('#ss-method').value.includes('128') ? 16 : 32))));
         $('#generation-feedback').textContent = '已生成凭据，尚未安装；也可清空以在节点自动生成。';
     };
     updateFields();
@@ -484,7 +494,7 @@ function install() {
         b.disabled = true;
         const [core, p] = $('#protocol').value.split(':');
         try {
-            const params = p.startsWith('snell') ? {name: $('#install-name').value} : {sni: $('#sni').value};
+            const params = (p.startsWith('snell') || ['ss-legacy','ss2022'].includes(p)) ? {name: $('#install-name').value} : {sni: $('#sni').value};
             if (selected.snapshot.install_options_version === 2 && p === 'vless') {
                 if ($('#reality-private').value) params.private_key = $('#reality-private').value;
                 if ($('#reality-short-id').value) params.short_id = $('#reality-short-id').value;
@@ -501,6 +511,7 @@ function install() {
                     dns_ip_preference: $('#dns-preference').value, tfo: $('#tfo').value === 'true'
                 });
             }
+            if (['ss-legacy','ss2022'].includes(p)) params.method = $('#ss-method').value;
             await submitTask('install', {
                 protocol: p,
                 core,
@@ -516,8 +527,8 @@ function install() {
 function editUser(index, userIndex) {
     const p = selected.snapshot.instances[index],
         u = userIndex == null ? null : p.users[userIndex];
-    modal(u ? '编辑用户' : '新增用户', `<form id="user-form"><label for="username">用户名</label><input id="username" value="${esc(u?.name||'')}" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32" required ${u?'readonly':''}><label for="expiry">到期日期</label><input id="expiry" type="date" value="${esc(u?.expire_date||'')}"><p class="helper">留空表示永不过期。按节点本地日期判断，每分钟检查。</p>${u?`<label class="field-check"><input id="enabled" type="checkbox" ${u.enabled?'checked':''}>启用此用户</label>`:''}<p class="helper">凭据自动生成。${p.protocol.startsWith('snell')?'Snell 每个用户对应独立端口；增加用户请新增实例。':''}</p><div class="error" role="alert"></div><div class="modal-foot">${u&&u.name!=='default'&&!p.protocol.startsWith('snell')?`<button type="button" class="danger" data-action="delete-user" data-index="${index}" data-user="${userIndex}">删除用户</button>`:''}<button type="submit" class="primary">${u?'保存修改':'创建用户'}</button></div></form>`);
-    if (selected.snapshot.billing_version === 1) {
+    modal(u ? '编辑用户' : '新增用户', `<form id="user-form"><label for="username">用户名</label><input id="username" value="${esc(u?.name||'')}" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32" required ${u?'readonly':''}><label for="expiry">到期日期</label><input id="expiry" type="date" value="${esc(u?.expire_date||'')}"><p class="helper">留空表示永不过期。按节点本地日期判断，每分钟检查。</p>${u?`<label class="field-check"><input id="enabled" type="checkbox" ${u.enabled?'checked':''}>启用此用户</label>`:''}<p class="helper">凭据自动生成。${['ss-legacy','ss2022'].includes(p.protocol)?'SS 系列一用户一端口，增加用户请新增实例。':''}${p.protocol.startsWith('snell')?'Snell 每个用户对应独立端口；增加用户请新增实例。':''}</p><div class="error" role="alert"></div><div class="modal-foot">${u&&u.name!=='default'&&!p.protocol.startsWith('snell')&&!['ss-legacy','ss2022'].includes(p.protocol)?`<button type="button" class="danger" data-action="delete-user" data-index="${index}" data-user="${userIndex}">删除用户</button>`:''}<button type="submit" class="primary">${u?'保存修改':'创建用户'}</button></div></form>`);
+    if (selected.snapshot.billing_version === 1 && !['ss-legacy','ss2022'].includes(p.protocol)) {
         $('#user-form .error').insertAdjacentHTML('beforebegin', `<label for="quota">流量配额（GiB）</label><input id="quota" type="number" min="0" max="999999" step="1" value="${Math.ceil((u?.quota||0)/1073741824)}" required><label for="reset-day">每月重置日</label><input id="reset-day" type="number" min="0" max="28" step="1" value="${u?.reset_day||0}" required><p class="helper">配额 0 表示不限，重置日 0 表示累计不重置。按节点本地日期执行；修改设置保留当前用量。月度重置不会启用手动停用或到期用户。${p.traffic_state!=='ready'?' 当前统计不可用，请修复节点统计任务后再设置非零配额。':''}</p>`);
     }
     if (u && selected.snapshot.task_api_version === 2) {

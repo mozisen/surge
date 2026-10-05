@@ -6,8 +6,8 @@ import re
 from .install_options import ADVANCED_INSTALL_FIELDS, validate_install_options
 
 PROTOCOLS = {"vless": "VLESS Reality", "hy2": "Hysteria2", "snell": "Snell v4",
-             "snell-v5": "Snell v5", "snell-v6": "Snell v6", "trojan": "Trojan", "anytls": "AnyTLS"}
-PROTOCOL_CORES = {"vless": ("xray", "singbox"), "hy2": ("singbox",), "anytls": ("singbox",),
+             "snell-v5": "Snell v5", "snell-v6": "Snell v6", "trojan": "Trojan", "anytls": "AnyTLS", "ss-legacy": "SS", "ss2022": "SS2022"}
+PROTOCOL_CORES = {"ss-legacy": ("singbox",), "ss2022": ("singbox",), "vless": ("xray", "singbox"), "hy2": ("singbox",), "anytls": ("singbox",),
                   "trojan": ("xray", "singbox"), "snell": ("xray",), "snell-v5": ("xray",), "snell-v6": ("xray",)}
 LEGACY_COMBINATIONS = {("xray", "vless"), ("singbox", "hy2"), ("xray", "snell"), ("xray", "snell-v5"), ("xray", "snell-v6")}
 

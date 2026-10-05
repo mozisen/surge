@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.3-preview.3"
+readonly VERSION="3.7.3-preview.4"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -4155,11 +4155,13 @@ gen_xray_user_routing_outbounds() {
 # Shared renderer for platform-managed instances. stdin: {row, previous}.
 # Kept inside the standalone script so CLI usage never requires the Agent.
 _platform_render_inbound() {
-    local core="$1" proto="$2" nonce today
+    local core="$1" proto="$2" nonce today disabled16 disabled32
+    disabled16=$(openssl rand -base64 16) || return 1
+    disabled32=$(openssl rand -base64 32) || return 1
     nonce=$(openssl rand -hex 16) || return 1
     nonce="${nonce:0:8}-${nonce:8:4}-${nonce:12:4}-${nonce:16:4}-${nonce:20:12}"
     today=$(date +%F)
-    jq -ce --arg core "$core" --arg p "$proto" --arg today "$today" --arg nonce "$nonce" '
+    jq -ce --arg core "$core" --arg p "$proto" --arg today "$today" --arg nonce "$nonce" --arg disabled16 "$disabled16" --arg disabled32 "$disabled32" '
       .row as $r | (.previous // {}) as $old |
       ($r.users // [{name:"default",uuid:($r.uuid // $r.password // $r.psk),enabled:true}]) as $all |
       [$all[] | select(.enabled != false) |
@@ -4167,7 +4169,13 @@ _platform_render_inbound() {
         select((.quota // 0) == 0 or (.used // 0) < .quota) |
         select((.panel_quota // 0) == 0 or ((.panel_used // 0) +
           (if (.used // 0) >= (.panel_last_used // .used // 0) then (.used // 0) - (.panel_last_used // .used // 0) else (.used // 0) end)) < .panel_quota)] as $users |
-      if ($p != "vless" and $p != "trojan" and $p != "hy2" and $p != "anytls") or
+      if $core == "singbox" and ($p == "ss-legacy" or $p == "ss2022") then
+        ($old | del(.users,.destinations,.tls) | .type="shadowsocks" |
+          .listen_port=$r.port | .listen=(.listen // "0.0.0.0") |
+          .tag=(.tag // $r.runtime_tag // ($p+"-in-"+($r.port|tostring))) |
+          .method=$r.method | .password=(if ($users|length)>0 then $users[0].uuid
+            elif $r.method=="2022-blake3-aes-128-gcm" then $disabled16 else $disabled32 end))
+      elif ($p != "vless" and $p != "trojan" and $p != "hy2" and $p != "anytls") or
          ($core != "xray" and $core != "singbox") or
          ($core == "xray" and $p != "vless" and $p != "trojan") then error("unsupported managed inbound")
       elif $core == "xray" then
