@@ -81,7 +81,7 @@ def validate_task(data):
         except (TypeError, ValueError):
             raise ValueError("到期日期格式应为 YYYY-MM-DD")
     if action == "share":
-        require_text(params.get("host"), "连接地址", 253, r"[A-Za-z0-9.:-]+")
+        if "host" in params: require_text(params.get("host"), "连接地址", 253, r"[A-Za-z0-9.:-]+")
         require_text(params.get("name"), "用户名", 32, r"[A-Za-z0-9_-]+")
     if action in MUTATIONS:
         require_text(data.get("revision"), "配置版本", 64, r"[0-9a-f]{64}")

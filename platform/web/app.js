@@ -359,7 +359,7 @@ function showTask(id) {
         return;
     }
     const r = t.result || {};
-    modal(actions[t.action] + ' · 执行记录', `<p>${badge(t.status)} <span class="mono">${esc(t.request.protocol)}:${t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(r.config_details)}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息（10 分钟后过期）</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
+    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p>${badge(t.status)} <span class="mono">${esc(t.request.protocol)}:${t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(r.config_details)}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息（10 分钟后过期）</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
 }
 
 function installPortCandidate(instances, current) {
@@ -708,21 +708,14 @@ document.addEventListener('click', async e => {
             toast('配置详情已复制');
         } else if (action === 'share') {
             const user = p.users[Number(b.dataset.user)];
-            modal('查看协议配置信息', `<form id="share-form"><p>为用户 ${esc(user.name)} 读取当前实例的配置参数和客户端配置。结果仅保留 10 分钟。</p><label for="share-host">节点公网 IP 或域名</label><input id="share-host" required placeholder="例如：node.example.com"><div class="error"></div><div class="modal-foot"><button class="primary" type="submit">读取配置信息</button></div></form>`);
-            $('#share-form').onsubmit = async e => {
-                e.preventDefault();
-                const b = $('[type=submit]', e.target);
-                b.disabled = true;
-                try {
-                    await submitTask('share', p, {
-                        name: user.name,
-                        host: $('#share-host').value
-                    });
-                } catch (err) {
-                    formError(err);
-                    b.disabled = false;
-                }
-            };
+            if (selected.snapshot.config_details_version !== 2) {
+                modal('请先升级节点程序', '<p>此节点尚不支持自动读取完整配置，请先在节点设置中升级节点程序。</p>');
+                return;
+            }
+            b.disabled = true;
+            try { await submitTask('share', p, {name: user.name}); }
+            finally { b.disabled = false; }
+
         }
     } catch (err) {
         toast(err.message);
@@ -747,9 +740,12 @@ async function boot() {
         login();
     }
 }
+let refreshTicks = 0;
 setInterval(() => {
-    if (authenticated) refresh();
-}, 10000);
+    refreshTicks++;
+    const task = tasks.find(t=>t.id===activeTaskId);
+    if (authenticated && (refreshTicks % 10 === 0 || ($('#modal').open && task && ['queued','running'].includes(task.status)))) refresh();
+}, 1000);
 boot();
 
 

@@ -56,6 +56,8 @@ class Agent:
         for item in self.journal.values():
             if item["status"] == "running":
                 item.update(status="unknown", message="Agent 在执行时重启；为避免重复操作，未自动重试", result={})
+        self.snapshot_cache = None
+        self.snapshot_at = 0
         self.save()
 
     def save(self):
@@ -92,7 +94,10 @@ class Agent:
                 item["result"].pop("config_details", None)
                 self.save()
         try:
-            snapshot = inventory(self.cfg)
+            if self.snapshot_cache is None or time.monotonic() - self.snapshot_at >= 10:
+                self.snapshot_cache = inventory(self.cfg)
+                self.snapshot_at = time.monotonic()
+            snapshot = dict(self.snapshot_cache)
         except Exception:
             snapshot = {"error": "读取节点状态失败，请检查 db.json 和 Agent 日志", "instances": []}
         if (self.state / "enforcement-pending.json").exists():
@@ -127,7 +132,7 @@ class Agent:
                                 maintenance = executor.submit(self.bridge.reconcile)
                                 last_maintenance = time.time()
                         future = self.cycle(executor, future)
-                        delay = 10
+                        delay = 2
                     except Exception as error:
                         # Never log request payloads, tokens, or response credentials.
                         if isinstance(error, urllib.error.HTTPError):
@@ -139,7 +144,10 @@ class Agent:
                             reason = type(error).__name__
                         logging.warning("面板连接失败：%s；将在 %s 秒后重试", reason, min(delay * 2, 60))
                         delay = min(delay * 2, 60)
-                    time.sleep(delay + random.random())
+                    if future is not None and delay == 2:
+                        concurrent.futures.wait([future], timeout=2)
+                    else:
+                        time.sleep(delay + random.random() * .2)
 
 
 def main():

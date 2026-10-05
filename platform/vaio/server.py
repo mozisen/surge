@@ -547,6 +547,8 @@ def create_app(config=None):
             node = db.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
             if not node or node["deleted"] or node["revoked"] or not node["last_seen"] or time.time() - node["last_seen"] > 45:
                 return jsonify(error="节点离线或身份已撤销"), 409
+            if task["action"] == "share" and not task["params"].get("host") and json.loads(node["snapshot"]).get("config_details_version") != 2:
+                return jsonify(error="请先升级节点程序以自动读取完整配置"), 409
             if ("quota_gb" in task["params"] or "reset_day" in task["params"]) and json.loads(node["snapshot"]).get("billing_version") != 1:
                 return jsonify(error="请先升级节点程序以使用计费管理"), 409
             if node["maintenance"]:

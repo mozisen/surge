@@ -10,7 +10,7 @@ from .inventory import users_for
 from vaio.common import PROTOCOL_CORES
 
 
-def config_details(core, proto, row, params):
+def config_details(core, proto, row, params, connection_only=False):
     if core not in PROTOCOL_CORES.get(proto, ()):
         raise ValueError('不支持此协议配置详情')
     users = [u for u in users_for(row) if u.get('name') == params['name']]
@@ -31,11 +31,19 @@ def config_details(core, proto, row, params):
         data['version'] = {'snell': 4, 'snell-v5': 5, 'snell-v6': 6}[proto]
     host = params['host']
     config_ip = '[' + host + ']' if ':' in host else host
-    shell = helper + '\nrender() {\nlocal protocol="$1" config_ip="$2" country_code="节点"\nlocal cfg; cfg=$(cat)\n' + fields + '\nlocal display_port="$port"\ncase "$protocol" in\n' + template + '\nesac\n}\nrender "$@"'
-    result = subprocess.run(['bash', '-c', shell, 'vaio-details', proto, config_ip],
+    functions = ['get_ip_suffix', 'gen_vless_link', 'gen_hy2_link', 'gen_trojan_link',
+                 'gen_ss2022_link', 'gen_ss_legacy_link', 'gen_snell_link', 'gen_anytls_link']
+    for name in functions:
+        helper += '\n' + re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
+    helper += '\ngen_snell_v5_link() { gen_snell_link "$1" "$2" "$3" "${4:-5}" "$5"; }\n'
+    link_template = display.split('        case "$protocol" in\n', 1)[1].split('\n        esac', 1)[0]
+    shell = helper + '\nrender() {\nlocal protocol="$1" config_ip="$2" country_code="$3"\nlocal cfg; cfg=$(cat)\n' + fields + '\nlocal display_port="$port"\ncase "$protocol" in\n' + ('' if connection_only else template) + '\nesac\nlocal ip_addr="$config_ip" link_port="$port" link join_code\ncase "$protocol" in\n' + link_template + '\nesac\nprintf "%s\\n" "$link"\n}\nrender "$@"'
+    result = subprocess.run(['bash', '-c', shell, 'vaio-details', proto, config_ip, row.get('country', 'XX')],
                             input=json.dumps(data), capture_output=True, text=True, timeout=20)
     if result.returncode:
         raise ValueError('读取脚本配置模板失败')
+    if connection_only:
+        return result.stdout.strip()
     addresses = []
     for key in ('ipv4', 'ipv6'):
         if row.get(key):
@@ -47,4 +55,4 @@ def config_details(core, proto, row, params):
     header = [f'{label}: {host}', '运行内核: ' + ('独立核心' if proto.startswith('snell') else 'Xray' if core == 'xray' else 'Sing-box'),
               f"端口: {row['port']}", '用户: ' + params['name']]
     header += [x for x in addresses if x != header[0]]
-    return '\n'.join(header) + '\n' + result.stdout.strip() + '\n'
+    return '\n'.join(header) + '\n' + result.stdout.rsplit('\n', 2)[0].strip() + '\n'

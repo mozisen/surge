@@ -1,6 +1,10 @@
 import json
 import time
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
+from agent import addresses
+from vaio.common import validate_task
 from agent.config_details import config_details
 from vaio.common import PROTOCOL_CORES
 import test_panel as panel
@@ -53,3 +57,32 @@ class DetailAccessTest(unittest.TestCase):
             db.execute('UPDATE tasks SET finished=? WHERE id=?',(time.time()-601,task))
         self.assertEqual(self.client.get(url).status_code,404)
         self.assertEqual(self.client.get('/api/tasks').json['tasks'][0]['result'],{})
+
+class AutomaticAddressTest(unittest.TestCase):
+    def tearDown(self):
+        addresses._cache = None
+        addresses._at = 0
+
+    def test_discovery_validates_family_and_caches(self):
+        addresses._cache = None
+        def probe(url, family=None):
+            if family == 4: return '8.8.8.8'
+            if family == 6: return '1.1.1.1'  # NAT64 response must not become IPv6.
+            return 'HK'
+        with patch.object(addresses, 'curl', side_effect=probe) as curl, patch.object(addresses.subprocess,'run',return_value=SimpleNamespace(stdout='[]')):
+            first=addresses.discover()
+            self.assertEqual(first,dict(ipv4='8.8.8.8',country='HK'))
+            count=curl.call_count
+            self.assertEqual(addresses.discover(),first)
+            self.assertEqual(curl.call_count,count)
+        self.assertEqual(addresses.valid('192.168.1.1'), '')
+        self.assertEqual(addresses.valid('127.0.0.1'), '')
+        validate_task(dict(action='share',protocol='vless',core='xray',port=443,params=dict(name='default')))
+
+    def test_script_links_include_snell_mode_and_ipv6(self):
+        row=dict(port=26997,mode='unshaped',country='HK',users=[dict(name='default',uuid='secret')])
+        link=config_details('xray','snell-v6',row,dict(name='default',host='2001:db8::1'),connection_only=True)
+        self.assertEqual(link,'snell://secret@[2001:db8::1]:26997?version=6&mode=unshaped#HK-Snell-v6-v6')
+        details=config_details('xray','snell-v6',row,dict(name='default',host='2001:db8::1'))
+        self.assertIn('HK-Snell = snell',details)
+        self.assertIn('version=6, mode=unshaped',details)
