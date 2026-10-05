@@ -71,10 +71,13 @@ class ProtocolExtensions(unittest.TestCase):
                 self.assertEqual(read_db(self.cfg)[core][proto], [sibling])
 
     def test_new_protocols_render_only_selected_inbound_and_keep_stats(self):
-        for core, proto in [('xray', 'trojan'), ('singbox', 'trojan'), ('singbox', 'anytls'), ('singbox', 'vless')]:
+        for core, proto in [('xray', 'trojan'), ('singbox', 'trojan'), ('singbox', 'anytls'), ('singbox', 'vless'), ('singbox', 'ss-legacy'), ('singbox', 'ss2022')]:
             with self.subTest(core=core, protocol=proto):
                 row = dict(port=30001, panel_cert='/cert', panel_key='/key', users=[dict(name='alice', uuid='secret', enabled=True)])
                 row.update(sni='example.com', private_key='private', short_id='abcd')
+                if proto in ('ss-legacy', 'ss2022'):
+                    row['method'] = 'aes-128-gcm' if proto == 'ss-legacy' else '2022-blake3-aes-128-gcm'
+                    row['users'][0]['uuid'] = 'eHh4eHh4eHh4eHh4eHh4eA=='
                 sibling = {'tag': 'untouched', 'port' if core == 'xray' else 'listen_port': 30002, 'custom': ['keep']}
                 before = {'inbounds': [render_inbound(proto, row, core=core), sibling], 'outbounds': [{'tag': 'custom'}],
                           'experimental': {'v2ray_api': {'stats': {'enabled': True, 'users': ['keep-existing']}}}}
@@ -94,6 +97,8 @@ class ProtocolExtensions(unittest.TestCase):
                 self.assertEqual(actual['outbounds'], before['outbounds'])
                 if core == 'singbox':
                     self.assertEqual(actual['experimental']['v2ray_api']['stats']['users'], ['keep-existing', proto + '-alice'])
+                if proto in ('ss-legacy', 'ss2022'):
+                    self.assertEqual(actual['experimental']['v2ray_api']['stats']['inbounds'], [actual['inbounds'][0]['tag']])
                 for user in changed['users']:
                     user['enabled'] = False
                 inbound = render_inbound(proto, changed, actual['inbounds'][0], core)

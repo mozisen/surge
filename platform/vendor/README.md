@@ -3,10 +3,10 @@
 `vless-server.sh` 是本提交根目录同名脚本的逐字节快照，保留原作者声明：
 
 - 仓库：https://github.com/mozisen/surge
-- 分支：`codex/ss-install`
+- 分支：`codex/ss-traffic`
 - 提交：与当前根目录脚本同一 Git 提交；使用下列摘要固定内容。
-- 版本：`3.7.3-preview.4`（兼容平台的统一配置渲染预览版）
-- SHA-256：`c38e64b01875047b28beb41645f054ff59a9bc53bca17bfd0a8b763e865c06cd`
+- 版本：`3.7.3-preview.5`（兼容平台的统一配置渲染预览版）
+- SHA-256：`7b6414342f0f02fef269c366d894327796efc62f0b6eacab67f1adab61cc9117`
 
 原快照未提供许可证，不对该文件另行声明许可证。
 
@@ -21,3 +21,5 @@ Agent 只加载 CLI 分派前的定义，调用白名单内的二进制安装器
 本轮之前的共享渲染版为 3.7.3-preview.2，SHA-256 为 `4c83a5cda311efd5969906467088b49e0daeea5d97ffd8cc0b57c7369788e1f8`。本轮同时修复 Bash 5 严格错误模式下首次统计增量导致同步提前退出的问题。
 
 本次共享渲染器增加 Sing-box 单用户 SS / SS2022，禁用或到期时替换为随机有效密钥，不覆盖其他入站。
+
+SS 单用户入站采集：按唯一端口和标签读取非清零计数，累计与基线原子写入唯一用户；依赖带 with_v2ray_api 的 Sing-box、grpcurl 与周期 --sync-traffic。必须同步更新节点主脚本，Agent 升级不会覆盖已有主脚本。

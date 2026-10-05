@@ -17,7 +17,7 @@ from .inventory import read_db, rows, service_for, users_for
 from .billing import effective_usage
 
 ROOT = Path(__file__).resolve().parent.parent
-UPSTREAM_SHA = "c38e64b01875047b28beb41645f054ff59a9bc53bca17bfd0a8b763e865c06cd"
+UPSTREAM_SHA = "7b6414342f0f02fef269c366d894327796efc62f0b6eacab67f1adab61cc9117"
 
 
 def atomic_write(path, content):
@@ -367,6 +367,14 @@ class Runtime:
                 config.setdefault("inbounds", []).append(render_inbound(proto, after, core=core))
             if core == "singbox":
                 stats = config.get("experimental", {}).get("v2ray_api", {}).get("stats", {})
+                if proto in ("ss-legacy", "ss2022"):
+                    api = config.setdefault("experimental", {}).setdefault("v2ray_api", {})
+                    api.setdefault("listen", "127.0.0.1:10086")
+                    stats = api.setdefault("stats", {})
+                    stats["enabled"] = True
+                    tags = [i["tag"] for i in config["inbounds"] if i.get("type") == "shadowsocks"
+                            and not i.get("users") and not i.get("destinations") and i.get("tag")]
+                    stats["inbounds"] = list(dict.fromkeys(stats.get("inbounds", []) + tags))
                 if stats.get("enabled"):
                     # Preserve all existing names; add this instance's users only.
                     stats["users"] = list(dict.fromkeys(stats.get("users", []) + [proto + "-" + u["name"] for u in users_for(after or {})]))

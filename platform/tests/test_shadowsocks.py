@@ -20,6 +20,15 @@ class ShadowsocksTest(unittest.TestCase):
     setUp = extensions.ProtocolExtensions.setUp
     tearDown = extensions.ProtocolExtensions.tearDown
     task = extensions.ProtocolExtensions.task
+    def test_traffic_requires_fresh_single_user_sample(self):
+        from agent.billing import traffic_state
+        for proto in ('ss-legacy', 'ss2022'):
+            row = {'users': [{'traffic_observed_at': 999}]}
+            self.assertEqual(traffic_state({}, 'singbox', proto, row, 1000), 'ready')
+            self.assertEqual(traffic_state({}, 'singbox', proto, row, 2000), 'unavailable')
+            self.assertEqual(traffic_state({}, 'singbox', proto, {'users':[{}]}, 2000), 'unavailable')
+            self.assertEqual(traffic_state({}, 'singbox', proto, {'users':[{},{}]}, 2000), 'unsupported')
+
     def test_keys_methods_render_and_rejection(self):
         for proto, methods in SS_METHODS.items():
             for method in methods:

@@ -13,7 +13,7 @@ def cycle_key(day, today=None):
 
 def traffic_state(db, core, proto, row, now=None):
     now = time.time() if now is None else now
-    if proto.startswith('snell'):
+    if proto.startswith('snell') or (core == 'singbox' and proto in ('ss-legacy', 'ss2022') and len(row.get('users', [])) == 1):
         at = (row.get('users') or [{}])[0].get('traffic_observed_at', 0)
     elif (core == 'xray' and proto in ('vless', 'trojan')) or (core == 'singbox' and proto in ('vless', 'trojan', 'hy2', 'anytls', 'tuic')):
         at = db.get('meta', {}).get('traffic_observed_' + core, 0)

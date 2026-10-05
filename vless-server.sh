@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.3-preview.4"
+readonly VERSION="3.7.3-preview.5"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2546,7 +2546,8 @@ _singbox_stats_config_ready() {
     jq -e --argjson keys "$keys" '
         .experimental.v2ray_api as $api |
         $api.stats.enabled == true and ($api.listen // "") != "" and
-        (($keys - ($api.stats.users // [])) | length == 0)
+        (($keys - ($api.stats.users // [])) | length == 0) and
+        (([.inbounds[]? | select(.type == "shadowsocks" and (.users // [] | length) == 0 and (.destinations // [] | length) == 0) | .tag] - ($api.stats.inbounds // [])) | length == 0)
     ' "$CFG/singbox.json" >/dev/null
 }
 
@@ -2849,6 +2850,60 @@ mark_traffic_sync_result() {
 
 # 同步实现。外层 sync_all_user_traffic() 负责加锁，避免 cron 与 TG 查询同时
 # 使用 -reset 读取核心计数器而造成流量遗漏。
+# SS 单用户入站没有认证用户名，以精确端口/标签将入站计数归属唯一用户。
+_ss_stats_generation() {
+    local pid start boot
+    pid=$(pgrep -x sing-box | head -n 1)
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/stat" ]] || return 1
+    start=$(awk '{print $22}' "/proc/$pid/stat")
+    boot=$(cat /proc/sys/kernel/random/boot_id) || return 1
+    printf '%s:%s:%s\n' "$boot" "$pid" "$start"
+}
+
+_sync_ss_inbound_traffic() {
+    [[ -f "$CFG/singbox.json" ]] || return 0
+    local candidates snapshot generation after_generation counters
+    candidates=$(jq -cn --slurpfile db "$DB_FILE" --slurpfile cfg "$CFG/singbox.json" '
+        $cfg[0] as $c | [ $db[0].singbox | to_entries[]? |
+        select(.key == "ss-legacy" or .key == "ss2022") | .key as $p |
+        (.value | if type == "array" then .[] else . end) |
+        select((.users | length) == 1) | . as $r |
+        [$c.inbounds[]? | select(.listen_port == $r.port)] as $ib |
+        select(($ib | length) == 1) | $ib[0] as $i |
+        select($i.type == "shadowsocks" and ($i.users // [] | length) == 0 and
+            ($i.destinations // [] | length) == 0 and ($i.tag | type) == "string") |
+        select([$c.inbounds[]? | select(.tag == $i.tag)] | length == 1) |
+        select($c.experimental.v2ray_api.stats.enabled == true and
+            (($c.experimental.v2ray_api.stats.inbounds // []) | index($i.tag)) != null) |
+        {proto:$p,port:$r.port,name:$r.users[0].name,tag:$i.tag} ] | group_by(.port) | map(select(length == 1) | .[0])') || return 1
+    [[ "$candidates" != '[]' ]] || return 0
+    generation=$(_ss_stats_generation) || return 1
+    [[ -n "$generation" ]] || return 1
+    snapshot=$(singbox_api_query 'inbound>>>' false) || return 1
+    after_generation=$(_ss_stats_generation) || return 1
+    [[ "$generation" == "$after_generation" ]] || return 1
+    counters=$(printf '%s\n' "$snapshot" | jq -Rn '
+        [inputs | select(length > 0) | capture("^(?<key>inbound>>>.*>>>traffic>>>(uplink|downlink)) (?<value>[0-9]+)$") |
+        {key:.key,value:(.value|tonumber)}] | from_entries') || return 1
+    _db_apply --argjson rows "$candidates" --argjson counts "$counters" --arg g "$generation" --argjson at "$(date +%s)" '
+        reduce $rows[] as $r (. ;
+            ($counts["inbound>>>"+$r.tag+">>>traffic>>>uplink"]) as $up |
+            ($counts["inbound>>>"+$r.tag+">>>traffic>>>downlink"]) as $down |
+            if $up == null or $down == null then . else
+            .singbox[$r.proto] |= (
+                def apply_row:
+                    if .port == $r.port and (.users|length) == 1 and .users[0].name == $r.name then
+                    .users[0] |= (
+                        (if .counter_generation == $g then (.counter_up // 0) else 0 end) as $u |
+                        (if .counter_generation == $g then (.counter_down // 0) else 0 end) as $d |
+                        .used = ((.used // 0) + (if $up >= $u then $up-$u else $up end) +
+                            (if $down >= $d then $down-$d else $down end)) |
+                        .counter_up=$up | .counter_down=$down | .counter_generation=$g | .traffic_observed_at=$at
+                    ) else . end;
+                if type == "array" then map(apply_row) else apply_row end
+            ) end)'
+}
+
 _sync_all_user_traffic_unlocked() {
     local reset="${1:-true}"  # 默认重置计数器
     
@@ -2861,6 +2916,7 @@ _sync_all_user_traffic_unlocked() {
     
     # 检查是否需要发送每日报告
     check_daily_report
+    _sync_ss_inbound_traffic || { mark_traffic_sync_result "ss_error" 0; return 1; }
 
     local has_xray=false
     local has_singbox=false
@@ -11897,11 +11953,13 @@ generate_singbox_config() {
         base_config=$(echo "$base_config" | jq \
             --arg listen "127.0.0.1:${SINGBOX_V2RAY_API_PORT}" \
             --argjson users "$stats_users" \
+            --argjson ibs "$inbounds" \
             '.experimental.v2ray_api = {
                 listen: $listen,
                 stats: {
                     enabled: true,
-                    users: $users
+                    users: $users,
+                    inbounds: [$ibs[] | select(.type == "shadowsocks" and (.users // [] | length) == 0 and (.destinations // [] | length) == 0) | .tag]
                 }
             }')
     fi
