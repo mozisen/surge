@@ -931,6 +931,11 @@ pre {
 
 #toast {
     position: fixed;
+    top: auto;
+    right: auto;
+    margin: 0;
+    border: 0;
+    pointer-events: none;
     bottom: 25px;
     left: 50%;
     transform: translateX(-50%);
@@ -1416,3 +1421,5 @@ pre {
 input[type="checkbox"]{accent-color:#181818}
 
 .connection-qr { display: block; max-width: 100%; height: auto; background: white; padding: 12px; }
+
+#config-details { white-space: pre; overflow-wrap: normal; overflow-x: auto; tab-size: 2; line-height: 1.65; }

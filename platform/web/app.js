@@ -108,14 +108,38 @@ const post = (path, data = {}, headers = {}) => api(path, {
 });
 
 function toast(text) {
-    $('#toast').textContent = text;
-    $('#toast').style.display = 'block';
+    const notice = $('#toast');
+    notice.textContent = text;
+    notice.style.display = 'block';
+    // Native dialog lives in the top layer; z-index alone cannot place a toast above it.
+    if (notice.showPopover) {
+        notice.setAttribute('popover', 'manual');
+        if (notice.matches(':popover-open')) notice.hidePopover();
+        notice.showPopover();
+    } else {
+        ($('#modal').open ? $('#modal') : document.body).append(notice);
+    }
     clearTimeout(toast.timer);
-    toast.timer = setTimeout(() => $('#toast').style.display = 'none', 4500);
+    toast.timer = setTimeout(() => {
+        if (notice.hidePopover && notice.matches(':popover-open')) notice.hidePopover();
+        notice.style.display = 'none';
+    }, 4500);
+}
+
+function formatConfigDetails(text) {
+    const seenAddresses = new Set();
+    return String(text).split('\n').map(line => line.replace(/^ {2}/, '').replace(/^IPV([46]):/, 'IPv$1:'))
+        .filter(line => {
+            if (!/^IPv[46]:/.test(line)) return true;
+            if (seenAddresses.has(line)) return false;
+            seenAddresses.add(line);
+            return true;
+        }).join('\n');
 }
 
 function modal(title, body, wide = false) {
     const dialog = $('#modal');
+    if (dialog.contains($('#toast'))) document.body.append($('#toast'));
     dialog.className = wide ? 'wide' : '';
     dialog.innerHTML = `<div class="modal-head"><h2 id="dialog-title">${esc(title)}</h2><button class="quiet" data-action="close" aria-label="关闭">${icon('close')}</button></div><div class="modal-body">${body}</div>`;
     if (!dialog.open) dialog.showModal();
@@ -359,7 +383,7 @@ function showTask(id) {
         return;
     }
     const r = t.result || {};
-    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p>${badge(t.status)} <span class="mono">${esc(t.request.protocol)}:${t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(r.config_details)}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息（10 分钟后过期）</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
+    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p>${badge(t.status)} <span class="mono">${esc(t.request.protocol)}:${t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息（10 分钟后过期）</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
 }
 
 function installPortCandidate(instances, current) {
