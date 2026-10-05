@@ -5,9 +5,9 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 const chunk = source.slice(source.indexOf('function installPortCandidate('), source.indexOf('function editUser('));
 const elements = {};
-for (const id of ['ss-method', 'reality-private', 'reality-short-id', 'generate-short-id', 'credential', 'generate-credential', 'certificate-mode', 'acme-email', 'snell-mode', 'dns', 'dns-preference', 'tfo', 'install-options-status', 'certificate-help', 'protocol', 'port', 'sni', 'generate-sni', 'snell-name-field', 'install-name',
+for (const id of ['protocol-choice-form', 'protocol-choice', 'install-back', 'install-core-field', 'ss-method-field', 'credential-fields', 'certificate-fields', 'reality-fields', 'snell-fields', 'credential-label', 'acme-email-field', 'ss-method', 'reality-private', 'reality-short-id', 'generate-short-id', 'credential', 'generate-credential', 'certificate-mode', 'acme-email', 'snell-mode', 'dns', 'dns-preference', 'tfo', 'install-options-status', 'certificate-help', 'protocol', 'port', 'sni', 'generate-sni', 'snell-name-field', 'install-name',
     'sni-field', 'sni-label', 'protocol-guidance', 'generated-credentials', 'generation-feedback', 'generate-port', 'generate-name', 'install-form', 'submit']) {
-    elements[id] = {value: '', events: {}, addEventListener(event, handler) { this.events[event] = handler; }, reportValidity() { return true; }};
+    elements[id] = {value: '', events: {}, focus() {}, addEventListener(event, handler) { this.events[event] = handler; }, reportValidity() { return true; }};
 }
 elements.protocol.value = 'xray:vless';
 elements.port.value = '24443';
@@ -31,11 +31,18 @@ const context = vm.createContext({
 vm.runInContext(chunk, context);
 async function main() {
     context.install();
+    assert(markup.includes('protocol-choice-form'));
+    assert(!markup.includes('install-form'));
+    assert.equal(calls.length, 0);
+    elements['protocol-choice'].value='vless';
+    elements['protocol-choice-form'].events.submit({preventDefault(){}});
+    assert(markup.includes('install-form'));
+    assert(!markup.includes('value="xray:snell-v6"'));
     for (const id of ['generate-port', 'generate-name', 'generate-sni']) {
         assert(markup.includes(`type="button" id="${id}"`));
     }
     assert.equal(elements.port.value, '24443'); // opening does not overwrite defaults
-    assert.equal(elements['snell-name-field'].hidden, false);
+    assert.equal(elements['snell-name-field'].hidden, true);
     assert.equal(elements['install-name'].disabled, true);
     assert.match(elements['generated-credentials'].textContent, /UUID/);
     elements['generate-port'].onclick();
@@ -64,7 +71,7 @@ async function main() {
         elements.protocol.value = combo;
         elements.protocol.events.change();
         const snell = combo.includes('snell');
-        assert.equal(elements['sni-field'].hidden, false);
+        assert.equal(elements['sni-field'].hidden, snell);
         assert.equal(elements.sni.required, !snell);
         assert.equal(elements['install-name'].required, snell);
         assert(elements['protocol-guidance'].textContent.length > 10);
@@ -109,14 +116,14 @@ async function main() {
     context.selected.snapshot.install_options_version = 2;
     elements.protocol.value = 'singbox:vless';
     elements.protocol.events.change();
-    assert.equal(elements['ss-method', 'reality-private'].disabled, false);
+    assert.equal(elements['reality-private'].disabled, false);
     elements['reality-short-id'].value = 'aabbccdd';
     await elements['install-form'].events.submit({preventDefault() {}, target: elements['install-form']});
     assert.equal(calls.at(-1)[2].short_id, 'aabbccdd');
     assert.equal(calls.at(-1)[2].certificate_mode, undefined);
     elements.protocol.value = 'singbox:anytls';
     elements.protocol.events.change();
-    assert.equal(elements['ss-method', 'reality-private'].disabled, true);
+    assert.equal(elements['reality-private'].disabled, true);
     await elements['install-form'].events.submit({preventDefault() {}, target: elements['install-form']});
     assert.equal(calls.at(-1)[2].short_id, undefined);
     context.selected.snapshot.install_options_version = 1;
@@ -132,6 +139,11 @@ async function main() {
         assert.equal(elements.sni.disabled,true);
         assert.equal(elements['certificate-mode'].disabled,true);
         assert.equal(elements['ss-method'].disabled,false);
+        assert.equal(elements['sni-field'].hidden,true);
+        assert.equal(elements['certificate-fields'].hidden,true);
+        assert.equal(elements['reality-fields'].hidden,true);
+        assert.equal(elements['snell-fields'].hidden,true);
+        assert.equal(elements['ss-method-field'].hidden,false);
         elements['generate-credential'].onclick();
         if (protocol==='ss2022') assert.equal(Buffer.from(elements.credential.value,'base64').length,16);
         await elements['install-form'].events.submit({preventDefault(){},target:elements['install-form']});
@@ -140,6 +152,8 @@ async function main() {
         assert.equal(params.certificate_mode,undefined);
         assert.equal(params.method,elements['ss-method'].value);
     }
+    elements['install-back'].onclick();
+    assert(markup.includes('protocol-choice-form'));
     console.log('PASS installation generators, defaults, protocol fields, collisions, no implicit submission');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
