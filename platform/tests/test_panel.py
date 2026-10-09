@@ -206,11 +206,16 @@ class PanelTest(unittest.TestCase):
 
     def test_account_username_only_and_validation(self):
         data = dict(username="owner", current_password="a-long-test-password", new_password="", confirm_password="")
-        for patch in [dict(username="x"), dict(username="a b"), dict(new_password="short"),
+        for patch in [dict(username="x"), dict(username="a b"), dict(new_password="short"), dict(new_password="7chars!",confirm_password="7chars!"),
                       dict(new_password="long-enough-password",confirm_password="different")]:
             self.assertEqual(self.client.post('/api/account', json={**data, **patch}, headers=self.headers).status_code, 400)
         self.assertEqual(self.client.post('/api/account',json=data,headers=self.headers).status_code,200)
         self.assertEqual(self.client.post('/api/login',json=dict(username="owner",password="a-long-test-password")).status_code,200)
+
+    def test_account_accepts_eight_character_password(self):
+        data = dict(username="admin", current_password="a-long-test-password", new_password="8chars!!", confirm_password="8chars!!")
+        self.assertEqual(self.client.post('/api/account', json=data, headers=self.headers).status_code, 200)
+        self.assertEqual(self.client.post('/api/login', json=dict(username="admin", password="8chars!!")).status_code, 200)
 
     def test_account_current_password_rate_limit(self):
         data = dict(username="owner", current_password="wrong")

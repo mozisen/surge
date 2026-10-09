@@ -234,8 +234,8 @@ def create_app(config=None):
             raise ValueError("账号需为 3–32 位字母、数字、点、下划线或短横线")
         if not isinstance(current, str) or not current or len(current) > 1024:
             raise ValueError("请输入当前密码")
-        if not isinstance(password, str) or (password and not 12 <= len(password) <= 128):
-            raise ValueError("新密码需为 12–128 位")
+        if not isinstance(password, str) or (password and not 8 <= len(password) <= 128):
+            raise ValueError("新密码需为 8–128 位")
         if password != data.get("confirm_password", ""):
             raise ValueError("两次输入的新密码不一致")
         now = time.time()
