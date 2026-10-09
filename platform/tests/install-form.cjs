@@ -5,7 +5,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 const chunk = source.slice(source.indexOf('function installPortCandidate('), source.indexOf('function editUser('));
 const elements = {};
-for (const id of ['protocol-choice-form', 'protocol-choice', 'install-back', 'install-core-field', 'ss-method-field', 'credential-fields', 'certificate-fields', 'reality-fields', 'snell-fields', 'credential-label', 'acme-email-field', 'ss-method', 'reality-private', 'reality-short-id', 'generate-short-id', 'credential', 'generate-credential', 'certificate-mode', 'acme-email', 'snell-mode', 'dns', 'dns-preference', 'tfo', 'install-options-status', 'certificate-help', 'protocol', 'port', 'sni', 'generate-sni', 'snell-name-field', 'install-name',
+for (const id of ['protocol-choice-form', 'install-back', 'install-advanced', 'install-core-field', 'ss-method-field', 'credential-fields', 'certificate-fields', 'reality-fields', 'snell-fields', 'credential-label', 'acme-email-field', 'ss-method', 'reality-private', 'reality-short-id', 'generate-short-id', 'credential', 'generate-credential', 'certificate-mode', 'acme-email', 'snell-mode', 'dns', 'dns-preference', 'tfo', 'install-options-status', 'certificate-help', 'protocol', 'port', 'sni', 'generate-sni', 'snell-name-field', 'install-name',
     'sni-field', 'sni-label', 'protocol-guidance', 'generated-credentials', 'generation-feedback', 'generate-port', 'generate-name', 'install-form', 'submit']) {
     elements[id] = {value: '', events: {}, focus() {}, addEventListener(event, handler) { this.events[event] = handler; }, reportValidity() { return true; }};
 }
@@ -34,9 +34,19 @@ async function main() {
     assert(markup.includes('protocol-choice-form'));
     assert(!markup.includes('install-form'));
     assert.equal(calls.length, 0);
-    elements['protocol-choice'].value='vless';
+    assert(markup.includes('<button type="submit" class="protocol-card" value="vless">'));
+    assert(markup.includes('<button type="submit" class="protocol-card" value="snell-v6">'));
+    assert(markup.includes('Reality · TCP'));
+    assert(markup.includes('已安装 1 个')); // snell-v6 has one instance; vless has none
+    assert.equal((markup.match(/已安装/g) || []).length, 1);
+    assert(!markup.includes('<select'));
+    elements['protocol-choice-form'].events.submit({preventDefault(){}, submitter: {value: 'unknown'}});
     elements['protocol-choice-form'].events.submit({preventDefault(){}});
+    assert(!markup.includes('install-form')); // unknown or missing card value does not open the form
+    elements['protocol-choice-form'].events.submit({preventDefault(){}, submitter: {value: 'vless'}});
     assert(markup.includes('install-form'));
+    assert(markup.includes('<details id="install-advanced"'));
+    assert(!markup.includes('<details id="install-advanced" class="install-section" open'));
     assert(!markup.includes('value="xray:snell-v6"'));
     for (const id of ['generate-port', 'generate-name', 'generate-sni']) {
         assert(markup.includes(`type="button" id="${id}"`));
@@ -45,6 +55,7 @@ async function main() {
     assert.equal(elements['snell-name-field'].hidden, true);
     assert.equal(elements['install-name'].disabled, true);
     assert.match(elements['generated-credentials'].textContent, /UUID/);
+    assert.equal(elements['install-advanced'].hidden, true); // install_options_version 0: nothing advanced to show
     elements['generate-port'].onclick();
     assert.equal(elements.port.value, 20001);
     assert.equal(calls.length, 0); // generation never installs
@@ -93,6 +104,7 @@ async function main() {
     elements['acme-email'].value = 'admin@example.com';
     elements['install-name'].value = 'alice';
     elements.protocol.events.change();
+    assert.equal(elements['install-advanced'].hidden, false);
     assert.equal(elements['acme-email'].disabled, false);
     assert.equal(elements['acme-email'].required, true);
     assert.equal(elements['generate-sni'].disabled, true);

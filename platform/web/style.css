@@ -875,29 +875,190 @@ dialog::backdrop {
     gap: 14px
 }
 
-#install-form .install-generate {
-    margin-top: 12px;
-    margin-bottom: 8px;
-    min-height: 44px;
-    border-color: var(--muted);
-    background: var(--accent-soft);
-    font-weight: 600;
+.form-grid:has(> #sni-field[hidden]) {
+    grid-template-columns: 1fr
 }
 
-#install-form .install-generate:hover {
-    background: var(--ink);
-    color: var(--surface);
+dialog.install {
+    width: 760px
+}
+
+dialog.install[open] {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden
+}
+
+dialog.install .modal-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 0
+}
+
+dialog.install form {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column
+}
+
+.install-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 8px 26px 22px
+}
+
+dialog.install .modal-foot {
+    flex-shrink: 0;
+    align-items: center;
+    padding: 14px 26px;
+    border-top: 1px solid var(--line);
+    background: var(--surface)
+}
+
+.protocol-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+    margin-top: 14px
+}
+
+.protocol-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 2px;
+    min-width: 0;
+    padding: 14px 16px;
+    border-radius: 10px;
+    text-align: left;
+    overflow-wrap: anywhere
+}
+
+.protocol-card strong {
+    font-size: 15px;
+    margin-bottom: 4px
+}
+
+.protocol-card span {
+    font-size: 12px;
+    color: var(--muted)
+}
+
+.protocol-card .protocol-card-cores {
+    color: var(--ink)
+}
+
+.protocol-card .protocol-card-count {
+    margin-top: 6px;
+    color: var(--ink);
+    font-weight: 600
+}
+
+.protocol-card:hover,
+.protocol-card:focus-visible {
+    background: var(--surface);
+    border-color: var(--ink)
 }
 
 #install-form [hidden] {
     display: none;
 }
 
+.install-intro-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px
+}
+
+.install-intro-head #protocol-guidance {
+    margin: 8px 0 0;
+    color: var(--ink)
+}
+
+.install-intro-head button {
+    flex-shrink: 0
+}
+
+.install-section {
+    margin: 22px 0 0;
+    padding: 16px 0 0;
+    border: 0;
+    border-top: 1px solid var(--line);
+    min-width: 0
+}
+
+.install-section > h3,
+fieldset.install-section > legend,
+.install-section > summary {
+    font-size: 13px;
+    font-weight: 600;
+    margin: 0;
+    padding: 0
+}
+
+#install-form legend {
+    float: left;
+    width: 100%;
+    padding: 0;
+    margin-bottom: 8px
+}
+
+#install-form legend + * {
+    clear: both
+}
+
+.install-section > summary {
+    display: flex;
+    align-items: center;
+    min-height: 28px;
+    cursor: pointer;
+    list-style: none
+}
+
+.install-section > summary::-webkit-details-marker {
+    display: none
+}
+
+.install-section > summary::after {
+    content: "+";
+    margin-left: auto;
+    font-size: 16px;
+    font-weight: 400;
+    color: var(--muted)
+}
+
+.install-section[open] > summary::after {
+    content: "−"
+}
+
 #install-form .install-options {
-    margin: 24px 0 0;
-    padding: 16px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
+    margin: 14px 0 0;
+    padding: 0;
+    border: 0;
+    min-width: 0
+}
+
+#install-form .install-options > legend {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted)
+}
+
+.input-action {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px
+}
+
+#install-form .install-generate {
+    padding: 0 14px;
+    white-space: nowrap
 }
 
 #install-form :disabled {
@@ -905,6 +1066,29 @@ dialog::backdrop {
     color: var(--muted);
     cursor: not-allowed;
     opacity: .65;
+}
+
+.install-status {
+    flex-shrink: 0;
+    padding: 0 26px
+}
+
+.install-status p,
+.install-status .error {
+    margin: 8px 0;
+    min-height: 0
+}
+
+/* Collapse instead of display:none so live regions stay in the accessibility tree. */
+.install-status p:empty,
+.install-status .error:empty {
+    margin: 0
+}
+
+dialog.install .install-warning {
+    flex: 1;
+    margin: 0;
+    font-size: 12px
 }
 
 .helper {
@@ -1148,6 +1332,33 @@ pre {
 
     .modal-body {
         padding: 8px 20px 20px
+    }
+
+    .install-scroll {
+        padding: 8px 20px 18px
+    }
+
+    .install-status {
+        padding: 0 20px
+    }
+
+    dialog.install .modal-foot {
+        flex-wrap: wrap;
+        padding: 12px 20px
+    }
+
+    dialog.install .install-warning {
+        flex-basis: 100%
+    }
+
+    .protocol-grid {
+        grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+        gap: 10px
+    }
+
+    .install-intro-head {
+        flex-direction: column;
+        gap: 8px
     }
 
     .heading .action-row {
