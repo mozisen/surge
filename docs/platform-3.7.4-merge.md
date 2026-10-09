@@ -38,3 +38,4 @@
 - 本地验证：shell 回归 18 项通过（live 用例未运行）；unittest 92 项通过、2 项跳过；`bash -n` 通过，vendor 副本一致。本机无 Node，前端检查以 GitHub Actions 为准（`app.js` 本次未改）。
 - 面板与 Agent 版本号升为 `0.3.0-preview.9`，前端资源缓存参数同步更新。脚本版本仍为 3.7.4-preview.2。
 - 2026-10-09 通过 termark 将 vps.town 面板升级到 `5d52f3f`（0.3.0-preview.9）：升级器测试 92 项通过、2 项跳过，服务正常，首页资源版本为 preview.9，`index.html` SHA-256 与本地一致。备份 `/var/backups/vaio-panel/1791530821000064419`。节点 Agent 与主脚本仍未更新。
+- 节点暂不更新（用户决定）。原测试节点 ovh-vps-1 已在面板中吊销删除；当前唯一在线节点"香港维多利亚"有真实用户流量，未获授权，Agent 仍为 preview.8、脚本仍为 3.7.3-preview.5。合并后的月重置逻辑尚未在真实节点验证。
