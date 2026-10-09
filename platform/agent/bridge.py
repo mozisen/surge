@@ -1,0 +1,397 @@
+import base64
+import copy
+import fcntl
+import json
+import os
+import re
+import secrets
+import socket
+import uuid
+import hashlib
+from contextlib import contextmanager
+from pathlib import Path
+from urllib.parse import quote, urlencode
+
+from vaio.install_options import SS_METHODS
+from vaio.common import MUTATIONS, config_revision, validate_task
+from .addresses import discover
+from .config_details import config_details
+from .inventory import mutable, read_db, rows, service_for, users_for
+from .runtime import Runtime, active_users, atomic_write
+from .billing import advance, configure, traffic_state
+
+
+class TransactionUnknown(RuntimeError):
+    """The task must be inspected on the node, never automatically replayed."""
+
+
+class TransactionRolledBack(RuntimeError):
+    """Runtime and database restoration completed."""
+
+
+class Bridge:
+    def __init__(self, cfg="/etc/vless-reality", state="/var/lib/vaio-agent", runtime=None):
+        self.cfg, self.state = Path(cfg), Path(state)
+        self.runtime = runtime or Runtime(self.cfg, self.state)
+
+    @contextmanager
+    def locked(self):
+        self.cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(self.cfg / ".db.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    def write(self, db):
+        atomic_write(self.cfg / "db.json", json.dumps(db, ensure_ascii=False, indent=2))
+
+    @staticmethod
+    def find(db, core, proto, port):
+        found = [r for c, p, r in rows(db) if (c, p, r["port"]) == (core, proto, port)]
+        if len(found) != 1:
+            raise ValueError("无法唯一定位协议实例，请刷新节点")
+        return found[0]
+
+    @staticmethod
+    def save_row(db, core, proto, before, after):
+        value = db.setdefault(core, {}).get(proto, [])
+        items = value if isinstance(value, list) else [value]
+        new_items = [after if r is before else r for r in items] if before else items + [after]
+        new_items = [r for r in new_items if r is not None]
+        if not new_items:
+            db[core].pop(proto, None)
+        else:
+            db[core][proto] = new_items if isinstance(value, list) or len(new_items) > 1 else new_items[0]
+
+    @staticmethod
+    def check_port(db, port):
+        if port in (10085, 10086) or any(row["port"] == port for _, _, row in rows(db)):
+            raise ValueError("端口已被使用或为统计接口保留端口")
+        # Probe both transports, then release immediately; the service's final bind is authoritative.
+        for family, address in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+            for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+                with socket.socket(family, kind) as sock:
+                    try:
+                        sock.bind((address, port))
+                    except OSError as error:
+                        if family == socket.AF_INET6 and error.errno in (97, 99):
+                            continue
+                        raise ValueError("目标端口已被系统占用")
+
+    def execute(self, task):
+        identity = task.get("id", str(uuid.uuid4()))
+        if not isinstance(identity, str) or str(uuid.UUID(identity)) != identity:
+            raise ValueError("任务 ID 无效")
+        validated = validate_task({k: v for k, v in task.items() if k != "id"})
+        if validated["action"] not in MUTATIONS:
+            return self._execute({**validated, "id": identity})
+        if (self.state / "enforcement-pending.json").exists():
+            raise TransactionUnknown("自动计费策略上次执行未确认，请在节点核对 enforcement-backup 后解除阻塞")
+        fingerprint = hashlib.sha256(json.dumps(validated, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        directory = self.state / "transactions"
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        record = directory / (identity + ".json")
+        # Bridge remains safe even when invoked without the Agent process lock.
+        with open(directory / ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if record.exists():
+                prior = json.loads(record.read_text())
+                if prior.get("fingerprint") != fingerprint:
+                    raise ValueError("任务 ID 已用于不同请求，已拒绝执行")
+                if prior.get("status") == "succeeded":
+                    return prior["result"]
+                if prior.get("status") == "failed":
+                    raise RuntimeError(prior["message"])
+                raise TransactionUnknown("任务结果待核对，禁止重放；节点记录 " + str(record))
+            intent = {"fingerprint": fingerprint, "status": "running"}
+            atomic_write(record, json.dumps(intent))
+            try:
+                result = self._execute({**validated, "id": identity})
+            except TransactionUnknown:
+                atomic_write(record, json.dumps({**intent, "status": "unknown"}))
+                raise
+            except TransactionRolledBack:
+                atomic_write(record, json.dumps({**intent, "status": "failed", "message": "应用失败且配置已回滚；原请求不重放，请刷新后重新提交"}))
+                raise
+            except ValueError:
+                atomic_write(record, json.dumps({**intent, "status": "failed", "message": "参数或配置检查失败，原请求不得重放"}))
+                raise
+            except Exception:
+                # Includes interruption after a filesystem change or unsuccessful
+                # restore. Never present an uncertain result as a clean failure.
+                atomic_write(record, json.dumps({**intent, "status": "unknown"}))
+                raise TransactionUnknown("事务未确认完成，请在节点核对备份；记录 " + str(record))
+            atomic_write(record, json.dumps({**intent, "status": "succeeded", "result": result}))
+            return result
+
+    def _execute(self, task):
+        task_id = task.get("id", str(uuid.uuid4()))
+        if not isinstance(task_id, str) or str(uuid.UUID(task_id)) != task_id:
+            raise ValueError("任务 ID 无效")
+        task = validate_task({k: v for k, v in task.items() if k != "id"})
+        core, proto, action = task["core"], task["protocol"], task["action"]
+        with self.locked():
+            if action in MUTATIONS and (self.state / "enforcement-pending.json").exists():
+                raise TransactionUnknown("自动策略执行结果未知，请先在节点核对")
+            db = read_db(self.cfg)
+            if action in MUTATIONS and task["revision"] != config_revision(db):
+                raise ValueError("节点配置已变化，已拒绝过期任务；请刷新后重新操作")
+            before = None if action == "install" else self.find(db, core, proto, task["port"])
+            if before and not mutable(core, proto, before):
+                raise ValueError("该实例首版仅支持查看")
+            if before and proto.startswith("snell") and before.get("snell_id") and not re.fullmatch(r"[0-9a-f]{24}", str(before["snell_id"])):
+                raise ValueError("Snell 实例 ID 无效")
+            if before and proto.startswith("snell") and not before.get("snell_id"):
+                if len([r for c, p, r in rows(db) if p == proto]) > 1:
+                    raise ValueError("旧版多端口 Snell 无法安全定位配置，请先在原脚本完成迁移")
+            if action == "inspect":
+                return {"steps": ["已读取数据库并验证目标实例"], "affected": [service_for(core, proto, before)]}
+            if action == "share":
+                params = dict(task["params"])
+                display_row = dict(before)
+                if not params.get('host'):
+                    addresses = discover()
+                    display_row.update(addresses)
+                    params['host'] = addresses.get('ipv4') or addresses['ipv6']
+                return {"connection": config_details(core, proto, display_row, params, connection_only=True),
+                        "config_details": config_details(core, proto, display_row, params)}
+            if action.startswith("user_") and proto.startswith("snell") and action != "user_update":
+                raise ValueError("Snell 一用户一端口，请通过新增或卸载协议实例管理")
+            original = copy.deepcopy(db)
+            if proto in SS_METHODS and action in ("user_add", "user_delete"):
+                raise ValueError("SS 系列采用一用户一端口，请新增或卸载实例；现有用户可编辑")
+            params = task["params"]
+            after = copy.deepcopy(before)
+            if action == "install":
+                self.check_port(db, task["port"])
+                # Do not mix legacy and independently managed Snell layouts without migration.
+                if proto.startswith("snell") and any(p == proto and not r.get("snell_id") for _, p, r in rows(db)):
+                    raise ValueError("已有旧版 Snell，请先用原脚本迁移多用户后再添加实例")
+                self.runtime.install(proto, core) if proto in ("trojan", "anytls", "ss-legacy", "ss2022") or (proto == "vless" and core == "singbox") else self.runtime.install(proto)
+                name = params.get("name", "default")
+                if not proto.startswith("snell") and any(u.get("name") == name for c, p, r in rows(db) if (c, p) == (core, proto) for u in users_for(r)):
+                    if "name" in params:
+                        raise ValueError("同协议用户名已存在")
+                    name = "u" + str(task["port"])
+                    if any(u.get("name") == name for c, p, r in rows(db) if (c, p) == (core, proto) for u in users_for(r)):
+                        raise ValueError("自动生成的用户名已存在，请选择其他端口")
+                credential = params.get("credential") or (str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16))
+                if proto == "ss2022" and not params.get("credential"):
+                    credential = base64.b64encode(secrets.token_bytes(16 if "128" in params.get("method", SS_METHODS[proto][0]) else 32)).decode()
+                after = {"port": task["port"], "instance_id": str(uuid.uuid4()), "panel_managed": True, "users": [
+                    {"name": name, "uuid": credential, "enabled": True, "used": 0, "quota": 0, "expire_date": ""}]}
+                if proto == "vless":
+                    if "private_key" in params:
+                        private, public = self.runtime.supplied_keys(params["private_key"])
+                    else:
+                        private, public = self.runtime.keys(core) if core == "singbox" else self.runtime.keys()
+                    after.update(uuid=credential, private_key=private, public_key=public, short_id=params.get("short_id", secrets.token_hex(4)).lower(),
+                                 sni=params["sni"], security_mode="reality")
+                elif proto in SS_METHODS:
+                    after.update(password=credential, method=params.get("method", SS_METHODS[proto][0]))
+                elif proto in ("hy2", "trojan", "anytls"):
+                    after.update(password=credential, sni=params["sni"], hop_enable="0")
+                    after["certificate_mode"] = params.get("certificate_mode", "self")
+                    after["certificate_core"] = core
+                    if "acme_email" in params:
+                        after["acme_email"] = params["acme_email"]
+                    self.runtime.certificate(after)
+                else:
+                    if any(u.get("name") == name for c, p, r in rows(db) if p == proto for u in users_for(r)):
+                        raise ValueError("同协议 Snell 用户名已存在")
+                    snell_id = secrets.token_hex(12)
+                    after.update(psk=credential, snell_id=snell_id, version={"snell": "4", "snell-v5": "5", "snell-v6": "6"}[proto])
+                    after["users"][0]["id"] = snell_id
+                    if proto == "snell-v6":
+                        after.update(mode=params.get("mode", "default"), dns=params.get("dns", ""),
+                                     dns_ip_preference=params.get("dns_ip_preference", "default"),
+                                     tfo=params.get("tfo", True))
+                    db.setdefault("meta", {}).setdefault("snell_users", {})[proto] = True
+            elif action == "delete":
+                after = None
+            elif action == "update":
+                if params["port"] != before["port"]:
+                    self.check_port(db, params["port"])
+                after["port"] = params["port"]
+            elif action.startswith("user_"):
+                after["users"] = copy.deepcopy(users_for(before))
+                users = after["users"]
+                found = [u for u in users if u.get("name") == params["name"]]
+                if action == "user_add":
+                    # Upstream traffic identities are protocol-wide, not per-port.
+                    if any(u.get("name") == params["name"] for c, p, row in rows(db) if c == core and p == proto for u in users_for(row)):
+                        raise ValueError("同协议用户名已存在")
+                    user = {"name": params["name"], "uuid": str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16), "enabled": True, "used": 0}
+                    users.append(user)
+                else:
+                    if len(found) != 1:
+                        raise ValueError("用户不存在或不唯一")
+                    user = found[0]
+                if action == "user_delete":
+                    if params["name"] == "default":
+                        raise ValueError("默认用户请禁用；保留记录以兼容原脚本")
+                    users.remove(user)
+                else:
+                    if "quota_gb" in params or "reset_day" in params:
+                        if (params.get("quota_gb", user.get("panel_quota", 0)) or params.get("reset_day", 0)) and traffic_state(db, core, proto, before or after) != "ready":
+                            raise ValueError("此实例没有最近 15 分钟内的可靠流量统计，请先检查原脚本的定时统计任务")
+                        configure(user, params)
+                    if "expire_date" in params:
+                        user["expire_date"] = params["expire_date"]
+                    if "enabled" in params:
+                        user["enabled"] = params["enabled"]
+                    if params.get("reset_credentials"):
+                        old_credential = user.get("uuid")
+                        user["uuid"] = str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16)
+                        if proto == "ss2022":
+                            user["uuid"] = base64.b64encode(secrets.token_bytes(16 if "128" in after["method"] else 32)).decode()
+                        for field in ("uuid", "password", "psk"):
+                            if old_credential is not None and after.get(field) == old_credential:
+                                after[field] = user["uuid"]
+            if after:
+                for billing_user in users_for(after):
+                    advance(billing_user)
+                after["panel_managed"] = True
+                if not proto.startswith("snell"):
+                    # Keep routing tags stable when the CLI subsequently changes a port.
+                    config_path = self.cfg / ("singbox.json" if core == "singbox" else "config.json")
+                    try:
+                        existing = json.loads(config_path.read_text()).get("inbounds", []) if config_path.exists() else []
+                    except json.JSONDecodeError:
+                        existing = []  # Runtime.apply will reject malformed live JSON before replacement.
+                    matches = [i for i in existing if before and i.get("listen_port" if core == "singbox" else "port") == before["port"]]
+                    after["runtime_tag"] = (matches[0].get("tag") if len(matches) == 1 else None) or after.get("runtime_tag") or (proto + ("-in-" if core == "singbox" else "-") + str(after["port"]))
+            target = after or before
+            service = service_for(core, proto, target)
+            paused = db.setdefault("meta", {}).setdefault("panel_paused_services", [])
+            if action == "stop":
+                if service not in paused:
+                    paused.append(service)
+            elif action in ("start", "restart"):
+                if service in paused:
+                    paused.remove(service)
+            elif service in paused:
+                raise ValueError("该共享服务已暂停，请先启动服务再修改配置")
+            # Backups contain credentials; never leave the node or use public file modes.
+            backup = self.state / "backups" / task_id
+            backup.mkdir(parents=True, mode=0o700)
+            atomic_write(backup / "db.json", json.dumps(original, indent=2))
+            files = {str(p): p.read_bytes() if p.exists() else None for p in self.runtime.paths(core, proto, target)}
+            for number, (path, content) in enumerate(files.items()):
+                if content is not None:
+                    atomic_write(backup / str(number), content)
+            atomic_write(backup / "manifest.json", json.dumps(list(files)))
+            running = self.runtime.is_running(service)
+            enabled = self.runtime.is_enabled(service)
+            atomic_write(backup / "recovery.json", json.dumps({
+                "core": core, "protocol": proto, "port": task["port"], "service": service,
+                "running": running, "enabled": enabled, "revision": config_revision(original),
+                "files": [{"path": path, "backup": str(number) if content is not None else None}
+                          for number, (path, content) in enumerate(files.items())]}))
+            self.save_row(db, core, proto, before, after)
+            try:
+                self.write(db)
+                if action == "stop":
+                    self.runtime.service(service, "stop")
+                    self.runtime.service(service, "disable")
+                    if self.runtime.is_running(service):
+                        raise RuntimeError("服务未成功停止")
+                else:
+                    self.runtime.apply(core, proto, before, after, db)
+            except Exception as error:
+                self.write(original)
+                try:
+                    self.runtime.restore(service, files, running, enabled)
+                except Exception:
+                    raise TransactionUnknown("应用失败且服务未完全恢复，请在节点检查备份 " + str(backup)) from error
+                raise TransactionRolledBack("应用失败：" + str(error) + "；配置已回滚；节点备份 " + str(backup)) from error
+            return {"backup": str(backup), "affected": [service],
+                    "steps": ["检查配置版本与目标实例", "保存节点本地备份", "更新指定实例", "校验并应用运行配置", "验证服务状态"]}
+
+    @staticmethod
+    def share(proto, row, params):
+        users = [u for u in users_for(row) if u.get("name") == params["name"]]
+        if len(users) != 1:
+            raise ValueError("用户不存在")
+        credential = users[0]["uuid"]
+        host = params["host"]
+        host = "[" + host + "]" if ":" in host else host
+        address = host + ":" + str(row["port"])
+        if proto in SS_METHODS:
+            auth = quote(row["method"] + ":" + credential, safe="") if proto == "ss2022" else base64.urlsafe_b64encode((row["method"] + ":" + credential).encode()).decode().rstrip("=")
+            return "ss://" + auth + "@" + address + "#" + quote(params["name"])
+        if proto == "vless":
+            query = urlencode({"encryption": "none", "security": "reality", "type": "tcp", "flow": "xtls-rprx-vision",
+                               "sni": row["sni"], "fp": "chrome", "pbk": row["public_key"], "sid": row["short_id"]})
+            return "vless://" + quote(credential, safe="") + "@" + address + "?" + query + "#" + quote(params["name"])
+        if proto == "hy2":
+            return "hysteria2://" + quote(credential, safe="") + "@" + address + "?" + urlencode({"sni": row["sni"], "insecure": "1" if row.get("certificate_mode", "self") == "self" else "0"})
+        if proto in ("trojan", "anytls"):
+            options = {"sni": row.get("sni", ""), "security": "tls"}
+            if row.get("panel_cert") and row.get("certificate_mode", "self") == "self":
+                options["allowInsecure"] = "1"
+            return proto + "://" + quote(credential, safe="") + "@" + address + "?" + urlencode(options) + "#" + quote(params["name"])
+        version = {"snell": 4, "snell-v5": 5, "snell-v6": 6}[proto]
+        mode = ', mode=' + row["mode"] if version == 6 and row.get("mode", "default") != "default" else ""
+        tfo = str(row.get("tfo", True)).lower()
+        return f'{params["name"]} = snell, {host}, {row["port"]}, psk={credential}, version={version}{mode}, reuse=true, tfo={tfo}'
+
+    def reconcile(self):
+        """Locally enforce expiry / externally collected quotas even if the panel is offline."""
+        with self.locked():
+            pending = self.state / "enforcement-pending.json"
+            if pending.exists():
+                raise TransactionUnknown("自动策略执行结果未知，未自动重试；请核对 enforcement-backup")
+            db = read_db(self.cfg)
+            original = copy.deepcopy(db)
+            for _, _, item in rows(db):
+                for user in users_for(item):
+                    advance(user)
+            statepath = self.state / "enforcement.json"
+            state = json.loads(statepath.read_text()) if statepath.exists() else {}
+            plans, saved = [], {}
+            for core, proto, row in rows(db):
+                if not row.get("panel_managed") or not mutable(core, proto, row):
+                    continue
+                service = service_for(core, proto, row)
+                if service in db.get("meta", {}).get("panel_paused_services", []):
+                    continue
+                key = f'{core}:{proto}:{row["port"]}'
+                allowed = [u["name"] for u in active_users(row)]
+                if state.get(key) != allowed:
+                    if service not in saved:
+                        saved[service] = ({}, self.runtime.is_running(service), self.runtime.is_enabled(service))
+                    for path in self.runtime.paths(core, proto, row):
+                        saved[service][0].setdefault(str(path), path.read_bytes() if path.exists() else None)
+                    plans.append((core, proto, row))
+                    state[key] = allowed
+            if db != original or plans:
+                backup = self.state / "enforcement-backup"
+                backup.mkdir(mode=0o700, exist_ok=True)
+                atomic_write(backup / "db.json", json.dumps(original))
+                manifest = {}
+                for service, (files, running, enabled) in saved.items():
+                    manifest[service] = dict(running=running, enabled=enabled, files={})
+                    for path, content in files.items():
+                        name = hashlib.sha256(path.encode()).hexdigest()
+                        if content is not None:
+                            atomic_write(backup / name, content)
+                        manifest[service]["files"][path] = name if content is not None else None
+                atomic_write(backup / "manifest.json", json.dumps(manifest))
+                if plans:
+                    atomic_write(pending, json.dumps({"revision": config_revision(original)}))
+                self.write(db)
+                try:
+                    for core, proto, row in plans:
+                        self.runtime.apply(core, proto, row, row, db)
+                except Exception:
+                    try:
+                        self.write(original)
+                        for service, (files, running, enabled) in saved.items():
+                            self.runtime.restore(service, files, running, enabled)
+                    except Exception as error:
+                        raise TransactionUnknown("自动策略失败且恢复未确认，请核对 enforcement-backup") from error
+                    pending.unlink(missing_ok=True)
+                    raise
+            atomic_write(statepath, json.dumps(state))
+            pending.unlink(missing_ok=True)

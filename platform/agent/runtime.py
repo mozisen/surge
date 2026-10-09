@@ -1,0 +1,435 @@
+"""Allowlisted OS operations. Existing routing and unrelated inbounds are preserved."""
+import base64
+import datetime
+import hashlib
+import json
+import os
+import re
+import signal
+import shlex
+import subprocess
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+from .inventory import read_db, rows, service_for, users_for
+from .billing import effective_usage
+
+ROOT = Path(__file__).resolve().parent.parent
+UPSTREAM_SHA = "7ce9467d90298512b62ef4072fa977a98985850074150802981e855511ab7aa6"
+
+
+def atomic_write(path, content):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp = tempfile.mkstemp(dir=str(path.parent), prefix=".vaio-")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content.encode() if isinstance(content, str) else content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        # Persist the rename as well as the contents before applying mutations.
+        directory = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def active_users(row):
+    today = datetime.date.today().isoformat()
+    return [u for u in users_for(row) if u.get("enabled", True)
+            and (not u.get("expire_date") or u["expire_date"] >= today)
+            and (not effective_usage(u)[1] or effective_usage(u)[0] < effective_usage(u)[1])]
+
+
+def render_inbound(proto, row, previous=None, core=None):
+    """Use the standalone CLI renderer; no second protocol schema in the Agent."""
+    source = (ROOT / "vendor/vless-server.sh").read_bytes()
+    if hashlib.sha256(source).hexdigest() != UPSTREAM_SHA:
+        raise RuntimeError("脚本完整性校验失败")
+    match = re.search(r"^_platform_render_inbound\(\) \{\n.*?^\}", source.decode(), re.M | re.S)
+    if not match:
+        raise RuntimeError("脚本缺少共享配置生成接口")
+    core = core or ("singbox" if proto in ("hy2", "anytls") else "xray")
+    result = subprocess.run(["bash", "-c", match[0] + '\n_platform_render_inbound "$@"',
+                             "vaio-render", core, proto],
+                            input=json.dumps({"row": row, "previous": previous}),
+                            capture_output=True, text=True, timeout=20)
+    if result.returncode:
+        raise ValueError("共享配置生成失败；未替换运行配置")
+    return json.loads(result.stdout)
+
+
+class Runtime:
+    def __init__(self, cfg, state):
+        self.cfg, self.state = Path(cfg), Path(state)
+        self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.log = self.state / "runtime.log"
+
+    def command(self, argv, timeout=120, capture=False):
+        # Output may contain credentials: keep only on the node, never in task messages.
+        with open(self.log, "ab") as log:
+            os.chmod(self.log, 0o600)
+            if self.log.stat().st_size > 5 * 1024 * 1024:
+                log.truncate(0)
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE if capture else log,
+                                    stderr=log, start_new_session=True,
+                                    env={**os.environ, "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                                         "ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS": "true"})
+            try:
+                output, _ = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+                raise RuntimeError("执行 " + Path(argv[0]).name + " 超时；请查看节点 runtime.log")
+            if proc.returncode:
+                raise RuntimeError("执行 " + Path(argv[0]).name + " 失败（退出码 " + str(proc.returncode) + "）；请查看节点 runtime.log")
+            return output.decode().strip() if capture else ""
+
+    def upstream(self, operation, *args):
+        allowed = {"install_xray", "install_singbox", "install_snell", "install_snell_v5", "install_snell_v6", "_snell_update_counter_port", "install_acme_tool"}
+        if operation not in allowed:
+            raise ValueError("未授权的脚本操作")
+        source = (ROOT / "vendor/vless-server.sh").read_bytes()
+        if hashlib.sha256(source).hexdigest() != UPSTREAM_SHA:
+            raise RuntimeError("脚本完整性校验失败")
+        library = self.state / "upstream-library.sh"
+        atomic_write(library, source.decode().split("# 命令行参数处理\n", 1)[0])
+        runner = 'source "$1"; shift; "$@"'
+        self.command(["bash", "-c", runner, "vaio", str(library), operation, *args], timeout=1200)
+
+    def install(self, proto, core=None):
+        self.ensure_main_script()
+        if proto in ("trojan", "anytls", "ss-legacy", "ss2022") or (proto == "vless" and core == "singbox"):
+            return self.upstream("install_singbox" if core == "singbox" else "install_xray")
+        operation = {"vless": "install_xray", "hy2": "install_singbox", "snell": "install_snell",
+                     "snell-v5": "install_snell_v5", "snell-v6": "install_snell_v6"}[proto]
+        self.upstream(operation)
+
+    def ensure_main_script(self, bindir="/usr/local/bin"):
+        """Bootstrap CLI on fresh nodes, never overwrite an existing installation."""
+        source = (ROOT / "vendor/vless-server.sh").read_bytes()
+        if hashlib.sha256(source).hexdigest() != UPSTREAM_SHA:
+            raise RuntimeError("脚本完整性校验失败")
+        directory = Path(bindir)
+        script, shortcut = directory / "vless-server.sh", directory / "vless"
+        # Validate all collisions before writing anything.
+        if script.is_symlink() or (script.exists() and not script.is_file()):
+            raise ValueError("主脚本路径冲突，请先在节点核对")
+        if shortcut.exists() or shortcut.is_symlink():
+            if not shortcut.is_symlink() or shortcut.resolve() != script.resolve():
+                raise ValueError("vless 快捷命令已被其他程序占用，未覆盖")
+        directory.mkdir(parents=True, exist_ok=True)
+        if not script.exists():
+            atomic_write(script, source)
+            script.chmod(0o755)
+        if not shortcut.is_symlink():
+            shortcut.symlink_to(script)
+        if not (self.cfg / "role").exists():
+            atomic_write(self.cfg / "role", "server\n")
+
+    def supplied_keys(self, private):
+        """Derive X25519 public key without putting the private key in argv/logs."""
+        from vaio.install_options import validate_install_options
+        validate_install_options("vless", {"private_key": private})
+        der = bytes.fromhex("302e020100300506032b656e04220420") + base64.urlsafe_b64decode(private + "=")
+        result = subprocess.run(["openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER"],
+                                input=der, capture_output=True, timeout=20)
+        prefix = bytes.fromhex("302a300506032b656e032100")
+        if result.returncode or len(result.stdout) != len(prefix) + 32 or not result.stdout.startswith(prefix):
+            raise ValueError("无法从 Reality 私钥生成公钥，未安装协议")
+        return private, base64.urlsafe_b64encode(result.stdout[-32:]).decode().rstrip("=")
+
+    def keys(self, core="xray"):
+        output = self.command(["/usr/local/bin/sing-box", "generate", "reality-keypair"] if core == "singbox" else ["/usr/local/bin/xray", "x25519"], capture=True)
+        private = re.search(r"PrivateKey:\s*(\S+)", output)
+        public = re.search(r"(?:Password(?: \(PublicKey\))?|PublicKey):\s*(\S+)", output)
+        if not private or not public:
+            raise RuntimeError("无法读取 Reality 密钥")
+        return private[1], public[1]
+
+    def certificate(self, row):
+        identity = row.get("instance_id")
+        if identity is not None and (not isinstance(identity, str) or str(uuid.UUID(identity)) != identity):
+            raise ValueError("证书实例标识无效")
+        certdir = self.cfg / "certs" / ("panel-" + identity if identity else "hy2")
+        certdir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        cert, key = certdir / "server.crt", certdir / "server.key"
+        mode = row.get("certificate_mode", "self")
+        if mode == "existing":
+            cert, key = self.cfg / "certs/server.crt", self.cfg / "certs/server.key"
+        elif mode == "acme":
+            matches = [r for _, _, r in rows(read_db(self.cfg))
+                       if r.get("certificate_mode") == "acme" and r.get("sni") == row["sni"]]
+            if matches:
+                prior = matches[0]
+                cert, key = Path(prior["panel_cert"]), Path(prior["panel_key"])
+                if not cert.is_relative_to(self.cfg / "certs") or not key.is_relative_to(self.cfg / "certs"):
+                    raise ValueError("已有证书不在受管目录")
+                self.command(["openssl", "x509", "-in", str(cert), "-noout", "-checkend", "86400"])
+                self.command(["openssl", "x509", "-in", str(cert), "-noout", "-checkhost", row["sni"]])
+                cert_public = self.command(["openssl", "x509", "-in", str(cert), "-pubkey", "-noout"], capture=True)
+                key_public = self.command(["openssl", "pkey", "-in", str(key), "-pubout"], capture=True)
+                if not cert_public or cert_public != key_public:
+                    raise ValueError("已有证书与私钥不匹配")
+                row.update(panel_cert=str(cert), panel_key=str(key))
+                return
+            # Never stop an unrelated web server to acquire port 80.
+            from .bridge import Bridge
+            Bridge.check_port(read_db(self.cfg), 80)
+            self.upstream("install_acme_tool")
+            acme = str(Path.home() / ".acme.sh/acme.sh")
+            self.command([acme, "--register-account", "--server", "letsencrypt", "-m", row["acme_email"]], timeout=180)
+            self.command([acme, "--issue", "--server", "letsencrypt", "-d", row["sni"],
+                          "--standalone", "--httpport", "80", "--keylength", "ec-256"], timeout=600)
+            # An instance-specific path prevents replacing sibling certificates.
+            # Renewal uses a fixed hook, not administrator-supplied shell.
+            hook = certdir / "reload.sh"
+            core = row.get("certificate_core")
+            if core not in {"xray", "singbox"}:
+                raise ValueError("证书续期目标内核无效")
+            hook_text = '#!/bin/sh\n'
+            for service, filename in (("vless-reality", "config.json"), ("vless-singbox", "singbox.json")):
+                hook_text += ('if grep -Fq -- ' + shlex.quote(str(cert)) + ' ' + shlex.quote(str(self.cfg / filename)) + '; then\n'
+                              + '  if command -v systemctl >/dev/null 2>&1; then\n'
+                              + '    systemctl try-restart ' + service + ' || exit 1\n'
+                              + '  elif command -v rc-service >/dev/null 2>&1; then\n'
+                              + '    if rc-service ' + service + ' status >/dev/null 2>&1; then rc-service ' + service + ' restart || exit 1; fi\n'
+                              + '  fi\nfi\n')
+            atomic_write(hook, hook_text)
+            hook.chmod(0o700)
+            self.command([acme, "--install-cert", "-d", row["sni"], "--ecc",
+                          "--key-file", str(key), "--fullchain-file", str(cert),
+                          "--reloadcmd", str(hook)], timeout=180)
+        elif mode != "self":
+            raise ValueError("证书模式无效")
+        elif not cert.exists() and not key.exists():
+            self.command(["openssl", "req", "-x509", "-nodes", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                          "-keyout", str(key), "-out", str(cert), "-subj", "/CN=" + row["sni"], "-days", "3650",
+                          "-addext", "subjectAltName=DNS:" + row["sni"],
+                          "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "extendedKeyUsage=serverAuth"])
+        if not cert.exists() or not key.exists():
+            raise ValueError("TLS 证书文件不完整，请先修复")
+        key.chmod(0o600)
+        self.command(["openssl", "x509", "-in", str(cert), "-noout", "-checkend", "0"])
+        self.command(["openssl", "x509", "-in", str(cert), "-noout", "-checkhost", row["sni"]])
+        cert_public = self.command(["openssl", "x509", "-in", str(cert), "-pubkey", "-noout"], capture=True)
+        key_public = self.command(["openssl", "pkey", "-in", str(key), "-pubout"], capture=True)
+        if not cert_public or cert_public != key_public:
+            raise ValueError("证书与私钥不匹配")
+        row.update(panel_cert=str(cert), panel_key=str(key))
+
+    def is_running(self, service):
+        command = ["rc-service", service, "status"] if Path("/sbin/openrc").exists() else ["systemctl", "is-active", service]
+        try:
+            return subprocess.run(command, capture_output=True, timeout=10).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def service(self, name, action):
+        if not re.fullmatch(r"vless-[a-z0-9-]+", name) or action not in {"restart", "start", "stop", "enable", "disable"}:
+            raise ValueError("服务操作无效")
+        if Path("/sbin/openrc").exists():
+            argv = ["rc-update", "add" if action == "enable" else "del", name, "default"] if action in ("enable", "disable") else ["rc-service", name, action]
+        else:
+            argv = ["systemctl", action, name]
+        self.command(argv)
+
+    def is_enabled(self, name):
+        if Path("/sbin/openrc").exists():
+            return (Path("/etc/runlevels/default") / name).exists()
+        try:
+            return subprocess.run(["systemctl", "is-enabled", name], capture_output=True, timeout=10).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def unit_path(self, service):
+        return Path("/etc/init.d") / service if Path("/sbin/openrc").exists() else Path("/etc/systemd/system") / (service + ".service")
+
+    def ensure_unit(self, service, binary, arguments):
+        path = self.unit_path(service)
+        if path.exists():
+            return
+        prepare = ""
+        if service.startswith("vless-snellu-"):
+            prepare = "/usr/bin/python3 -m agent prepare --instance " + service.removeprefix("vless-snellu-")
+        if Path("/sbin/openrc").exists():
+            content = f'#!/sbin/openrc-run\nname="{service}"\nsupervisor="supervise-daemon"\ndirectory="{ROOT}"\ncommand="{binary}"\ncommand_args="{arguments}"\nrespawn_delay=3\ndepend() {{ need net; }}\n'
+            if prepare:
+                content += f'start_pre() {{ cd "{ROOT}" && {prepare}; }}\n'
+        else:
+            content = f"[Unit]\nDescription=Vaio managed {service}\nAfter=network-online.target\n[Service]\nWorkingDirectory={ROOT}\n"
+            if prepare:
+                content += f"ExecStartPre={prepare}\n"
+            content += f"ExecStart={binary} {arguments}\nRestart=on-failure\nRestartSec=3\nLimitNOFILE=51200\n[Install]\nWantedBy=multi-user.target\n"
+        atomic_write(path, content)
+        path.chmod(0o755 if Path("/sbin/openrc").exists() else 0o644)
+        if not Path("/sbin/openrc").exists():
+            self.command(["systemctl", "daemon-reload"])
+
+    def config_path(self, core, proto, row):
+        if proto.startswith("snell"):
+            return self.cfg / "snell-users" / (row["snell_id"] + ".conf") if row.get("snell_id") else self.cfg / (proto + ".conf")
+        return self.cfg / ("singbox.json" if core == "singbox" else "config.json")
+
+    def paths(self, core, proto, row):
+        return [self.config_path(core, proto, row), self.unit_path(service_for(core, proto, row))]
+
+    def remove_counters(self, identity):
+        if not re.fullmatch(r"[0-9a-f]{24}", identity):
+            raise ValueError("Snell 实例 ID 无效")
+        changes = []
+        for chain in ("input", "output"):
+            try:
+                data = json.loads(self.command(["nft", "-j", "list", "chain", "inet", "vless_snell_users", chain], capture=True))
+            except (RuntimeError, FileNotFoundError):
+                continue
+            for item in data.get("nftables", []):
+                rule = item.get("rule", {})
+                if rule.get("comment") == identity and type(rule.get("handle")) is int:
+                    changes.append(f'delete rule inet vless_snell_users {chain} handle {rule["handle"]}')
+        if changes:
+            changes += [f'delete counter inet vless_snell_users {prefix}_{identity}' for prefix in ('u', 'd')]
+            plan = self.state / "snell-counters.nft"
+            atomic_write(plan, '\n'.join(changes) + '\n')
+            self.command(["nft", "-f", str(plan)])
+
+    def apply(self, core, proto, before, after, db):
+        row = after or before
+        service = service_for(core, proto, row)
+        path = self.config_path(core, proto, row)
+        if proto.startswith("snell"):
+            if after is None:
+                self.service(service, "stop")
+                self.service(service, "disable")
+                if before.get("snell_id"):
+                    self.remove_counters(before["snell_id"])
+                path.unlink(missing_ok=True)
+                self.unit_path(service).unlink(missing_ok=True)
+                if not Path("/sbin/openrc").exists():
+                    self.command(["systemctl", "daemon-reload"])
+                return
+            old_text = path.read_text() if path.exists() else "[snell-server]\nlisten = 0.0.0.0:0\npsk = pending\n"
+            text = re.sub(r"(?m)^(\s*listen\s*=\s*.+:)\d+\s*$", lambda m: m[1] + str(after["port"]), old_text)
+            text = re.sub(r"(?m)^\s*psk\s*=.*$", "psk = " + after["psk"], text)
+            if proto == "snell-v6":
+                for option, value in (("mode", after.get("mode", "default")),
+                                      ("dns", after.get("dns", "")),
+                                      ("dns-ip-preference", after.get("dns_ip_preference", "default"))):
+                    text = re.sub(r"(?m)^\s*" + re.escape(option) + r"\s*=.*\n?", "", text)
+                    if value:
+                        text = text.rstrip() + "\n" + option + " = " + str(value) + "\n"
+            atomic_write(path, text)
+            binary = "/usr/local/bin/" + {"snell": "snell-server", "snell-v5": "snell-server-v5", "snell-v6": "snell-server-v6"}[proto]
+            self.ensure_unit(service, binary, "-c " + str(path))
+            if after.get("snell_id"):
+                self.upstream("_snell_update_counter_port", after["snell_id"], str(after["port"]))
+            if not active_users(after):
+                self.service(service, "stop")
+                self.service(service, "disable")
+                return
+        else:
+            if path.exists():
+                config = json.loads(path.read_text())
+            elif before:
+                raise ValueError("缺少运行配置，拒绝覆盖；请先修复原节点")
+            elif core == "xray":
+                config = {"log": {"loglevel": "warning"}, "inbounds": [], "outbounds": [{"protocol": "freedom", "tag": "direct"}]}
+            else:
+                config = {"log": {"level": "warn"}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}
+            key = "listen_port" if core == "singbox" else "port"
+            matches = [i for i, inbound in enumerate(config.get("inbounds", [])) if before and inbound.get(key) == before["port"]]
+            if before and len(matches) != 1:
+                raise ValueError("运行配置与数据库不一致，无法唯一定位端口")
+            old = config["inbounds"][matches[0]] if matches else None
+            if old:
+                if proto in ("ss-legacy", "ss2022") and (old.get("type") != "shadowsocks" or old.get("users") or old.get("destinations")):
+                    raise ValueError("运行配置不是受管的单用户 SS 实例")
+                if (proto == "vless" and core == "xray" and (old.get("protocol") != "vless" or old.get("streamSettings", {}).get("security") != "reality")) or (proto == "hy2" and old.get("type") != "hysteria2"):
+                    raise ValueError("运行协议与数据库不一致")
+                if proto == "vless" and core == "singbox" and (old.get("type") != "vless" or not old.get("tls", {}).get("reality", {}).get("enabled")):
+                    raise ValueError("运行协议与数据库不一致")
+                if proto in ("trojan", "anytls"):
+                    if old.get("type" if core == "singbox" else "protocol") != proto:
+                        raise ValueError("运行协议与数据库不一致")
+            if matches:
+                if after:
+                    config["inbounds"][matches[0]] = render_inbound(proto, after, old, core)
+                else:
+                    config["inbounds"].pop(matches[0])
+            else:
+                config.setdefault("inbounds", []).append(render_inbound(proto, after, core=core))
+            if core == "singbox":
+                stats = config.get("experimental", {}).get("v2ray_api", {}).get("stats", {})
+                if proto in ("ss-legacy", "ss2022"):
+                    api = config.setdefault("experimental", {}).setdefault("v2ray_api", {})
+                    api.setdefault("listen", "127.0.0.1:10086")
+                    stats = api.setdefault("stats", {})
+                    stats["enabled"] = True
+                    tags = [i["tag"] for i in config["inbounds"] if i.get("type") == "shadowsocks"
+                            and not i.get("users") and not i.get("destinations") and i.get("tag")]
+                    stats["inbounds"] = list(dict.fromkeys(stats.get("inbounds", []) + tags))
+                if stats.get("enabled"):
+                    # Preserve all existing names; add this instance's users only.
+                    stats["users"] = list(dict.fromkeys(stats.get("users", []) + [proto + "-" + u["name"] for u in users_for(after or {})]))
+            if not [i for i in config["inbounds"] if i.get("tag") != "api"]:
+                self.service(service, "stop")
+                self.service(service, "disable")
+                atomic_write(path, json.dumps(config, indent=2))
+                return
+            binary = "/usr/local/bin/sing-box" if core == "singbox" else "/usr/local/bin/xray"
+            # Check a private sibling file before replacing the live configuration.
+            fd, candidate = tempfile.mkstemp(dir=path.parent, prefix=".vaio-check-", suffix=".json")
+            os.close(fd)
+            try:
+                atomic_write(candidate, json.dumps(config, indent=2))
+                check = [binary, "check", "-c", candidate] if core == "singbox" else [binary, "run", "-test", "-config", candidate]
+                self.command(check)
+                atomic_write(path, json.dumps(config, indent=2))
+            finally:
+                Path(candidate).unlink(missing_ok=True)
+            self.ensure_unit(service, binary, "run -c " + str(path))
+        self.service(service, "enable")
+        self.service(service, "restart")
+        time.sleep(1)
+        if not self.is_running(service):
+            raise RuntimeError("服务启动后未保持运行")
+
+    def restore(self, service, files, running, enabled):
+        # Stop the new process before restoring files, then return to the previous state.
+        try:
+            self.service(service, "stop")
+        except RuntimeError:
+            pass
+        try:
+            self.service(service, "disable")
+        except RuntimeError:
+            pass
+        for path, content in files.items():
+            if content is None:
+                Path(path).unlink(missing_ok=True)
+            else:
+                atomic_write(path, content)
+                if str(path).startswith("/etc/init.d/"):
+                    Path(path).chmod(0o755)
+        if not Path("/sbin/openrc").exists():
+            self.command(["systemctl", "daemon-reload"])
+        if service.startswith("vless-snellu-"):
+            identity = service.removeprefix("vless-snellu-")
+            original = next((r for _, _, r in rows(read_db(self.cfg)) if r.get("snell_id") == identity), None)
+            if original:
+                self.upstream("_snell_update_counter_port", identity, str(original["port"]))
+            else:
+                self.remove_counters(identity)
+        if enabled:
+            self.service(service, "enable")
+        if running:
+            self.service(service, "start")
+            if not self.is_running(service):
+                raise RuntimeError("回滚后服务仍未恢复")

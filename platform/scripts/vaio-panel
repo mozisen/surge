@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+case "${1:-help}" in
+  status) systemctl status vaio-panel --no-pager ;;
+  restart) systemctl restart vaio-panel ;;
+  logs) journalctl -u vaio-panel -n 80 --no-pager ;;
+  update)
+    shift
+    exec python3 /opt/vaio-panel/scripts/update-panel.py "$@" ;;
+  backup|verify-backup|restore)
+    [ "$(id -u)" = 0 ] || { echo '备份恢复需要 root'; exit 1; }
+    action="$1"
+    shift
+    if [ "$action" = restore ] && systemctl is-active --quiet vaio-panel; then
+      echo '请先执行 systemctl stop vaio-panel，再运行恢复；完成后执行 systemctl start vaio-panel'
+      exit 1
+    fi
+    set -a
+    . /etc/vaio-panel/panel.env
+    set +a
+    cd /opt/vaio-panel
+    exec runuser -u vaio-panel --preserve-environment -- .venv/bin/python -m vaio "$action" "$@"
+    ;;
+  account)
+    [ "$(id -u)" = 0 ] || { echo '重置登录信息需要 root'; exit 1; }
+    set -a
+    . /etc/vaio-panel/panel.env
+    set +a
+    cd /opt/vaio-panel
+    runuser -u vaio-panel --preserve-environment -- .venv/bin/python -m vaio init
+    ;;
+  *) echo '用法：vaio-panel status（状态）| restart（重启）| logs（日志）| account（重置账号密码）| update（备份并升级）| backup（创建备份）| verify-backup --name 文件名（校验）| restore --name 文件名（停服恢复）' ;;
+esac

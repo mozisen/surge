@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+case "${1:-help}" in
+  status|logs)
+    if command -v systemctl >/dev/null 2>&1; then
+      if [ "$1" = logs ]; then journalctl -u vaio-agent -n 80 --no-pager; else systemctl status vaio-agent --no-pager; fi
+    else
+      if [ "$1" = logs ]; then tail -80 /var/lib/vaio-agent/agent.log; else rc-service vaio-agent status; fi
+    fi ;;
+  update|resume)
+    [ "$(id -u)" = 0 ] || { echo '请使用 root 执行'; exit 1; }
+    if [ "$1" = resume ]; then python3 /opt/vaio-agent/scripts/update-agent.py --resume
+    else python3 /opt/vaio-agent/scripts/update-agent.py; fi ;;
+  *) echo '用法：vaio-agent status（状态）| logs（日志）| update（保留身份升级）| resume（解除维护）' ;;
+esac

@@ -1,0 +1,29 @@
+# 平台接口线与 3.7.4 预览合并
+
+预览版本：`3.7.4-preview.2`。测试分支：`codex/platform-3.7.4`。仅发布分支，不更新 GitHub Release，不部署服务器。
+
+把两条互不包含的未发布线合到一起：
+
+- `codex/singbox-update-state-fix`（3.7.4-preview.1）：包含正式版 3.7.3 的配额执行、普通 SS 用户与 Telegram cron 修复，以及 Sing-box 核心更新状态修复。
+- `codex/ss-traffic`（3.7.3-preview.5）：平台只读接口、共享渲染器、面板独立配额、SS/SS2022 单用户流量采集，以及 `platform/` 下的面板与 Agent（0.3.0-preview.8）。
+
+## 冲突与取舍
+
+只有两个文件出现文本冲突。
+
+- `reset_monthly_user_traffic`：采用 3.7.3 的逐用户重置，覆盖 Xray、Sing-box 与 Snell，只恢复因超额停用的用户，写入成功后才标记当月已重置。保留平台线的约束：带 `panel_quota` 字段的面板计费用户跳过，不清零也不恢复，由 Agent 按面板周期重置。
+- `tests/singbox-stats-query.sh`：两侧加载的函数取并集。
+
+平台线原先的月重置只处理 Xray，并把所有非面板用户一律设为启用；合并后手动停用和到期用户不再被月重置恢复，这是 3.7.3 的既有行为。
+
+`tests/platform-billing.sh` 随之改为加载逐用户重置所需函数，并增加 Sing-box 用例：面板计费用户（含配额为 0）不变，手动停用的旧用户清零但保持停用。
+
+`platform/vendor/vless-server.sh` 与根目录脚本逐字节一致，`platform/agent/runtime.py` 的 `UPSTREAM_SHA` 和 `platform/vendor/README.md` 已同步。
+
+## 验证
+
+- Shell 隔离回归：`tests/*.sh` 共 19 个，18 个通过；`singbox-stats-live.sh` 需要真实统计核心，本次未运行。
+- 平台：90 项 unittest 中 88 项通过、1 项跳过；`test_qr_auth_expiry_and_result_allowlist` 因本地环境无法安装 `qrcode` 依赖而未能运行，以 GitHub Actions 结果为准。`node --check web/app.js`、`install-form.cjs`、`traffic-display.cjs` 通过。
+- `bash -n vless-server.sh` 通过。`git diff --check` 只报告脚本中原有的行尾空格，本次合并未新增。
+
+以上均为隔离或模拟测试，没有在真实 VPS、真实客户端或线上面板上验证。节点升级 Agent 不会覆盖已有主脚本，需单独更新。

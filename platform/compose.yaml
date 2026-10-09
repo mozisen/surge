@@ -1,0 +1,30 @@
+services:
+  panel:
+    build: .
+    restart: unless-stopped
+    environment:
+      VAIO_PUBLIC_URL: https://${VAIO_DOMAIN:?Set VAIO_DOMAIN in .env}
+    volumes:
+      - panel-data:/app/data
+    expose:
+      - "8080"
+    security_opt:
+      - no-new-privileges:true
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      VAIO_DOMAIN: ${VAIO_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - panel
+volumes:
+  panel-data:
+  caddy-data:
+  caddy-config:
