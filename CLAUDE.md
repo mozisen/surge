@@ -12,7 +12,7 @@
 ## 分支与版本
 
 - `main` 是正式版，只在发布时更新。预览版在 `codex/*` 分支开发和推送，不创建或更新 GitHub Release。
-- 当前开发分支：`codex/platform-3.7.4`（脚本 3.7.4-preview.2，面板 0.3.0-preview.8），合并说明见 `docs/platform-3.7.4-merge.md`。
+- 当前开发分支：`codex/platform-3.7.4`（脚本 3.7.4-preview.2，面板 0.3.0-preview.9），合并说明见 `docs/platform-3.7.4-merge.md`。
 - 每个预览版在 `docs/` 或 `platform/docs/` 记录版本、改动和测试结果。
 
 ## 修改后的检查

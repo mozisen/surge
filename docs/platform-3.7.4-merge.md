@@ -31,3 +31,9 @@
 ## 测试面板部署
 
 2026-10-09 经用户要求，通过 termark 在 vps.town 执行 `vaio-panel update --ref dc1c60b8da117eeb74feb889fe0fbc2d0272b11b`，面板从 `37df3be` 升级到 `dc1c60b`，版本号保持 0.3.0-preview.8。升级器测试 91 项通过、2 项跳过（日志中的“已恢复旧程序”来自临时目录内的回滚自测）；服务运行正常，`/` 返回 200，`web/app.js` 的 SHA-256 与本地一致。备份位于 `/var/backups/vaio-panel/1791530497563494975`，日志位于 `/root/vaio-update-dc1c60b.log`。节点 Agent 与主脚本未更新，月重置逻辑尚未在真实节点验证。
+
+## 面板 0.3.0-preview.9
+
+- 账号设置的密码下限改为 8 位（`9595530`）后，`vaio init` 同步改为 8–128 位，README 同步；新增 init 的 7/8 位边界测试。
+- 本地验证：shell 回归 18 项通过（live 用例未运行）；unittest 92 项通过、2 项跳过；`bash -n` 通过，vendor 副本一致。本机无 Node，前端检查以 GitHub Actions 为准（`app.js` 本次未改）。
+- 面板与 Agent 版本号升为 `0.3.0-preview.9`，前端资源缓存参数同步更新。脚本版本仍为 3.7.4-preview.2。
