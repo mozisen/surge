@@ -217,6 +217,21 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(self.client.post('/api/account', json=data, headers=self.headers).status_code, 200)
         self.assertEqual(self.client.post('/api/login', json=dict(username="admin", password="8chars!!")).status_code, 200)
 
+    def test_init_accepts_eight_character_password(self):
+        from unittest import mock
+        from vaio import __main__ as cli
+        database = self.tmp.name + "/init.sqlite"
+        for password, ok in [("7chars!", False), ("8chars!!", True)]:
+            with mock.patch.dict(os.environ, {"VAIO_DATABASE": database}), mock.patch("sys.argv", ["vaio", "init"]), \
+                 mock.patch("builtins.input", return_value="owner"), mock.patch("getpass.getpass", return_value=password), \
+                 mock.patch("builtins.print"):
+                if ok:
+                    cli.main()
+                else:
+                    self.assertRaises(SystemExit, cli.main)
+        app = create_app({"TESTING": True, "DATABASE": database})
+        self.assertEqual(app.test_client().post('/api/login', json=dict(username="owner", password="8chars!!")).status_code, 200)
+
     def test_account_current_password_rate_limit(self):
         data = dict(username="owner", current_password="wrong")
         for _ in range(8):

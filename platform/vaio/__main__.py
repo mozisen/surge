@@ -37,9 +37,9 @@ def main():
         username = input("管理员账号 [admin]: ").strip() or "admin"
         if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
             raise SystemExit("账号需为 3–32 位字母、数字、点、下划线或短横线")
-        password = getpass.getpass("管理员密码（至少 12 位）: ")
-        if not 12 <= len(password) <= 128 or password != getpass.getpass("再次输入: "):
-            raise SystemExit("密码需为 12–128 位，且两次输入一致")
+        password = getpass.getpass("管理员密码（至少 8 位）: ")
+        if not 8 <= len(password) <= 128 or password != getpass.getpass("再次输入: "):
+            raise SystemExit("密码需为 8–128 位，且两次输入一致")
         path = os.environ.get("VAIO_DATABASE", str(Path(__file__).resolve().parent.parent / "data/panel.sqlite"))
         store = Store(path)
         with store.connect() as db:

@@ -52,7 +52,7 @@ docker compose run --rm panel python -m vaio init
 docker compose up -d
 ```
 
-打开 `https://你的面板域名` 登录。密码最少 12 位，通过终端交互输入，不写入 Git 或镜像。
+打开 `https://你的面板域名` 登录。密码最少 8 位，通过终端交互输入，不写入 Git 或镜像。
 
 1. 在面板添加服务器，设置名称和分组。
 2. 复制生成的安装命令。
