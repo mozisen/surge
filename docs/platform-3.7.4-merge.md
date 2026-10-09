@@ -27,3 +27,7 @@
 - `bash -n vless-server.sh` 通过。`git diff --check` 只报告脚本中原有的行尾空格，本次合并未新增。
 
 以上均为隔离或模拟测试，没有在真实 VPS、真实客户端或线上面板上验证。节点升级 Agent 不会覆盖已有主脚本，需单独更新。
+
+## 测试面板部署
+
+2026-10-09 经用户要求，通过 termark 在 vps.town 执行 `vaio-panel update --ref dc1c60b8da117eeb74feb889fe0fbc2d0272b11b`，面板从 `37df3be` 升级到 `dc1c60b`，版本号保持 0.3.0-preview.8。升级器测试 91 项通过、2 项跳过（日志中的“已恢复旧程序”来自临时目录内的回滚自测）；服务运行正常，`/` 返回 200，`web/app.js` 的 SHA-256 与本地一致。备份位于 `/var/backups/vaio-panel/1791530497563494975`，日志位于 `/root/vaio-update-dc1c60b.log`。节点 Agent 与主脚本未更新，月重置逻辑尚未在真实节点验证。
