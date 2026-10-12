@@ -24,7 +24,7 @@ B=33333333-3333-4333-8333-333333333333
 P=22222222-2222-4222-8222-222222222222
 
 out=$(call '{"api_version":1,"request_id":"cap","action":"capabilities"}')
-[[ "$(jq -r '"\(.data.accounts_api.version)|\(.data.user_authority)"' <<< "$out")" == "2|platform" ]] || fail $LINENO
+[[ "$(jq -r '"\(.data.accounts_api.version)|\(.data.user_authority)"' <<< "$out")" == "3|platform" ]] || fail $LINENO
 
 req=$(jq -nc --arg a "$A" --arg p "$P" '{api_version:1,request_id:"cli-create",action:"account_apply",params:{ops:[
   {op:"create",account_id:$a,platform_user_id:$p,fields:{name:"bob",reset_day:1}},

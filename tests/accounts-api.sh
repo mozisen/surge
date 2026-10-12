@@ -23,7 +23,8 @@ for fn in _account_jq_defs _account_valid_id _account_valid_name _account_valid_
     _db_apply db_get_user_field db_list_users is_standalone_protocol _is_snell_users_protocol \
     _api_reply _api_inventory _api_dispatch _api_sha256 _api_account_validate _api_account_precheck _api_account_execute \
     _api_account_backup_files _api_account_restore _api_account_store _api_account_apply _api_account_result \
-    _api_txn_lock _api_txn_unlock db_authority_get _authority_rows _authority_new_secret _authority_apply; do
+    _api_txn_lock _api_txn_unlock db_authority_get _authority_rows _authority_new_secret _authority_apply \
+    _proto_user_mode _proto_user_stats _proto_user_available _proto_user_modes_json _account_assign_single _api_account_share; do
     load "$fn"
 done
 API_ACCOUNT_OPS=$(sed -n 's/^API_ACCOUNT_OPS="\(.*\)"$/\1/p' "$repo/vless-server.sh")
@@ -64,9 +65,9 @@ JSON
 
 # 1. 能力声明：协议级写入仍关闭，统一用户接口单独声明
 call '{"api_version":1,"request_id":"cap","action":"capabilities"}' $LINENO
-[[ "$(out '.data.write_actions == [] and .data.stage == "read_only_foundation" and .data.accounts_api.version == 2')" == true ]] || fail $LINENO
+[[ "$(out '.data.write_actions == [] and .data.stage == "read_only_foundation" and .data.accounts_api.version == 3')" == true ]] || fail $LINENO
 [[ "$(out '.data.accounts_api.ops | index("member_claim") != null and index("set_authority") != null')" == true ]] || fail $LINENO
-[[ "$(out '"\(.data.accounts_api.version)|\(.data.user_authority)"')" == "2|platform" ]] || fail $LINENO
+[[ "$(out '"\(.data.accounts_api.version)|\(.data.user_authority)"')" == "3|platform" ]] || fail $LINENO
 echo 'PASS capabilities keep protocol writes closed and declare accounts API'
 
 # 2. 创建（带成员与平台关联），结果与 inventory
@@ -177,7 +178,7 @@ call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"unblock",action:"account
 [[ "$(jq -r .enabled <<< "$(user xray trojan bob)")" == true && "$(jq -r .uuid <<< "$(user singbox hy2 alice)")" != "$old" ]] || fail $LINENO
 before=$(cat "$DB_FILE")
 call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"snell-add",action:"account_apply",params:{ops:[{op:"member_add",account_id:$a,target:{core:"xray",protocol:"snell-v5",port:9001}}]}}')" $LINENO
-[[ "$(out .code)" == unsupported_snell_operation && "$(cat "$DB_FILE")" == "$before" ]] || fail $LINENO
+[[ "$(out .code)" == instance_occupied && "$(cat "$DB_FILE")" == "$before" ]] || fail $LINENO
 call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"del-bad",action:"account_apply",params:{ops:[{op:"delete",account_id:$a,mode:"delete"}]}}')" $LINENO
 [[ "$(out .code)" == unsupported_snell_operation ]] || fail $LINENO
 call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"del",action:"account_apply",params:{ops:[{op:"unlink",account_id:$a},{op:"delete",account_id:$a}]}}')" $LINENO

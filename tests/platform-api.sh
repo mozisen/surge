@@ -7,7 +7,7 @@ DB_FILE="$fixture/db.json" VERSION=3.7.2
 XRAY_PROTOCOLS='vless trojan'
 SINGBOX_PROTOCOLS='hy2 anytls'
 STANDALONE_PROTOCOLS='snell snell-v5 snell-v6'
-for fn in _api_reply _api_inventory _api_dispatch _api_account_result db_authority_get; do
+for fn in _api_reply _api_inventory _api_dispatch _api_account_result db_authority_get _proto_user_mode _proto_user_stats _proto_user_available _proto_user_modes_json _is_snell_users_protocol _snell_managed; do
     eval "$(awk -v fn="$fn" 'index($0,fn"() {")==1 {on=1} on {print} on && $0=="}" {exit}' "$repo/vless-server.sh")"
 done
 printf '%s' '{"xray":{"vless":[{"port":10001,"uuid":"SECRET_UUID","private_key":"SECRET_KEY","users":[{"name":"one","uuid":"SECRET_USER","used":123,"telegram_chat_id":"SECRET_CHAT"}]},{"port":10002,"uuid":"SECRET_OTHER"}],"snell-v6":[{"port":20001,"snell_id":"aaaaaaaaaaaaaaaaaaaaaaaa","psk":"SECRET_PSK","users":[]}]},"singbox":{"hy2":{"port":30001,"password":"SECRET_PASSWORD"}}}' > "$DB_FILE"

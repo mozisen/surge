@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.5"
+readonly VERSION="3.7.4-preview.6"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2108,6 +2108,11 @@ db_account_member_new() {
         return 1
     fi
     if _is_snell_users_protocol "$proto"; then
+        # 一用户一实例：指定了空实例就分配给该用户，否则（菜单）新建实例。
+        if [[ "$port" =~ ^[0-9]+$ && "$port" != 0 ]]; then
+            _account_assign_single "$id" "$core" "$proto" "$port" "$name"
+            return $?
+        fi
         _snell_add_user "$proto" "$name" account || return 1
         port=$(db_get_user_port "$core" "$proto" "$name") || return 1
         db_account_member_add "$id" "$core" "$proto" "$port" "$name" false
@@ -2145,6 +2150,22 @@ _account_merge_candidates() {
         {name, core: $c, protocol: $p, port: $port, expire: (.expire_date // "")}] |
         group_by(.name)[] | select(length > 1) |
         "\(.[0].name)|\(if all(.[]; .expire != "") then (map(.expire) | max) else "" end)|\(length)|\(map("\(.core):\(.protocol):\(.port)") | join(","))"' "$DB_FILE"
+}
+
+# 把空的一用户一实例分配给统一用户：生成新凭据、写入唯一用户，按状态启停。
+_account_assign_single() {
+    local id="$1" core="$2" proto="$3" port="$4" name="$5" count credential
+    count=$(jq -r --arg c "$core" --arg p "$proto" --argjson port "$port" "$(_account_jq_defs)"'
+        [proto_rows($c; $p)[] | select(.port == $port)] | if length == 1 then (.[0].users // [] | length) else "missing" end' "$DB_FILE")
+    [[ "$count" != missing ]] || { _err "协议实例不存在"; return 1; }
+    [[ "$count" == 0 ]] || { _err "该实例已有用户（一用户一实例），请先移除原用户"; return 1; }
+    credential=$(openssl rand -hex 16) || return 1
+    _db_apply --arg c "$core" --arg p "$proto" --argjson port "$port" --arg n "$name" --arg u "$credential" --arg cr "$(date +%F)" "$(_account_jq_defs)"'
+        def assign: if .port == $port then .psk = $u | .users = [{id: (.snell_id // ""), name: $n, uuid: $u, used: 0, quota: 0,
+            enabled: true, expire_date: "", created: $cr}] else . end;
+        if (.[$c][$p] | type) == "array" then .[$c][$p] |= map(assign) else .[$c][$p] |= assign end' || return 1
+    db_account_member_add "$id" "$core" "$proto" "$port" "$name" false || return 1
+    _accounts_reload_or_queue "$core|$proto"
 }
 
 # 协议用户所在端口（同协议用户名唯一）
@@ -2249,6 +2270,63 @@ db_account_reset_credentials() {
 # meta.user_authority = script（缺省）| platform。平台模式下用户只由 Vaio 平台写入，
 # 本机菜单只读；切换到平台时清空全部用户数据（用户、凭据、统一用户、TG 绑定、
 # 用户路由、配额与到期），协议实例保留但没有可用用户。
+
+# 协议用户能力表（脚本、Agent、面板共用）
+# 模式：multi 一个实例多个用户；single 一用户一实例；none 不支持用户管理。
+# 统计：user 按用户；inbound 按入站；port 按端口（nft）；none 不统计。
+_proto_user_mode() {
+    local proto="$1" row="${2:-}"
+    case "$proto" in
+        vless|vless-vision|vless-ws|vless-ws-notls|vless-xhttp|vless-xhttp-cdn|vmess-ws|trojan|trojan-ws|ss-legacy|ss2022|hy2|tuic|anytls) echo multi ;;
+        socks)
+            if [[ -n "$row" && "$(jq -r '.auth_mode // "password"' <<< "$row" 2>/dev/null)" == noauth ]]; then echo none; else echo single; fi ;;
+        snell|snell-v5|snell-v6|snell-shadowtls|snell-v5-shadowtls|ss2022-shadowtls) echo single ;;
+        *) echo none ;;
+    esac
+}
+
+_proto_user_stats() {
+    case "$(_proto_user_mode "$1" "${2:-}")" in
+        multi) echo user ;;
+        single) [[ "$1" == socks ]] && echo inbound || echo port ;;
+        *) echo none ;;
+    esac
+}
+
+# 当前版本已经接入用户管理的协议（一用户一实例中，暂只有已迁移的 Snell）
+_proto_user_available() {
+    case "$(_proto_user_mode "$1" "${2:-}")" in
+        multi) return 0 ;;
+        single) _snell_managed "$1" ;;
+        *) return 1 ;;
+    esac
+}
+
+# 全部协议的能力 JSON：{proto: {mode, stats, available}}
+_proto_user_modes_json() {
+    local proto json="{}" available
+    for proto in $(printf '%s\n' $XRAY_PROTOCOLS $SINGBOX_PROTOCOLS $STANDALONE_PROTOCOLS | sort -u); do
+        _proto_user_available "$proto" && available=true || available=false
+        json=$(jq -c --arg p "$proto" --arg m "$(_proto_user_mode "$proto")" --arg s "$(_proto_user_stats "$proto")" \
+            --argjson a "$available" '.[$p] = {mode: $m, stats: $s, available: $a}' <<< "$json")
+    done
+    echo "$json"
+}
+
+# 安装前提示用户管理能力
+_proto_user_hint() {
+    local proto="$1" row="${2:-}"
+    case "$(_proto_user_mode "$proto" "$row")" in
+        multi) return 0 ;;
+        single)
+            if _proto_user_available "$proto"; then
+                _info "该协议一用户一实例：每个用户单独一个端口，流量按$([[ "$(_proto_user_stats "$proto")" == inbound ]] && echo 入站 || echo 端口)统计"
+            else
+                _warn "该协议暂未接入用户管理（一用户一实例的适配将在后续版本提供）"
+            fi ;;
+        *) _warn "该协议不支持用户管理：无法设置用户、配额与到期，也不能由 Vaio 平台管理用户" ;;
+    esac
+}
 
 db_authority_get() {
     local mode=""
@@ -4839,6 +4917,11 @@ register_protocol() {
     # 独立协议沿用 xray 数据区保存配置，不代表由 Xray 运行。
     [[ "$core" == "standalone" ]] && core="xray"
     
+    # 以平台为准时安装空实例，用户由平台分配（不生成 default 用户）。
+    if [[ "$(db_authority_get)" == platform && "$(_proto_user_mode "$protocol")" == multi ]]; then
+        config_json=$(jq -c '.users = []' <<< "$config_json") || return 1
+    fi
+
     # 获取端口
     local port
     port=$(echo "$config_json" | jq -r '.port')
@@ -5028,8 +5111,20 @@ _platform_render_inbound() {
         ($old | del(.users,.destinations,.tls) | .type="shadowsocks" |
           .listen_port=$r.port | .listen=(.listen // "0.0.0.0") |
           .tag=(.tag // $r.runtime_tag // ($p+"-in-"+($r.port|tostring))) |
-          .method=$r.method | .password=(if ($users|length)>0 then $users[0].uuid
-            elif $r.method=="2022-blake3-aes-128-gcm" then $disabled16 else $disabled32 end))
+          .method=$r.method |
+          (if $p == "ss2022" and ($r.password // "") != "" and ($r.users | type) == "array" and (($r.users | length) != 1 or $r.users[0].uuid != $r.password) then
+             # 多用户 SS2022：实例密钥为服务端密钥，用户密钥各自独立
+             .password=$r.password |
+             .users=(if ($users|length)>0 then [$users[] | {name:("ss2022-"+.name), password:.uuid}]
+               else [{name:"vaio-disabled", password:(if $r.method=="2022-blake3-aes-128-gcm" then $disabled16 else $disabled32 end)}] end)
+           elif $p == "ss-legacy" and (($r.users // []) | length) > 1 then
+             del(.password) |
+             .users=(if ($users|length)>0 then [$users[] | {name:("ss-legacy-"+.name), password:.uuid}]
+               else [{name:"vaio-disabled", password:$disabled32}] end)
+           else
+             .password=(if ($users|length)>0 then $users[0].uuid
+               elif $r.method=="2022-blake3-aes-128-gcm" then $disabled16 else $disabled32 end)
+           end))
       elif ($p != "vless" and $p != "trojan" and $p != "hy2" and $p != "anytls") or
          ($core != "xray" and $core != "singbox") or
          ($core == "xray" and $p != "vless" and $p != "trojan") then error("unsupported managed inbound")
@@ -5736,6 +5831,30 @@ _ss_legacy_active_users() {
     ' <<< "$cfg"
 }
 
+# SS2022：旧的单用户实例（users 缺失，或唯一用户的密钥等于实例密钥）保持单密码格式；
+# 其余按多用户生成：实例 password 为服务端密钥，每个用户的 uuid 为各自的用户密钥。
+_ss2022_is_multi() {
+    jq -e '(.password // "") != "" and (.users | type) == "array" and ((.users | length) != 1 or .users[0].uuid != .password)' <<< "$1" >/dev/null 2>&1
+}
+
+_ss2022_active_users() {
+    local cfg="$1" disabled
+    if [[ "$(jq -r '.method // ""' <<< "$cfg")" == *128* ]]; then
+        disabled=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+    else
+        disabled=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+    fi
+    [[ -n "$disabled" ]] || return 1
+    jq --arg today "$(date '+%Y-%m-%d')" --arg disabled "$disabled" '
+        (.users // []) |
+        map(select(.enabled != false)
+            | select((.quota // 0) == 0 or (.used // 0) < .quota)
+            | select((.expire_date // "") == "" or .expire_date >= $today)
+            | {name:.name, password:.uuid}) |
+        if length == 0 then [{name:"disabled", password:$disabled}] else . end
+    ' <<< "$cfg"
+}
+
 _ss_legacy_xray_settings() {
     local users
     users=$(_ss_legacy_active_users "$1") || return 1
@@ -6327,6 +6446,17 @@ add_xray_inbound_v2() {
                 '{port:$port, listen:$listen_addr, protocol:"shadowsocks", settings:$settings, tag:$tag}' > "$tmp_inbound"
             ;;
         ss2022)
+            if _ss2022_is_multi "$cfg"; then
+                local ss_users
+                ss_users=$(_ss2022_active_users "$cfg") || { rm -f "$tmp_inbound"; return 1; }
+                jq -n --argjson port "$port" --arg method "$method" --arg password "$password" \
+                    --arg tag "$inbound_tag" --arg listen_addr "$listen_addr" --argjson users "$ss_users" '{
+                    port: $port, listen: $listen_addr, protocol: "shadowsocks",
+                    settings: {method: $method, password: $password, network: "tcp,udp",
+                        clients: ($users | map({password: .password, email: (.name + "@ss2022")}))},
+                    tag: $tag
+                }' > "$tmp_inbound"
+            else
             jq -n \
                 --argjson port "$port" \
                 --arg method "$method" \
@@ -6344,6 +6474,7 @@ add_xray_inbound_v2() {
                 },
                 tag: $tag
             }' > "$tmp_inbound"
+            fi
             ;;
         *)
             rm -f "$tmp_inbound"
@@ -12537,6 +12668,14 @@ generate_singbox_config() {
             ss2022)
                 local password=$(echo "$cfg" | jq -r '.password // empty')
                 local method=$(echo "$cfg" | jq -r '.method // empty')
+                if _ss2022_is_multi "$cfg"; then
+                    local ss_users
+                    ss_users=$(_ss2022_active_users "$cfg") || return 1
+                    inbound=$(jq -n --argjson port "$port" --arg method "$method" --arg password "$password" \
+                        --arg tag "${proto}-in-${port}" --arg listen_addr "$listen_addr" --argjson users "$ss_users" '{
+                        type:"shadowsocks", tag:$tag, listen:$listen_addr, listen_port:$port, method:$method,
+                        password:$password, users:($users | map({name:("ss2022-" + .name), password:.password}))}')
+                else
                 inbound=$(jq -n \
                     --argjson port "$port" --arg method "$method" \
                     --arg password "$password" --arg tag "${proto}-in-${port}" \
@@ -12545,6 +12684,7 @@ generate_singbox_config() {
                         type:"shadowsocks", tag:$tag, listen:$listen_addr,
                         listen_port:$port, method:$method, password:$password
                     }')
+                fi
                 ;;
             hy2)
                 local password=$(echo "$cfg" | jq -r '.password // empty')
@@ -22564,6 +22704,7 @@ do_install_server() {
     # 选择协议
     select_protocol || return 1
     local protocol="$SELECTED_PROTOCOL"
+    [[ -n "$protocol" ]] && _proto_user_hint "$protocol"
     if _snell_managed "$protocol"; then
         _info "该 Snell 协议已启用多用户，新增端口将作为独立用户创建"
         _snell_add_user "$protocol"
@@ -28278,7 +28419,12 @@ _gen_user_share_link() {
 
     # 优先公网 IPv4，其次 IPv6（URI 必须加方括号），再回落到配置域名。
     local ipv4 ipv6 server_addr country_ip country_code remark
-    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
+    if [[ -n "${VAIO_SHARE_HOST:-}" ]]; then
+        # 平台导出时由面板指定连接地址，避免在接口里探测公网地址和国家。
+        if [[ "$VAIO_SHARE_HOST" == *:* ]]; then ipv4=""; ipv6="$VAIO_SHARE_HOST"; else ipv4="$VAIO_SHARE_HOST"; ipv6=""; fi
+    else
+        IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
+    fi
     if [[ -n "$ipv4" ]]; then
         server_addr="$ipv4"
         country_ip="$ipv4"
@@ -28290,7 +28436,7 @@ _gen_user_share_link() {
     else
         return 1
     fi
-    country_code=$(get_ip_country "$country_ip")
+    if [[ -n "${VAIO_SHARE_HOST:-}" ]]; then country_code=""; else country_code=$(get_ip_country "$country_ip"); fi
     remark="${country_code:+${country_code}-}${user_name}"
 
     # 检测 WS 回落协议实际对外端口。
@@ -28327,7 +28473,13 @@ _gen_user_share_link() {
         vless-ws) link=$(gen_vless_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
         vless-ws-notls) link=$(gen_vless_ws_notls_link "$server_addr" "$display_port" "$credential" "$path" "$host" "$remark") ;;
         vmess-ws) link=$(gen_vmess_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
-        ss2022) link=$(gen_ss2022_link "$server_addr" "$display_port" "$method" "$credential" "$remark") ;;
+        ss2022)
+            # 多用户 SS2022 的客户端密码为「服务端密钥:用户密钥」
+            if _ss2022_is_multi "$cfg"; then
+                link=$(gen_ss2022_link "$server_addr" "$display_port" "$method" "$(jq -r .password <<< "$cfg"):$credential" "$remark")
+            else
+                link=$(gen_ss2022_link "$server_addr" "$display_port" "$method" "$credential" "$remark")
+            fi ;;
         ss-legacy)
             link=$(gen_ss_legacy_link "$server_addr" "$display_port" "$method" "$credential" "$remark")
             ;;
@@ -32281,7 +32433,7 @@ _api_inventory() {
     else
         revision=$(printf '%s' "$snapshot" | shasum -a 256 | awk '{print $1}')
     fi
-    jq -ce --arg revision "$revision" --arg standalone "$STANDALONE_PROTOCOLS" '
+    jq -ce --arg revision "$revision" --arg standalone "$STANDALONE_PROTOCOLS" --argjson modes "$(_proto_user_modes_json)" '
       def rows: if type == "array" then .[] else . end;
       {revision:$revision,revision_scope:"database_snapshot",instances:[
         . as $db | ["xray","singbox"][] as $storage |
@@ -32297,6 +32449,9 @@ _api_inventory() {
             elif ((.snell_id // "") | test("^[0-9a-f]{24}$")) then "vless-snellu-" + .snell_id
             else null end),
          resources:{ownership_verified:false},
+         user_mode:(if $entry.key == "socks" and .auth_mode == "noauth" then "none" else ($modes[$entry.key].mode // "none") end),
+         user_stats:(if $entry.key == "socks" and .auth_mode == "noauth" then "none" else ($modes[$entry.key].stats // "none") end),
+         user_available:(($modes[$entry.key].available // false) and ($entry.key != "socks" or .auth_mode != "noauth")),
          users:[(.users // [])[] | {name:.name,enabled:.enabled,quota:.quota,used:.used,expire_date:.expire_date,account_id:(.account_id // null)}]}
       ],
       user_authority:(.meta.user_authority // "script"),
@@ -32421,7 +32576,8 @@ _api_account_precheck() {
     while IFS='|' read -r op id proto mode; do
         [[ -z "$op" ]] && continue
         if _is_snell_users_protocol "$proto"; then
-            [[ "$op" == member_add || "$op" == create || ( "$op" == member_remove && "$mode" == delete ) || ( "$op" == delete && "$mode" == delete ) ]] && {
+            # 新增 Snell 成员只能分配到空实例（一用户一实例）；删除实例不在事务内进行。
+            [[ ( "$op" == member_remove && "$mode" == delete ) || ( "$op" == delete && "$mode" == delete ) ]] && {
                 echo "unsupported_snell_operation|$id|"; return 1; }
         fi
         if [[ -n "$proto" ]] && ! _account_proto_supported "$proto"; then
@@ -32432,6 +32588,15 @@ _api_account_precheck() {
         elif .target then "\(.op)|\(.account_id)|\(.target.protocol)|\(.mode // "")"
         elif .op == "delete" then (.account_id as $id | .mode as $mode | ($db[0].accounts[$id].members // [])[] | "delete|\($id)|\(.protocol)|\($mode // "release")")
         else empty end' <<< "$request")"
+    # 一用户一实例：只能分配到空实例
+    line=$(jq -r --slurpfile db "$DB_FILE" '
+        def rows($c; $p): ($db[0][$c][$p] // null) | if . == null then [] elif type == "array" then . else [.] end;
+        first(.params.ops[] | select(.op == "member_add" or .op == "create") | .account_id as $id |
+            (if .op == "create" then (.members // [])[].target else .target end) as $t |
+            select($t.protocol | test("^snell(-v[56])?$")) |
+            select([rows($t.core; $t.protocol)[] | select(.port == $t.port) | (.users // [] | length)] | .[0] // 0 | . > 0) |
+            "instance_occupied|\($id)|") // ""' <<< "$request")
+    [[ -z "$line" ]] || { echo "$line"; return 1; }
     return 0
 }
 
@@ -32582,6 +32747,27 @@ _api_account_apply() {
     return 1
 }
 
+# 成员连接信息：只读，不写记录。凭据只出现在本次输出中（Agent 作为 share 任务结果短暂保存）。
+_api_account_share() {
+    local request="$1" target core proto port name host credential link
+    jq -e '(.params | type == "object") and ((.params | keys) - ["target", "name", "host"] | length == 0) and
+        (.params.target | type == "object" and (keys == ["core", "port", "protocol"]) and (.core == "xray" or .core == "singbox") and
+            (.protocol | type == "string" and test("^[a-z0-9-]{1,32}$")) and (.port | type == "number" and . == floor and . >= 1 and . <= 65535)) and
+        (.params.name | type == "string" and test("^[A-Za-z0-9_-]{1,32}$")) and
+        ((.params.host // "") | type == "string" and test("^[A-Za-z0-9.:-]{0,253}$"))' <<< "$request" >/dev/null 2>&1 || {
+        _api_reply failed invalid_request; return 1; }
+    [[ -f "$DB_FILE" ]] || { _api_reply failed invalid_database; return 1; }
+    core=$(jq -r .params.target.core <<< "$request"); proto=$(jq -r .params.target.protocol <<< "$request")
+    port=$(jq -r .params.target.port <<< "$request"); name=$(jq -r .params.name <<< "$request"); host=$(jq -r '.params.host // ""' <<< "$request")
+    _proto_user_available "$proto" || { _api_reply failed unsupported_protocol; return 1; }
+    credential=$(jq -r --arg c "$core" --arg p "$proto" --argjson port "$port" --arg n "$name" "$(_account_jq_defs)"'
+        member_user({core: $c, protocol: $p, port: $port, name: $n}).uuid // ""' "$DB_FILE")
+    [[ -n "$credential" ]] || { _api_reply failed user_not_found; return 1; }
+    link=$(VAIO_SHARE_HOST="$host" _gen_user_share_link "$core" "$proto" "$credential" "$name" "$port" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g') || true
+    [[ -n "$link" ]] || { _api_reply failed share_unavailable; return 1; }
+    _api_reply succeeded ok "$(jq -nc --arg l "$link" '{connection: $l}')"
+}
+
 # 查询写接口结果：只读，不重放
 _api_account_result() {
     local target record status
@@ -32622,11 +32808,12 @@ _api_dispatch() {
     action=$(jq -r .action <<< "$request")
     case "$action" in
         capabilities)
-            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" --arg ops "$API_ACCOUNT_OPS" --arg authority "$(db_authority_get)" '
+            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" --arg ops "$API_ACCOUNT_OPS" --arg authority "$(db_authority_get)" --argjson modes "$(_proto_user_modes_json)" '
               {stage:"read_only_foundation",actions:["capabilities","inventory","plan","result","account_apply"],write_actions:[],
                user_authority:$authority,
-               accounts_api:{version:2,actions:["account_apply","result"],ops:($ops|split(" ")),
-                 transaction:true,idempotent:true,snell_member_add:false},
+               user_modes:$modes,
+               accounts_api:{version:3,actions:["account_apply","result","account_share"],ops:($ops|split(" ")),
+                 transaction:true,idempotent:true,snell_member_add:"assign_empty_instance"},
                protocols:([($x|split(" ")[])|{core:"xray",protocol:.,write_supported:false}] +
                  [($s|split(" ")[])|{core:"singbox",protocol:.,write_supported:false}] +
                  [($p|split(" ")[])|{core:"standalone",protocol:.,write_supported:false}]),
@@ -32644,6 +32831,10 @@ _api_dispatch() {
             ;;
         account_apply)
             _api_account_apply "$request"
+            return $?
+            ;;
+        account_share)
+            _api_account_share "$request"
             return $?
             ;;
         plan)
