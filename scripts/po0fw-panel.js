@@ -34,8 +34,14 @@
     var lines = ['占用 ' + list.length + '/' + (knownLimit ? limit : '?') + ' · 剩余 ' + (knownLimit ? Math.max(0, limit-list.length) : '?')];
     if (!current) lines.push('当前出口命中状态未知');
     else if (!hit) lines.push('⚠ 当前出口未在白名单');
-    var fixedNames = names(config.fixed_names), fifoNames = names(config.fifo_names);
-    function row(label, entry) { lines.push((entry.ip === current ? '🟢 ' : '○ ') + label + '  ' + clean(entry.ip)); }
+    var nameGroups = String(config.slot_names || '').split(';');
+    // Keep older installed modules working until their parameters are updated.
+    var fixedNames = names(config.slot_names === undefined ? config.fixed_names : nameGroups[0]);
+    var fifoNames = names(config.slot_names === undefined ? config.fifo_names : nameGroups[1]);
+    function row(label, entry) {
+      var isCurrent = entry.ip === current;
+      lines.push((isCurrent ? '● ' : '○ ') + label + '  ' + clean(entry.ip) + (isCurrent ? '  ← 当前出口' : ''));
+    }
     fixed.forEach(function (entry) { row(fixedNames[Number(entry.slot)] || '固定槽 ' + entry.slot, entry); });
     fifo.forEach(function (entry, index) { row(fifoNames[index] || 'FIFO ' + (index + 1), entry); });
     other.forEach(function (entry, index) { row('未标注槽位 ' + (index + 1), entry); });
