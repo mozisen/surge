@@ -1,4 +1,4 @@
-# 脚本统一用户（3.7.4-preview.3 / preview.4 / preview.5）
+# 脚本统一用户（3.7.4-preview.3 至 preview.6）
 
 预览版本：`3.7.4-preview.3`，分支 `codex/platform-3.7.4`。只推送预览分支，不更新 main，不创建 GitHub Release。
 
@@ -90,5 +90,22 @@
 - `tests/accounts-api.sh` 新增一组：脚本模式拒绝写入；混合请求被拒绝；接管清空凭据；切回。
 - `tests/accounts-cli.sh` 在 CI 中用真实进程验证切换、脚本模式拒绝和接管清空。
 - 其余脚本测试和面板 unittest 119 项通过（跳过 2 项）。
+
+**真实验收**：未执行。
+
+## 全协议用户能力与 SS2022 多用户（3.7.4-preview.6）
+
+- **能力表**：`_proto_user_mode` / `_proto_user_stats`。多用户（一个实例多个用户，按用户统计）：VLESS 全系列、VMess-WS、Trojan、Trojan-WS、SS、SS2022、Hysteria2、TUIC、AnyTLS。一用户一实例：SOCKS（按入站统计）、Snell v4/v5/v6、Snell+ShadowTLS、Snell v5+ShadowTLS、SS2022+ShadowTLS（按端口统计）。不支持：Naive，以及免认证的 SOCKS。本版本已接入的一用户一实例只有迁移后的 Snell；SOCKS 和 ShadowTLS 组合的多实例适配在 preview.7 提供。能力声明 `user_modes` 和 inventory 每个实例的 `user_mode`、`user_stats`、`user_available` 会上报给面板；`accounts_api.version` 为 3。
+- **安装提示**：选择协议后，一用户一实例会提示统计方式；Naive 会提示「该协议不支持用户管理」；尚未接入的协议也会提示。
+- **SS2022 多用户**：实例 `password` 作为服务端密钥，每个用户的 `uuid` 作为用户密钥。Xray 生成 `clients`（按 email 统计），Sing-box 和共享渲染器生成 `users`。users 缺失，或只有一个用户且密钥等于实例密钥的旧实例，保持原来的单密码格式，现有客户端不受影响。多用户的分享链接密码为 `服务端密钥:用户密钥`。共享渲染器里的 SS 传统版也支持多用户。
+- **一用户一实例的分配**：`member_add` 指定 Snell 实例时，空实例会分配给该用户（重新生成 PSK、写入唯一用户、按状态启停）；已有用户返回 `instance_occupied`。菜单里不指定端口时仍然新建实例。
+- **成员连接信息**：新增只读的 `--api account_share {target, name, host?}`，返回 `connection`。可以指定连接地址，此时不探测公网地址和国家；不写任何记录。
+- **平台模式安装空实例**：以平台为准时，脚本安装的多用户协议实例不生成 default 用户。
+
+### 测试（preview.6）
+**隔离测试**：
+- 新增 `tests/protocol-users.sh`，共 6 组：22 个协议的模式和统计方式；免认证 SOCKS；能力 JSON；安装提示。Xray 的 SS2022 用真实的入站生成函数验证多用户和旧格式兼容。共享渲染器覆盖 SS2022 多用户与旧格式、SS 传统版多用户、全部停用时的占位用户。另外覆盖 Snell 分配（新凭据、已占用拒绝）、连接信息（指定地址、未知用户、不支持的协议、地址注入）、平台模式空实例。
+- 其余脚本测试和面板 unittest 131 项通过（跳过 2 项）。
+- Sing-box 的 SS2022 多用户生成器（`generate_singbox_config`）依赖太多，没有单独的函数级测试；它与共享渲染器的格式一致，渲染器已有测试。
 
 **真实验收**：未执行。
