@@ -206,7 +206,9 @@ function meter(label, percent) {
     const value = known ? Math.max(0, Math.min(100, percent)) : null;
     const filled = known ? Math.max(value > 0 ? 1 : 0, Math.round(value / 10)) : 0;
     const segments = Array.from({length: 10}, (_, i) => `<i${i < filled ? ' class="on"' : ''}></i>`).join('');
-    return `<div class="meter"><span class="meter-label">${label}</span><span class="meter-bar" role="meter" aria-label="${label}使用率" aria-valuemin="0" aria-valuemax="100" ${known?`aria-valuenow="${value.toFixed(0)}"`:'aria-valuetext="—"'}>${segments}</span><span class="meter-value">${known?value.toFixed(0)+'%':'—'}</span></div>`;
+    // role="meter" requires aria-valuenow, so an unknown value hides the bar and leaves the visible "—".
+    const bar = known ? `role="meter" aria-label="${label}使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value.toFixed(0)}"` : 'aria-hidden="true"';
+    return `<div class="meter"><span class="meter-label">${label}</span><span class="meter-bar" ${bar}>${segments}</span><span class="meter-value">${known?value.toFixed(0)+'%':'—'}</span></div>`;
 }
 
 function card(node) {

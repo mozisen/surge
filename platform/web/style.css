@@ -2241,7 +2241,17 @@ dialog.install .install-warning {
     td button.small,
     input:not([type="checkbox"]),
     select,
-    .nav a {
+    .nav a,
+    .install-section > summary,
+    .field-check {
+        min-height: 44px;
+    }
+
+    .back-link,
+    .section-label > a,
+    .section-meta a {
+        display: inline-flex;
+        align-items: center;
         min-height: 44px;
     }
 
