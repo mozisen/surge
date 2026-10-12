@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 统一用户（节点级，一人多协议）：数据层、结算与成员派生。函数级隔离测试。
-set -e
+set -e -o pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT

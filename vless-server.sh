@@ -2092,7 +2092,9 @@ db_account_member_new() {
     _account_valid_name "$name" && [[ "$name" != default ]] || { _err "成员用户名无效"; return 1; }
     _account_proto_supported "$proto" || { _err "$(get_protocol_name "$proto") 不支持加入统一用户"; return 1; }
     # 统计身份按协议计（不区分端口），同协议用户名不得重复，且 Xray 不区分大小写。
-    if db_list_users "$core" "$proto" | tr 'A-Z' 'a-z' | grep -Fxq "$(tr 'A-Z' 'a-z' <<< "$name")"; then
+    local existing
+    existing=$(db_list_users "$core" "$proto" | tr 'A-Z' 'a-z')
+    if grep -Fxq "$(tr 'A-Z' 'a-z' <<< "$name")" <<< "$existing"; then
         _err "$(get_protocol_name "$proto") 已有用户 $name，请换一个成员用户名"
         return 1
     fi
