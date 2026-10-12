@@ -4,8 +4,8 @@
 #!category=po0
 #!author=mozisen
 
-#!arguments=wifi_list:wifi1|wifi2,TOKEN:pgnfw_REPLACE_ME,fixed_names:,fifo_names:
-#!arguments-desc=wifi_list：填写需要关闭「po0 防火墙自动加白」的 WiFi 名称，多个使用 | 分隔，例如 mozi|weeland|mozi-5G；TOKEN：填写单个 po0fw token，可省略 @0 等槽位后缀；fixed_names：从固定槽 0 开始按槽位编号填写名称，使用 | 分隔，数量不限，例如 家里|公司|备用|机房|其他；fifo_names：按 FIFO 显示顺序填写名称，使用 | 分隔，数量不限，例如 临时 1|临时 2|临时 3|临时 4；FIFO 名称随显示位置而非 IP。两个名称参数均可留空，留空或未填写名称的槽位使用默认名称；名称参数不改变实际槽位数量。请勿公开分享填写了真实 token 的模块。
+#!arguments=wifi_list:wifi1|wifi2,TOKEN:pgnfw_REPLACE_ME,fixed_names:默认,fifo_names:默认
+#!arguments-desc=wifi_list：填写需要关闭「po0 防火墙自动加白」的 WiFi 名称，多个使用 | 分隔，例如 mozi|weeland|mozi-5G；TOKEN：填写单个 po0fw token，可省略 @0 等槽位后缀；fixed_names：从固定槽 0 开始按槽位编号填写名称，使用 | 分隔，数量不限，例如 家里|公司|备用|机房|其他；fifo_names：按 FIFO 显示顺序填写名称，使用 | 分隔，数量不限，例如 临时 1|临时 2|临时 3|临时 4；FIFO 名称随显示位置而非 IP。两个名称参数保留「默认」时自动生成全部槽位名称，未填写名称的槽位也使用默认名称；名称参数不改变实际槽位数量。请勿公开分享填写了真实 token 的模块。
 
 [Panel]
 po0fw-slots = title="Po0槽位面板", content="点击刷新查询", style=info, script-name=po0fw-slots, update-interval=60

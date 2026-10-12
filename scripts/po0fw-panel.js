@@ -14,7 +14,11 @@
     return result;
   }
   function clean(text) { return String(text).replace(/[\r\n\t]/g, ' '); }
-  function names(text) { return String(text || '').split('|').map(function (name) { return clean(name).trim(); }); }
+  function names(text) {
+    var value = String(text || '').trim();
+    if (value === '默认') return [];
+    return value.split('|').map(function (name) { return clean(name).trim(); });
+  }
   function integer(value) { return typeof value === 'number' && isFinite(value) && Math.floor(value) === value; }
   function render(data) {
     if (!data || !Array.isArray(data.whitelist)) throw new Error('schema');
