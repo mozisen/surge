@@ -69,17 +69,12 @@ Agent：快照上报 accounts（无凭据）；执行 platform_apply → 脚本 
 
 ## 3. 脚本 `--api`（子任务 2）
 
-### 3.1 能力与快照
-- `capabilities` 增加 `accounts_api_version:1`、`write_actions:["account_apply"]`、`stage:"account_write"`。协议级的 `write_supported` 仍为 false，实例安装和卸载继续走 Agent 的适配器。
-- `inventory` 增加 `accounts`：除凭据外的全部字段（含 members 的 raw used、成员的 enabled），以及每个协议用户的 `account_id`。另外提供去掉易变字段后的 `config_revision`。
+### 3.1 能力与快照（实现于 3.7.4-preview.4）
+- `capabilities` 保持 `stage:"read_only_foundation"` 和 `write_actions:[]`，避免现有 Agent 把脚本接口判为不可用；另外用 `accounts_api:{version:1, actions:["account_apply","result"], ops:[...], snell_member_add:false}` 声明。
+- `inventory` 增加 `accounts`（除凭据外的全部字段，成员附带当前累计计数 `used`、`enabled` 和 `disable_reason`）以及协议用户的 `account_id`。不另外提供 config_revision：并发控制用统一用户自己的 `rev`。
 
-### 3.2 `account_apply`（事务，一个请求包含多个操作）
-操作：`create`（可带要新建的成员）、`update`（字段补丁 + `base_rev`）、`link`/`unlink`（platform_user_id）、`block`（platform_block）、`member_add`、`member_claim`、`member_remove`（delete|release）、`reset_credentials`（成员或全部）、`reset_usage`、`delete`（delete|release 成员）。
-
-- 乐观并发：带 `base_rev` 的操作，如果统一用户当前的 rev 不等于 base_rev，就整体拒绝，返回 `rev_conflict` 和当前的 rev。面板在下一次快照后重新合并。`block` 不改同步字段，不需要 base_rev，也不增加 rev。
-- 事务步骤：校验（白名单，jq 传参）→ `$CFG/.txn.lock` → 幂等记录 `$CFG/api-results/<request_id>.json`（指纹相同就返回已存结果；running 返回 unknown，不重放）→ 备份 db 和受影响的配置 → 内存中整体计算 → 一次 `_db_apply` → 每个受影响的核心重建一次 → 校验服务 → 写结果；失败时恢复备份并重建（failed）；恢复也失败记为 unknown。
-- `result` 按 request_id 返回已存结果。
-- 菜单的本地修改与 API 的修改写同样的 rev 和 mtime，所以面板能区分哪一边改了什么。
+### 3.2 `account_apply`
+详见 `docs/script-accounts.md`「写接口」。要点：每次请求最多 200 项操作，事务（`.txn.lock`、running 意图、备份、预检、延后重建、失败回滚、恢复失败为 unknown）；`update` 带 `base_rev`，不一致时返回 `rev_conflict` 和当前 rev；`create` 由调用方指定 account_id；`block` 和 `link` 不增加 rev。Snell 的 `member_add` 和带 delete 的移除不进事务，返回 `unsupported_snell_operation`；平台先用安装任务建实例，再用 `member_claim` 归入。
 
 ## 4. Agent（子任务 3）
 

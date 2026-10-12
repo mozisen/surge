@@ -1,4 +1,4 @@
-# 脚本统一用户（3.7.4-preview.3）
+# 脚本统一用户（3.7.4-preview.3 / preview.4）
 
 预览版本：`3.7.4-preview.3`，分支 `codex/platform-3.7.4`。只推送预览分支，不更新 main，不创建 GitHub Release。
 
@@ -45,3 +45,30 @@
 - 注意：本机是 Bash 3.2，`set -e` 不会让 `[[ ]]` 失败的测试退出。`tests/accounts.sh` 已改为每条断言显式失败；其他旧测试在本机的通过结果以 GitHub Actions（Bash 5）为准。脚本主体要求 Bash 4.1+，本机无法运行完整的 CLI 进程，菜单只做了函数级的冒烟测试。
 
 **真实验收**：未执行。没有在任何 VPS 上运行，也没有操作生产节点。
+
+## 写接口（3.7.4-preview.4）
+
+`bash vless-server.sh --api` 新增 `account_apply`，供 Agent 写入统一用户。它和交互菜单共用同一套 `db_account_*` 函数，修改同步字段时同样会更新 `rev` 和 `mtime`。
+
+```json
+{"api_version":1,"request_id":"<任务ID>","action":"account_apply","params":{"ops":[
+  {"op":"create","account_id":"<uuid>","platform_user_id":"<uuid>","fields":{"name":"alice","quota":0,"expire_date":"","reset_day":1,"note":""},
+   "members":[{"target":{"core":"xray","protocol":"vless","port":443},"name":"alice"}]},
+  {"op":"update","account_id":"<uuid>","base_rev":7,"fields":{"expire_date":"2026-12-31"}},
+  {"op":"block","account_id":"<uuid>","platform_block":"quota"}
+]}}
+```
+
+- **操作：** `create`、`update`（需要 `base_rev`）、`link`、`unlink`、`block`（`""` 或 `quota`）、`member_add`（新建协议账号）、`member_claim`（归入，`count_existing` 默认 true）、`member_remove`（`release`/`delete`）、`reset_credentials`（可指定 `member`）、`reset_usage`、`delete`（`release`/`delete`）。一个请求最多 200 项；字段按白名单逐项校验，所有值都通过 jq 传参，不会拼进 shell。
+- **事务：** 获取 `$CFG/.txn.lock` → 幂等记录 `$CFG/api-results/<request_id>.json`（先写 running 意图）→ 备份数据库和核心配置、Snell 配置到 `$CFG/api-backups/<request_id>/`（0700）→ 预检（账户是否存在、`base_rev`、协议范围）→ 逐项执行，重建延后 → 每个核心统一重建一次 → 写入结果。任一步失败就恢复备份，结果为 `apply_failed`，带 `rolled_back:true` 和脚本的中文提示（不含凭据）；如果统一重建已经执行过，恢复后会再重建一次。恢复也失败时结果为 `unknown`。
+- **乐观并发：** `base_rev` 与当前 `rev` 不一致时整体拒绝，不写入，返回 `rev_conflict` 和当前 `rev`。
+- **幂等：** 同一个 `request_id` 内容相同，直接返回已存结果，不会再执行；内容不同返回 `request_id_conflict`；遗留的 running 意图返回 `unknown`，`replay_allowed:false`。`result` 用 `params.request_id` 查询结果，只读。记录和备份保留 30 天。
+- **Snell 限制：** 新建 Snell 成员需要新建独立实例和计数规则，删除成员要卸载实例，这两件事无法在事务里回滚，所以接口拒绝 `member_add` 和带 `delete` 的移除，返回 `unsupported_snell_operation`。平台应先用现有的安装任务创建实例，再用 `member_claim` 归入；移除时用 `release`。
+- **能力声明：** `capabilities` 保持 `stage=read_only_foundation` 和 `write_actions=[]`（协议级写入仍然关闭，现有 Agent 的接口检查不受影响），另外用 `accounts_api.version=1` 声明统一用户接口和支持的操作。
+- **inventory：** 新增 `accounts`（除凭据外的全部字段；成员附带当前累计计数、启停和停用原因）和用户的 `account_id`。
+
+### 测试（preview.4）
+
+**隔离测试：** 新增 `tests/accounts-api.sh`，共 9 组：能力声明；创建（带成员和平台关联，每个核心只重建一次，inventory 不含凭据）；幂等重放与 request_id 冲突；过期 `base_rev` 被拒且不写入；格式校验（未知字段、日期、非 uuid、未知操作、空列表、换行、超过 200 项）；多项操作中途失败时整体回滚数据库和配置；统一重建失败时回滚，恢复也失败时为 unknown 且不重放；中断遗留的意图；归入、平台停用与解除、凭据重置、Snell 限制、删除保留成员。已加入 GitHub Actions。在 Bash 4.1+ 且有 flock 的环境（CI）下使用真实的事务锁，macOS Bash 3.2 下锁被替换为空操作。原有的 `tests/platform-api.sh` 和其余脚本测试、面板 unittest 93 项都通过（跳过 2 项）。
+
+**真实验收：** 未执行。
