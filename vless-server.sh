@@ -1987,7 +1987,7 @@ accounts_apply() {
 # 避免状态对比不再出现差异而永远不生效。
 _accounts_reload_or_queue() {
     local list
-    list=$(printf '%s\n%s\n' "$1" "$(jq -r '(.meta.accounts_reload_pending // [])[]' "$DB_FILE")" | grep -v '^$' | sort -u)
+    list=$(printf '%s\n%s\n' "$1" "$(jq -r '(.meta.accounts_reload_pending // [])[]' "$DB_FILE")" | sed '/^$/d' | sort -u)
     [[ -z "$list" ]] && return 0
     if _accounts_reload "$list"; then
         _db_apply 'del(.meta.accounts_reload_pending)'
