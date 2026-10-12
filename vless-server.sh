@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.3"
+readonly VERSION="3.7.4-preview.4"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -1987,6 +1987,11 @@ accounts_apply() {
 # 避免状态对比不再出现差异而永远不生效。
 _accounts_reload_or_queue() {
     local list
+    # 接口事务内只收集，事务末尾统一重建一次，失败时整体回滚。
+    if [[ -n "${ACCOUNTS_DEFER_RELOAD:-}" ]]; then
+        ACCOUNTS_DEFERRED+="$1"$'\n'
+        return 0
+    fi
     list=$(printf '%s\n%s\n' "$1" "$(jq -r '(.meta.accounts_reload_pending // [])[]' "$DB_FILE")" | sed '/^$/d' | sort -u)
     [[ -z "$list" ]] && return 0
     if _accounts_reload "$list"; then
@@ -1999,16 +2004,20 @@ _accounts_reload_or_queue() {
 }
 
 # 新建统一用户，输出 id
-# 用法: db_account_create 名称 配额字节 到期日期 重置日 [备注]
+# 用法: db_account_create 名称 配额字节 到期日期 重置日 [备注] [指定 id]
 db_account_create() {
-    local name="$1" quota="${2:-0}" expire="${3:-}" reset_day="${4:-0}" note="${5:-}" id
+    local name="$1" quota="${2:-0}" expire="${3:-}" reset_day="${4:-0}" note="${5:-}" id="${6:-}"
     _account_valid_name "$name" || { _err "用户名只能包含字母、数字、下划线和横线，最多 32 位"; return 1; }
     [[ "$quota" =~ ^[0-9]{1,16}$ ]] || { _err "配额无效"; return 1; }
     _account_valid_date "$expire" || { _err "到期日期格式应为 YYYY-MM-DD"; return 1; }
     [[ "$reset_day" =~ ^[0-9]{1,2}$ ]] && (( 10#$reset_day <= 28 )) || { _err "重置日应为 0-28"; return 1; }
     (( ${#note} <= 200 )) || { _err "备注最多 200 字"; return 1; }
     [[ -z "$(db_account_find "$name")" ]] || { _err "统一用户 $name 已存在"; return 1; }
-    id=$(_account_new_id) || { _err "无法生成用户 ID"; return 1; }
+    if [[ -n "$id" ]]; then
+        _account_valid_id "$id" && [[ -z "$(db_account_get "$id")" ]] || { _err "统一用户 ID 无效或已存在"; return 1; }
+    else
+        id=$(_account_new_id) || { _err "无法生成用户 ID"; return 1; }
+    fi
     _db_apply --arg id "$id" --arg n "$name" --arg note "$note" --arg exp "$expire" \
         --argjson q "$((10#$quota))" --argjson d "$((10#$reset_day))" \
         --arg today "$(date +%F)" --argjson now "$(date +%s)" "$(_account_jq_defs)"'
@@ -32104,8 +32113,298 @@ _api_inventory() {
             elif ((.snell_id // "") | test("^[0-9a-f]{24}$")) then "vless-snellu-" + .snell_id
             else null end),
          resources:{ownership_verified:false},
-         users:[(.users // [])[] | {name:.name,enabled:.enabled,quota:.quota,used:.used,expire_date:.expire_date}]}
-      ]}' <<< "$snapshot"
+         users:[(.users // [])[] | {name:.name,enabled:.enabled,quota:.quota,used:.used,expire_date:.expire_date,account_id:(.account_id // null)}]}
+      ],
+      accounts:(. as $db | ($db.accounts // {}) | with_entries(.key as $id | .value |= {
+        name, note:(.note // ""), enabled:(.enabled != false), expire_date:(.expire_date // ""), quota:(.quota // 0),
+        reset_day:(.reset_day // 0), cycle:(.cycle // ""), cycle_used:(.cycle_used // 0), rev:(.rev // 0), mtime:(.mtime // {}),
+        platform_user_id:(.platform_user_id // null), platform_block:(.platform_block // ""),
+        members:[(.members // [])[] | . as $m |
+          (first(($db[$m.core][$m.protocol] // [] | if type == "array" then .[] else . end) | select(.port == $m.port) |
+            (.users // [])[] | select(.name == $m.name)) // null) as $u |
+          {core:$m.core, protocol:$m.protocol, port:$m.port, name:$m.name, last_raw:($m.last_raw // 0),
+           used:($u.used // null), enabled:(if $u == null then null else ($u.enabled != false) end),
+           disable_reason:($u.disable_reason // "")}]}))}' <<< "$snapshot"
+}
+
+# 统一用户写接口（accounts_api_version 1）。一个请求内的全部操作作为一个事务：
+# 互斥锁 → 幂等记录 → 备份 → 预检 → 逐项执行（重建延后）→ 统一重建 → 结果。
+# 任一步失败就恢复数据库与配置文件并重建，结果为 failed；恢复失败为 unknown。
+API_ACCOUNT_OPS="create update link unlink block member_add member_claim member_remove reset_credentials reset_usage delete"
+
+_api_txn_lock() {
+    mkdir -p "$CFG" || return 1
+    if command -v flock >/dev/null 2>&1; then
+        exec {API_TXN_FD}>"$CFG/.txn.lock" || return 1
+        flock -x -w 300 "$API_TXN_FD" && return 0
+        exec {API_TXN_FD}>&-; API_TXN_FD=""
+        return 1
+    fi
+    local i owner
+    for ((i=0; i<3000; i++)); do
+        if mkdir "$CFG/.txn.lock.d" 2>/dev/null; then
+            printf '%s\n' "$$" > "$CFG/.txn.lock.d/pid"; API_TXN_DIR=1
+            return 0
+        fi
+        owner=$(cat "$CFG/.txn.lock.d/pid" 2>/dev/null || true)
+        if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -rf "$CFG/.txn.lock.d"
+            continue
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+_api_txn_unlock() {
+    if [[ -n "${API_TXN_FD:-}" ]]; then
+        flock -u "$API_TXN_FD" 2>/dev/null || true
+        exec {API_TXN_FD}>&-; API_TXN_FD=""
+    fi
+    if [[ -n "${API_TXN_DIR:-}" ]]; then
+        rm -rf "$CFG/.txn.lock.d"; API_TXN_DIR=""
+    fi
+    return 0
+}
+
+_api_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi
+}
+
+# 请求格式校验：字段白名单、类型与范围。不读取数据库。
+_api_account_validate() {
+    jq -e '
+      def uuid: type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+      def name: type == "string" and test("^[A-Za-z0-9_-]{1,32}$");
+      def date: type == "string" and (. == "" or test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"));
+      def int($lo; $hi): type == "number" and . == floor and . >= $lo and . <= $hi;
+      def allowed($k): type == "object" and ((keys - $k) | length == 0);
+      def target: allowed(["core", "port", "protocol"]) and (keys | length == 3) and
+        (.core == "xray" or .core == "singbox") and (.protocol | type == "string" and test("^[a-z0-9-]{1,32}$")) and (.port | int(1; 65535));
+      def fields: allowed(["name", "note", "enabled", "expire_date", "quota", "reset_day"]) and length > 0 and
+        (if has("name") then .name | name else true end) and
+        (if has("note") then .note | type == "string" and length <= 200 and (explode | all(.[]; . >= 32)) else true end) and
+        (if has("enabled") then .enabled | type == "boolean" else true end) and
+        (if has("expire_date") then .expire_date | date else true end) and
+        (if has("quota") then .quota | int(0; 9999999999999999) else true end) and
+        (if has("reset_day") then .reset_day | int(0; 28) else true end);
+      def mode: (. // "release") | (. == "release" or . == "delete");
+      def op_ok: type == "object" and (.account_id | uuid) and
+        if .op == "create" then allowed(["op", "account_id", "fields", "platform_user_id", "members"]) and
+            (.fields | fields and has("name")) and (if has("platform_user_id") then .platform_user_id | uuid else true end) and
+            ((.members // []) | type == "array" and length <= 50 and
+              all(.[]; allowed(["target", "name"]) and (.target | target) and (if has("name") then .name | name else true end)))
+        elif .op == "update" then allowed(["op", "account_id", "base_rev", "fields"]) and (.base_rev | int(0; 999999999999)) and (.fields | fields)
+        elif .op == "link" then allowed(["op", "account_id", "platform_user_id"]) and (.platform_user_id | uuid)
+        elif .op == "unlink" or .op == "reset_usage" then allowed(["op", "account_id"])
+        elif .op == "block" then allowed(["op", "account_id", "platform_block"]) and (.platform_block == "" or .platform_block == "quota")
+        elif .op == "member_add" then allowed(["op", "account_id", "target", "name"]) and (.target | target) and
+            (if has("name") then .name | name else true end)
+        elif .op == "member_claim" then allowed(["op", "account_id", "target", "name", "count_existing"]) and (.target | target) and
+            (.name | name) and ((.count_existing // true) | type == "boolean")
+        elif .op == "member_remove" then allowed(["op", "account_id", "target", "name", "mode"]) and (.target | target) and
+            (.name | name) and (.mode | mode)
+        elif .op == "reset_credentials" then allowed(["op", "account_id", "member"]) and
+            (if has("member") then (.member | allowed(["core", "protocol", "port", "name"]) and ({core, protocol, port} | target) and (.name | name)) else true end)
+        elif .op == "delete" then allowed(["op", "account_id", "mode"]) and (.mode | mode)
+        else false end;
+      (.params | allowed(["ops"])) and (.params.ops | type == "array" and length >= 1 and length <= 200 and all(.[]; op_ok))
+    ' <<< "$1" >/dev/null 2>&1
+}
+
+# 数据库预检：账户存在性、base_rev、协议支持范围。输出首个问题 "code|account_id|当前rev"。
+_api_account_precheck() {
+    local request="$1" line op id proto mode
+    line=$(jq -r --slurpfile db "$DB_FILE" '
+        ($db[0].accounts // {}) as $accounts |
+        ([.params.ops[] | select(.op == "create") | .account_id]) as $created |
+        first(.params.ops[] | .account_id as $id |
+          if .op == "create" then
+            (if $accounts[.account_id] != null then "account_exists|\(.account_id)|" else empty end)
+          elif ($accounts[$id] == null and (($created | index($id)) == null)) then "account_not_found|\($id)|"
+          elif .op == "update" and (($accounts[.account_id].rev // 0) != .base_rev) then "rev_conflict|\(.account_id)|\($accounts[.account_id].rev // 0)"
+          else empty end) // ""' <<< "$request") || { echo "invalid_database||"; return 1; }
+    [[ -z "$line" ]] || { echo "$line"; return 1; }
+    # Snell 成员需要新建或卸载独立实例与计数规则，不在事务中回滚：新建请先安装实例后 member_claim，
+    # 移除请使用 release。
+    while IFS='|' read -r op id proto mode; do
+        [[ -z "$op" ]] && continue
+        if _is_snell_users_protocol "$proto"; then
+            [[ "$op" == member_add || "$op" == create || ( "$op" == member_remove && "$mode" == delete ) || ( "$op" == delete && "$mode" == delete ) ]] && {
+                echo "unsupported_snell_operation|$id|"; return 1; }
+        fi
+        if [[ -n "$proto" ]] && ! _account_proto_supported "$proto"; then
+            echo "unsupported_protocol|$id|"; return 1
+        fi
+    done <<< "$(jq -r --slurpfile db "$DB_FILE" '.params.ops[] |
+        if .op == "create" then (.members // [])[] as $m | "create|\(.account_id)|\($m.target.protocol)|"
+        elif .target then "\(.op)|\(.account_id)|\(.target.protocol)|\(.mode // "")"
+        elif .op == "delete" then (.account_id as $id | .mode as $mode | ($db[0].accounts[$id].members // [])[] | "delete|\($id)|\(.protocol)|\($mode // "release")")
+        else empty end' <<< "$request")"
+    return 0
+}
+
+# 逐项执行。调用方已持锁、已备份；重建由 ACCOUNTS_DEFER_RELOAD 延后收集。
+_api_account_execute() {
+    local request="$1" count i op id f value core proto port name
+    count=$(jq '.params.ops | length' <<< "$request")
+    for ((i=0; i<count; i++)); do
+        op=$(jq -c --argjson i "$i" '.params.ops[$i]' <<< "$request")
+        id=$(jq -r .account_id <<< "$op")
+        case "$(jq -r .op <<< "$op")" in
+            create)
+                db_account_create "$(jq -r .fields.name <<< "$op")" "$(jq -r '.fields.quota // 0' <<< "$op")" \
+                    "$(jq -r '.fields.expire_date // ""' <<< "$op")" "$(jq -r '.fields.reset_day // 0' <<< "$op")" \
+                    "$(jq -r '.fields.note // ""' <<< "$op")" "$id" >/dev/null || return 1
+                if [[ "$(jq -r '.fields.enabled // true' <<< "$op")" == false ]]; then db_account_set "$id" enabled false || return 1; fi
+                if [[ -n "$(jq -r '.platform_user_id // ""' <<< "$op")" ]]; then
+                    _db_apply --arg id "$id" --arg p "$(jq -r .platform_user_id <<< "$op")" '.accounts[$id].platform_user_id = $p' || return 1
+                fi
+                while IFS='|' read -r core proto port name; do
+                    [[ -z "$core" ]] && continue
+                    db_account_member_new "$id" "$core" "$proto" "$port" "$name" || return 1
+                done <<< "$(jq -r '(.members // [])[] | "\(.target.core)|\(.target.protocol)|\(.target.port)|\(.name // "")"' <<< "$op")"
+                ;;
+            update)
+                while IFS=$'\t' read -r f value; do
+                    [[ -z "$f" ]] && continue
+                    db_account_set "$id" "$f" "$value" || return 1
+                done <<< "$(jq -r '.fields | to_entries[] | "\(.key)\t\(.value)"' <<< "$op")"
+                ;;
+            link) _db_apply --arg id "$id" --arg p "$(jq -r .platform_user_id <<< "$op")" '.accounts[$id].platform_user_id = $p' || return 1 ;;
+            unlink) db_account_unlink_platform "$id" || return 1 ;;
+            block) _db_apply --arg id "$id" --arg b "$(jq -r .platform_block <<< "$op")" '.accounts[$id].platform_block = $b' || return 1
+                accounts_apply || return 1 ;;
+            member_add)
+                db_account_member_new "$id" "$(jq -r .target.core <<< "$op")" "$(jq -r .target.protocol <<< "$op")" \
+                    "$(jq -r .target.port <<< "$op")" "$(jq -r '.name // ""' <<< "$op")" || return 1 ;;
+            member_claim)
+                db_account_member_add "$id" "$(jq -r .target.core <<< "$op")" "$(jq -r .target.protocol <<< "$op")" \
+                    "$(jq -r .target.port <<< "$op")" "$(jq -r .name <<< "$op")" "$(jq -r 'if .count_existing == false then false else true end' <<< "$op")" || return 1 ;;
+            member_remove)
+                db_account_member_remove "$id" "$(jq -r .target.core <<< "$op")" "$(jq -r .target.protocol <<< "$op")" \
+                    "$(jq -r .target.port <<< "$op")" "$(jq -r .name <<< "$op")" "$(jq -r '.mode // "release"' <<< "$op")" || return 1 ;;
+            reset_credentials)
+                if [[ "$(jq 'has("member")' <<< "$op")" == true ]]; then
+                    db_account_reset_credentials "$id" $(jq -r '.member | "\(.core) \(.protocol) \(.port) \(.name)"' <<< "$op") || return 1
+                else
+                    db_account_reset_credentials "$id" || return 1
+                fi ;;
+            reset_usage) db_account_reset_usage "$id" || return 1 ;;
+            delete) db_account_delete "$id" "$(jq -r '.mode // "release"' <<< "$op")" || return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+_api_account_backup_files() {
+    local f
+    for f in "$CFG/config.json" "$CFG/singbox.json" "$CFG"/snell-users/*.conf; do
+        [[ -f "$f" ]] && printf '%s\n' "$f"
+    done
+}
+
+# 恢复备份并重建运行配置；成功返回 0（已回滚），失败返回 1（结果未知）
+_api_account_restore() {
+    local backup="$1" reloads="$2" f name failed=0
+    cp -p "$backup/db.json" "$DB_FILE" || failed=1
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        name=$(printf '%s' "$f" | _api_sha256)
+        cp -p "$backup/$name" "$f" || failed=1
+    done < "$backup/files"
+    [[ -n "$reloads" ]] && { _accounts_reload "$reloads" >/dev/null 2>&1 || failed=1; }
+    return "$failed"
+}
+
+_api_account_store() {
+    local file="$1" content="$2" staged
+    staged=$(mktemp "$file.XXXXXX") || return 1
+    printf '%s\n' "$content" > "$staged" && chmod 600 "$staged" && mv "$staged" "$file"
+}
+
+_api_account_apply() {
+    local request="$1" results="$CFG/api-results" backups="$CFG/api-backups" fingerprint record prior backup
+    local log check code account rev f data
+    _api_account_validate "$request" || { _api_reply failed invalid_request; return 1; }
+    [[ -f "$DB_FILE" ]] || { _api_reply failed invalid_database; return 1; }
+    mkdir -p "$results" "$backups" && chmod 700 "$results" "$backups" || { _api_reply failed storage_error; return 1; }
+    fingerprint=$(jq -cS '{action, params}' <<< "$request" | _api_sha256)
+    record="$results/$api_id.json"
+    _api_txn_lock || { _api_reply failed lock_timeout; return 1; }
+    find "$results" "$backups" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null || true
+    if [[ -f "$record" ]]; then
+        prior=$(cat "$record")
+        _api_txn_unlock
+        [[ "$(jq -r .fingerprint <<< "$prior")" == "$fingerprint" ]] || { _api_reply failed request_id_conflict; return 1; }
+        case "$(jq -r .status <<< "$prior")" in
+            succeeded) _api_reply succeeded ok "$(jq -c .data <<< "$prior")"; return 0 ;;
+            failed) _api_reply failed "$(jq -r .code <<< "$prior")" "$(jq -c .data <<< "$prior")"; return 1 ;;
+            *) _api_reply unknown result_unknown '{"replay_allowed":false}'; return 1 ;;
+        esac
+    fi
+    check=$(_api_account_precheck "$request") || {
+        _api_txn_unlock
+        IFS='|' read -r code account rev <<< "$check"
+        _api_reply failed "$code" "$(jq -nc --arg a "$account" --arg r "$rev" '{account_id:$a} + (if $r == "" then {} else {rev:($r|tonumber)} end)')"
+        return 1
+    }
+    # 意图先落盘：进程在此之后中断，重放请求只会得到 unknown，不会重复执行。
+    _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" '{fingerprint:$f,status:"running"}')" || { _api_txn_unlock; _api_reply failed storage_error; return 1; }
+    backup="$backups/$api_id"
+    mkdir -p "$backup" && chmod 700 "$backup" && cp -p "$DB_FILE" "$backup/db.json" || {
+        rm -f "$record"; _api_txn_unlock; _api_reply failed storage_error; return 1; }
+    _api_account_backup_files > "$backup/files"
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        cp -p "$f" "$backup/$(printf '%s' "$f" | _api_sha256)" || { rm -f "$record"; _api_txn_unlock; _api_reply failed storage_error; return 1; }
+    done < "$backup/files"
+    log="$backup/log"
+    ACCOUNTS_DEFERRED=""
+    ACCOUNTS_DEFER_RELOAD=1
+    local reloaded=""
+    if _api_account_execute "$request" >>"$log" 2>&1; then
+        ACCOUNTS_DEFER_RELOAD=""
+        reloaded="$ACCOUNTS_DEFERRED"
+        if _accounts_reload_or_queue "$ACCOUNTS_DEFERRED" >>"$log" 2>&1; then
+            data=$(jq -c --slurpfile db "$DB_FILE" '{accounts: ([.params.ops[].account_id] | unique | map({key: ., value: {rev: ($db[0].accounts[.].rev // null), exists: ($db[0].accounts[.] != null)}}) | from_entries)}' <<< "$request")
+            _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" --argjson d "$data" '{fingerprint:$f,status:"succeeded",data:$d}')"
+            _api_txn_unlock
+            _api_reply succeeded ok "$data"
+            return 0
+        fi
+    fi
+    ACCOUNTS_DEFER_RELOAD=""
+    # 只返回脚本自身的中文提示（不含凭据），便于面板显示失败原因。
+    data=$(jq -nc --arg m "$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -E '✗|!' | tail -n1 | sed -E 's/^[[:space:]]*(✗|!)[[:space:]]*//')" '{message:$m}')
+    # 统一重建尚未执行时运行配置未变，只恢复文件；执行过则按恢复后的数据库重建。
+    if _api_account_restore "$backup" "$reloaded"; then
+        _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" --argjson d "$data" '{fingerprint:$f,status:"failed",code:"apply_failed",data:($d + {rolled_back:true})}')"
+        _api_txn_unlock
+        _api_reply failed apply_failed "$(jq -c '. + {rolled_back:true}' <<< "$data")"
+        return 1
+    fi
+    _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" '{fingerprint:$f,status:"unknown"}')"
+    _api_txn_unlock
+    _api_reply unknown result_unknown '{"replay_allowed":false}'
+    return 1
+}
+
+# 查询写接口结果：只读，不重放
+_api_account_result() {
+    local target record status
+    target=$(jq -r '.params.request_id // ""' <<< "$1")
+    record="$CFG/api-results/$target.json"
+    if [[ ! "$target" =~ ^[A-Za-z0-9_-]{1,128}$ || ! -f "$record" ]]; then
+        _api_reply unknown result_not_found '{"replay_allowed":false}'
+        return 1
+    fi
+    status=$(jq -r .status "$record")
+    case "$status" in
+        succeeded) _api_reply succeeded ok "$(jq -c .data "$record")" ;;
+        failed) _api_reply failed "$(jq -r .code "$record")" "$(jq -c .data "$record")"; return 1 ;;
+        *) _api_reply unknown result_unknown '{"replay_allowed":false}'; return 1 ;;
+    esac
 }
 
 _api_dispatch() {
@@ -32131,8 +32430,10 @@ _api_dispatch() {
     action=$(jq -r .action <<< "$request")
     case "$action" in
         capabilities)
-            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" '
-              {stage:"read_only_foundation",actions:["capabilities","inventory","plan","result"],write_actions:[],
+            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" --arg ops "$API_ACCOUNT_OPS" '
+              {stage:"read_only_foundation",actions:["capabilities","inventory","plan","result","account_apply"],write_actions:[],
+               accounts_api:{version:1,actions:["account_apply","result"],ops:($ops|split(" ")),
+                 transaction:true,idempotent:true,snell_member_add:false},
                protocols:([($x|split(" ")[])|{core:"xray",protocol:.,write_supported:false}] +
                  [($s|split(" ")[])|{core:"singbox",protocol:.,write_supported:false}] +
                  [($p|split(" ")[])|{core:"standalone",protocol:.,write_supported:false}]),
@@ -32144,9 +32445,13 @@ _api_dispatch() {
             _api_reply succeeded ok "$inventory"
             ;;
         result)
-            # No mutations are executable in this API revision, so no durable
-            # mutation result exists. Never replay an unknown request.
-            _api_reply unknown result_not_found '{"replay_allowed":false}'
+            # 只读查询统一用户写接口的结果；未知请求永不重放。
+            _api_account_result "$request"
+            return $?
+            ;;
+        account_apply)
+            _api_account_apply "$request"
+            return $?
             ;;
         plan)
             inventory=$(_api_inventory 2>/dev/null) || { _api_reply failed invalid_database; return 1; }
