@@ -13,7 +13,7 @@
 - 界面：「用户管理」列表（含未关联的节点统一用户）和详情、关联弹窗、实例弹窗联动（成员标记、归入）、流量页平台用户汇总。中文文案、黑白简约，遵守组件规范，保持现有元素 id。
 
 ## Acceptance Criteria
-- [ ] `tests/test_platform_users_panel.py`：三方合并（仅节点改、仅面板改、两边都改）、跨节点累计、超额 block 和周期恢复、到期同步、认领保留用量、离线待同步、旧 Agent 拒绝绑定、入队去重、unknown 阻塞、备份 v1/v2 恢复、接口鉴权和 CSRF
-- [ ] `tests/platform-users.cjs` 加入 CI；现有 cjs 测试不变（本机无 Node，以 Actions 为准）
-- [ ] 本地预览截图检查列表、详情、关联弹窗
-- [ ] `platform/docs/platform-users.md`；版本号 0.3.0-preview.11
+- [x] `tests/test_platform_users_panel.py`：三方合并（仅节点改、仅面板改、两边都改）、跨节点累计、超额 block 和周期恢复、到期同步、认领保留用量、离线待同步、旧 Agent 拒绝绑定、入队去重、unknown 阻塞、备份 v1/v2 恢复、接口鉴权和 CSRF
+- [x] `tests/platform-users.cjs` 加入 CI；现有 cjs 测试不变（本机无 Node，以 Actions 为准）
+- [x] 本地预览截图检查列表、详情、关联弹窗
+- [x] `platform/docs/platform-users.md`；版本号 0.3.0-preview.11
