@@ -30,7 +30,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -122,4 +122,33 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     await elements['confirm-upgrade'].onclick({target: {}});
     assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.pop())), ['/nodes/a/upgrade', {}]);
     console.log('PASS authority block, takeover confirmation payload and one-click upgrade');
+
+    // 协议用户模式与安装时选择用户
+    const inst = (mode, extra = {}) => ({core: 'xray', protocol: 'p', port: 1, user_mode: mode, user_available: true, users: [], ...extra});
+    assert.strictEqual(context.userModeText(inst('multi')), '多用户');
+    assert.strictEqual(context.userModeText(inst('single', {user_stats: 'inbound'})), '一用户一实例，按入站统计，空实例');
+    assert.strictEqual(context.userModeText(inst('single', {user_stats: 'port', users: [{}]})), '一用户一实例，按端口统计，已有用户');
+    assert.strictEqual(context.userModeText(inst('none')), '不支持用户管理');
+    assert.strictEqual(context.userModeText(inst('single', {user_available: false})), '暂未接入用户管理');
+    assert(context.memberAddable(inst('multi', {users: [{}]})) && context.memberAddable(inst('single')));
+    assert(!context.memberAddable(inst('single', {users: [{}]})) && !context.memberAddable(inst('none')) && !context.memberAddable(inst('multi', {user_available: false})));
+    assert(!context.memberAddable({protocol: 'ss2022', managed: true}) && context.memberAddable({protocol: 'vless', managed: true}));
+    const scroll = {html: '', insertAdjacentHTML(_, h) { this.html += h; }};
+    elements['#install-form .install-scroll'] = scroll;
+    delete elements['install-users'];
+    context.responses['/users'] = {users: [{id: 'u1', name: '<b>a</b>', note: ''}, {id: 'u2', name: 'b', deleting: 'release'}]};
+    vm.runInContext('selected = this.nodes[0];', context);
+    await context.installUserPicker();
+    assert(scroll.html.includes('value="u1"') && !scroll.html.includes('value="u2"') && scroll.html.includes('&lt;b&gt;a&lt;/b&gt;'));
+    const picked = [{value: 'u1', matches: s => s === '#install-users input:checked'}];
+    Object.assign(elements, {pick1: picked[0]});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(context.installPickedUsers())), ['u1']);
+    vm.runInContext("activeTaskId = 't9';", context);
+    await context.installPlaceUsers(['u1']);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.pop())), ['/nodes/a/install-users', {task_id: 't9', user_ids: ['u1']}]);
+    vm.runInContext('selected = this.nodes[3];', context);
+    scroll.html = '';
+    await context.installUserPicker();
+    assert.strictEqual(scroll.html, '');
+    console.log('PASS user mode labels, member targets, install user picker and placement payload');
 })().catch(error => { console.error(error); process.exit(1); });
