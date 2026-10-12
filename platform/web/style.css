@@ -2270,3 +2270,30 @@ dialog.install .install-warning {
         scroll-behavior: auto !important;
     }
 }
+
+/* 用户管理 */
+#pu-link-form fieldset {
+    border: 0;
+    padding: 0;
+    margin: 14px 0 0;
+}
+#pu-link-form legend {
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0;
+    margin-bottom: 6px;
+}
+.check-list {
+    display: grid;
+    gap: 2px;
+    max-height: 220px;
+    overflow: auto;
+}
+.small-link {
+    font-size: 13px;
+    margin-right: 8px;
+}
+#user-traffic .section-label a,
+.small-link {
+    color: var(--ink);
+}

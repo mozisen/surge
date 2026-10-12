@@ -19,7 +19,8 @@ const icons = {
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18M12 3c-5 5-5 13 0 18"/>',
     refresh: '<path d="M20 7v5h-5M4 17v-5h5M5 8a8 8 0 0 1 13-3l2 3M4 16l2 3a8 8 0 0 0 13-3"/>',
     close: '<path d="m6 6 12 12M6 18 18 6"/>',
-    lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>'
+    lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>',
+    users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>'
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.server}</svg>`;
 const states = {
@@ -59,7 +60,8 @@ const actions = {
     user_update: '修改用户',
     user_delete: '删除用户',
     share: '配置信息',
-    inspect: '检查实例'
+    inspect: '检查实例',
+    platform_apply: '平台用户同步'
 };
 const bytes = n => n == null ? '—' : n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GiB' : n >= 1048576 ? (n / 1048576).toFixed(0) + ' MiB' : (n / 1024).toFixed(0) + ' KiB';
 const date = n => n ? new Date(n * 1000).toLocaleString('zh-CN', {
@@ -176,7 +178,7 @@ function login() {
 }
 
 function shell(content, section) {
-    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器节点'], ['tasks', 'tasks', '任务记录'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '监控与通知'], ['backups', 'server', '备份恢复'], ['audit', 'shield', '操作审计']];
+    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器节点'], ['users', 'users', '用户管理'], ['tasks', 'tasks', '任务记录'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '监控与通知'], ['backups', 'server', '备份恢复'], ['audit', 'shield', '操作审计']];
     const nav = links.map(([id, ico, text]) => `<a href="#${id}" class="${section===id?'active':''}"${section===id?' aria-current="page"':''}>${icon(ico)}${text}</a>`).join('');
     $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
 }
@@ -226,7 +228,7 @@ function nodeCards() {
 }
 
 function taskTable(list) {
-    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${esc(t.request.protocol)} : ${t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
+    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
 }
 
 function overview(section) {
@@ -297,8 +299,13 @@ async function render() {
         else shell('<div class="empty"><h3>节点不存在</h3><a href="#nodes">返回节点列表</a></div>', 'nodes');
     } else if (route === 'tasks') {
         shell(`<div class="heading"><div><h1>任务记录</h1><p class="subtext">安装、修改与卸载的执行结果，集中追溯。</p></div><button data-action="refresh">${icon('refresh')}刷新</button></div><div class="notice">执行结果未确认的任务不会自动重试。请检查节点实际状态后再发起新操作。</div><div class="panel">${taskTable(tasks)}</div>`, 'tasks');
+    } else if (route === 'users') {
+        await usersPage();
+    } else if (route.startsWith('users/')) {
+        await userDetail(route.split('/')[1]);
     } else if (route === 'traffic') {
         trafficPage();
+        await userTraffic();
     } else if (route === 'monitor') {
         await monitorPage();
     } else if (route === 'backups') {
@@ -417,7 +424,7 @@ function showInstance(index) {
     const p = selected.snapshot.instances[index];
     if (!p) return;
     const writable = p.managed && selected.adopted && selected.status === 'online' && !selected.maintenance;
-    modal(`${names[p.protocol]||p.protocol} · ${p.port}`, `<p class="instance-service">服务：<code>${esc(p.service)}</code> ${badge(p.status)}</p>${!p.managed?'<div class="notice warn">此实例尚未适配安全写入，当前仅可查看；安装列表按节点已声明的协议与内核能力展示。</div>':''}<div class="action-row"><button data-action="edit-port" data-index="${index}" ${writable?'':'disabled'}>修改端口</button><button data-action="${p.status==='running'?'stop':'start'}" data-index="${index}" ${writable?'':'disabled'}>${p.status==='running'?'停止服务':'启动服务'}</button><button data-action="restart" data-index="${index}" ${writable?'':'disabled'}>重启服务</button><button class="danger" data-action="delete" data-index="${index}" ${writable?'':'disabled'}>卸载此实例</button></div><label>实例用户</label><div class="table-wrap"><table><thead><tr><th>用户</th><th>已用 / 配额</th><th>状态</th><th>操作</th></tr></thead><tbody>${(p.users||[]).map((u,i)=>`<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.expire_date||'永不过期')}</span></td><td>${p.traffic_state==='ready'?bytes(u.used):'统计不可用'} / ${u.quota?bytes(u.quota):'不限'}${u.reset_day?`<br><span class="muted">每月 ${u.reset_day} 日重置</span>`:''}</td><td>${badge(u.enabled?'running':'stopped')}${u.quota&&u.used>=u.quota?'<br>已超额':u.expire_date&&u.expire_date<new Date().toLocaleDateString('sv')?'<br>已到期':''}</td><td><button class="small" data-action="edit-user" data-index="${index}" data-user="${i}" ${writable?'':'disabled'}>编辑</button><button class="small" data-action="share" data-index="${index}" data-user="${i}" ${p.managed&&selected.status==='online'?'':'disabled'}>配置信息</button></td></tr>`).join('')}</tbody></table></div><p class="helper">用户流量来自节点数据库，依赖原脚本统计任务；无统计接口时不代表真实用量为零。</p><div class="modal-foot"><button data-action="add-user" data-index="${index}" ${writable&&!p.protocol.startsWith('snell')&&!['ss-legacy','ss2022'].includes(p.protocol)?'':'disabled'}>新增用户</button><button data-action="close">关闭</button></div>`, true);
+    modal(`${names[p.protocol]||p.protocol} · ${p.port}`, `<p class="instance-service">服务：<code>${esc(p.service)}</code> ${badge(p.status)}</p>${!p.managed?'<div class="notice warn">此实例尚未适配安全写入，当前仅可查看；安装列表按节点已声明的协议与内核能力展示。</div>':''}<div class="action-row"><button data-action="edit-port" data-index="${index}" ${writable?'':'disabled'}>修改端口</button><button data-action="${p.status==='running'?'stop':'start'}" data-index="${index}" ${writable?'':'disabled'}>${p.status==='running'?'停止服务':'启动服务'}</button><button data-action="restart" data-index="${index}" ${writable?'':'disabled'}>重启服务</button><button class="danger" data-action="delete" data-index="${index}" ${writable?'':'disabled'}>卸载此实例</button></div><label>实例用户</label><div class="table-wrap"><table><thead><tr><th>用户</th><th>已用 / 配额</th><th>状态</th><th>操作</th></tr></thead><tbody>${(p.users||[]).map((u,i)=>`<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.expire_date||'永不过期')}</span>${u.account_id?`<br><span class="muted">统一用户 ${esc(selected.snapshot.accounts?.[u.account_id]?.name||'')}</span>`:''}</td><td>${p.traffic_state==='ready'?bytes(u.used):'统计不可用'} / ${u.quota?bytes(u.quota):'不限'}${u.reset_day?`<br><span class="muted">每月 ${u.reset_day} 日重置</span>`:''}</td><td>${badge(u.enabled?'running':'stopped')}${u.quota&&u.used>=u.quota?'<br>已超额':u.expire_date&&u.expire_date<new Date().toLocaleDateString('sv')?'<br>已到期':''}</td><td>${u.account_id?`<a class="small-link" href="#users">在用户管理中修改</a>`:`<button class="small" data-action="edit-user" data-index="${index}" data-user="${i}" ${writable?'':'disabled'}>编辑</button>`}<button class="small" data-action="share" data-index="${index}" data-user="${i}" ${p.managed&&selected.status==='online'?'':'disabled'}>配置信息</button></td></tr>`).join('')}</tbody></table></div><p class="helper">用户流量来自节点数据库，依赖原脚本统计任务；无统计接口时不代表真实用量为零。</p><div class="modal-foot"><button data-action="add-user" data-index="${index}" ${writable&&!p.protocol.startsWith('snell')&&!['ss-legacy','ss2022'].includes(p.protocol)?'':'disabled'}>新增用户</button><button data-action="close">关闭</button></div>`, true);
 }
 async function submitTask(action, p, params = {}) {
     const data = await post('/nodes/' + selected.id + '/tasks', {
@@ -443,7 +450,7 @@ function showTask(id) {
         return;
     }
     const r = t.result || {};
-    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${esc(t.request.protocol)}:${t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
+    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
 }
 
 function installPortCandidate(instances, current) {
@@ -711,7 +718,8 @@ document.addEventListener('click', async e => {
         if (action === 'close') {
             $('#modal').close();
             activeTaskId = null;
-        } else if (action === 'logout') {
+        } else if (action.startsWith('pu-')) await userAction(action, b);
+        else if (action === 'logout') {
             await post('/logout');
             authenticated = false;
             csrf = '';
@@ -808,6 +816,7 @@ document.addEventListener('click', async e => {
         } else if (action === 'traffic-node') {
             trafficNodeId = b.dataset.id;
             trafficPage();
+            await userTraffic();
         } else if (action === 'copy-config-details') {
             await navigator.clipboard.writeText($('#config-details').value);
             toast('配置详情已复制');
@@ -896,4 +905,162 @@ async function historyDialog() {
         return `<section class="history-chart"><div class="chart-head"><div><h3>${title}</h3>${points.length?`<p class="helper">最新 ${value(points[points.length-1]).toFixed(2)} · 最高 ${peak.toFixed(2)} · ${points.length} 个采样点</p>`:''}</div>${points.length?`<div class="chart-reading">${reading(value(points[points.length-1]).toFixed(2), unit)}</div>`:''}</div>${points.length?`<div class="chart-plot"><svg viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="${title}过去24小时变化"><path class="chart-area" d="${area}"/><g class="chart-grid"><line x1="0" x2="600" y1="15" y2="15"/><line x1="0" x2="600" y1="60" y2="60"/><line class="chart-base" x1="0" x2="600" y1="105" y2="105"/></g><path class="chart-line" d="${d}"/></svg><span class="chart-tick tick-max">${tick(max)}</span><span class="chart-tick tick-half">${tick(max/2)}</span><span class="chart-tick tick-zero">0</span></div><div class="chart-time"><span>${stamp(start)}</span><span>${stamp(end)}</span></div>`:'<p>暂无采样数据</p>'}</section>`;
     }).join('');
     modal('资源历史 · '+selected.name, `<p class="helper">过去 24 小时，每分钟采样一次；保留 7 天数据。断线时间段留空。</p>${content}<p class="helper">${date(start)} — ${date(end)}</p>`, true);
+}
+
+// ---------------------------------------------------------------- 用户管理（平台用户）
+let platformData = {users: [], unlinked: []}, currentUser = null;
+const userStates = {'': ['running', '正常'], manual: ['stopped', '已停用'], expired: ['stopped', '已到期'], quota: ['stopped', '流量已用尽'], platform_quota: ['stopped', '平台总流量已用尽']};
+const syncStates = {synced: ['succeeded', '已同步'], pending: ['pending', '待同步'], offline: ['offline', '节点离线'], failed: ['failed', '同步失败'], unknown: ['unknown', '待核对'], removing: ['pending', '解除中']};
+const stateBadge = (map, key) => { const [cls, text] = map[key] || ['pending', key || '—']; return `<span class="badge ${cls}">${esc(text)}</span>`; };
+const SINGLE_USER = ['ss-legacy', 'ss2022', 'snell', 'snell-v5', 'snell-v6'];
+const quotaText = (used, quota) => `${bytes(used || 0)} / ${quota ? bytes(quota) : '不限'}`;
+const memberText = m => `${esc(names[m.protocol] || m.protocol)} · <span class="mono">${m.port}</span>${m.name ? ' · ' + esc(m.name) : ''}`;
+const userSync = u => {
+    if (!u.links.length) return '<span class="muted">未关联节点</span>';
+    const bad = u.links.filter(l => l.sync !== 'synced');
+    return bad.length ? stateBadge(syncStates, bad.find(l => ['failed', 'unknown'].includes(l.sync))?.sync || bad[0].sync) + ` <span class="muted">${bad.length}/${u.links.length}</span>` : stateBadge(syncStates, 'synced');
+};
+const usersReady = node => node.adopted && node.status === 'online' && !node.maintenance && node.snapshot.accounts_version === 1;
+
+async function usersPage() {
+    platformData = await api('/users');
+    const rows = platformData.users.map(u => `<tr><td><a href="#users/${esc(u.id)}"><strong>${esc(u.name)}</strong></a>${u.note ? `<br><span class="muted">${esc(u.note)}</span>` : ''}</td><td>${stateBadge(userStates, u.state)}${u.deleting ? '<br><span class="muted">删除中</span>' : ''}</td><td>${meter('用量', u.quota ? u.used / u.quota * 100 : null)}<span class="muted">${quotaText(u.used, u.quota)}</span></td><td>${esc(u.expire_date || '永不过期')}</td><td class="num">${u.links.length}</td><td>${userSync(u)}</td></tr>`).join('');
+    const unlinked = platformData.unlinked.map(a => `<tr><td>${esc(a.node_name)}</td><td><strong>${esc(a.name)}</strong></td><td class="num">${(a.members || []).length}</td><td>${quotaText(a.cycle_used, a.quota)}</td><td>${esc(a.expire_date || '永不过期')}</td><td><button class="small" data-action="pu-claim" data-node="${esc(a.node_id)}" data-account="${esc(a.account_id)}" ${a.supported ? '' : 'disabled'}>认领</button>${a.supported ? '' : '<br><span class="muted">需升级节点</span>'}</td></tr>`).join('');
+    shell(`<div class="heading"><div><h1>用户管理</h1><p class="subtext">一个用户可以使用多个节点和协议，到期与总流量由面板统一管理。</p></div><button class="primary" data-action="pu-create">${icon('plus')}新建用户</button></div>
+    <div class="panel table-wrap"><table><thead><tr><th>用户</th><th>状态</th><th>本周期用量</th><th>到期</th><th class="num">节点</th><th>同步</th></tr></thead><tbody>${rows || '<tr><td colspan="6">暂无平台用户。新建用户后关联节点即可使用。</td></tr>'}</tbody></table></div>
+    <div class="section-label"><h2>节点上未关联的统一用户 <span class="count">${platformData.unlinked.length}</span></h2></div>
+    <div class="panel table-wrap"><table><thead><tr><th>节点</th><th>统一用户</th><th class="num">协议数</th><th>本周期用量</th><th>到期</th><th>操作</th></tr></thead><tbody>${unlinked || '<tr><td colspan="6">没有未关联的统一用户。节点脚本中创建的统一用户会显示在这里。</td></tr>'}</tbody></table></div>
+    <p class="helper">跨节点总流量达到配额后，所有节点上的该用户都会停用，到重置日或调高配额后自动恢复。节点脚本中的修改会同步回面板；两边同时修改同一项时，以后改的为准并给出提示。</p>`, 'users');
+}
+
+async function userDetail(id) {
+    const {user} = await api('/users/' + encodeURIComponent(id));
+    currentUser = user;
+    const links = user.links.map(l => `<tr><td><a href="#nodes/${esc(l.node_id)}">${esc(l.node_name)}</a></td><td>${(l.members || []).map(m => `<div>${memberText(m)} ${m.enabled === false ? '<span class="muted">已停用</span>' : ''} <button class="small quiet" data-action="pu-share" data-link="${esc(l.id)}" data-core="${esc(m.core)}" data-protocol="${esc(m.protocol)}" data-port="${m.port}" data-name="${esc(m.name)}">连接信息</button></div>`).join('') || '<span class="muted">' + (l.account ? '暂无协议' : '等待节点创建') + '</span>'}</td><td>${stateBadge(syncStates, l.sync)}${l.notice ? `<br><span class="muted">${esc(l.notice)}</span>` : ''}</td><td class="num">${bytes(l.cycle_used)}</td><td><button class="small" data-action="pu-members" data-link="${esc(l.id)}" ${l.account && l.online && l.sync !== 'removing' ? '' : 'disabled'}>协议</button><button class="small" data-action="pu-unlink" data-link="${esc(l.id)}" ${l.sync === 'removing' ? 'disabled' : ''}>解除</button></td></tr>`).join('');
+    shell(`<div class="heading"><div><a class="back-link" href="#users">返回用户管理</a><h1>${esc(user.name)} ${stateBadge(userStates, user.state)}</h1><div class="detail-info"><span>到期 ${esc(user.expire_date || '永不过期')}</span><span>${user.reset_day ? '每月 ' + user.reset_day + ' 日重置' : '累计不重置'}</span>${user.note ? `<span>${esc(user.note)}</span>` : ''}</div></div><div class="action-row"><button data-action="pu-edit">编辑</button><button data-action="pu-reset-usage">重置用量</button><button data-action="pu-reset-credentials" ${user.links.length ? '' : 'disabled'}>重置全部凭据</button><button class="danger" data-action="pu-delete">删除</button></div></div>
+    ${user.deleting ? '<div class="notice warn">正在从各节点解除，完成后删除此用户。</div>' : ''}
+    <div class="stats">${stat('本周期用量', bytes(user.used).split(' ')[0], user.quota ? '配额 ' + bytes(user.quota) : '不限流量', bytes(user.used).split(' ')[1] || '')}${stat('剩余', user.quota ? bytes(Math.max(0, user.quota - user.used)).split(' ')[0] : '不限', user.quota ? '达到配额后停用全部节点' : '未设置配额', user.quota ? bytes(Math.max(0, user.quota - user.used)).split(' ')[1] || '' : '')}${stat('关联节点', user.links.length, user.links.filter(l => l.sync === 'synced').length + ' 个已同步')}${stat('统计周期', user.cycle === 'total' ? '累计' : esc(user.cycle), user.reset_day ? '按面板时区切换' : '不自动重置')}</div>
+    <div class="panel"><div class="panel-head"><h2>关联节点 <span class="count">${user.links.length}</span></h2><button class="primary small" data-action="pu-link" ${user.deleting ? 'disabled' : ''}>${icon('plus')}关联节点</button></div><div class="table-wrap"><table><thead><tr><th>节点</th><th>协议</th><th>同步</th><th class="num">本周期用量</th><th>操作</th></tr></thead><tbody>${links || '<tr><td colspan="5">尚未关联节点。关联后会在节点上创建统一用户，或认领节点上已有的统一用户。</td></tr>'}</tbody></table></div></div>
+    <p class="helper">每个协议的凭据独立。同步任务出现在任务记录中，结果未确认时不会自动重试，请核对后标记已核对。</p>`, 'users');
+}
+
+function userForm(user) {
+    modal(user ? '编辑用户' : '新建用户', `<form id="pu-form"><label for="pu-name">用户名</label><input id="pu-name" value="${esc(user?.name || '')}" pattern="[A-Za-z0-9_-]{1,32}" maxlength="32" required><label for="pu-quota">总流量配额（GiB）</label><input id="pu-quota" type="number" min="0" max="999999" step="1" required value="${Math.ceil((user?.quota || 0) / 1073741824)}"><label for="pu-reset">每月重置日</label><input id="pu-reset" type="number" min="0" max="28" step="1" required value="${user?.reset_day || 0}"><label for="pu-expire">到期日期</label><input id="pu-expire" type="date" value="${esc(user?.expire_date || '')}"><label for="pu-note">备注</label><input id="pu-note" maxlength="200" value="${esc(user?.note || '')}">${user ? `<label class="field-check"><input id="pu-enabled" type="checkbox" ${user.enabled ? 'checked' : ''}>启用此用户</label>` : ''}<p class="helper">配额 0 表示不限，重置日 0 表示累计不重置；周期按面板时区切换，修改设置保留本周期用量。到期日期留空表示永不过期。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="submit" class="primary">${user ? '保存修改' : '创建用户'}</button></div></form>`);
+    $('#pu-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target); button.disabled = true;
+        const data = {name: $('#pu-name').value, quota_gb: Number($('#pu-quota').value), reset_day: Number($('#pu-reset').value), expire_date: $('#pu-expire').value, note: $('#pu-note').value};
+        try {
+            if (user) {
+                data.enabled = $('#pu-enabled').checked;
+                if (data.quota_gb === Math.ceil(user.quota / 1073741824)) delete data.quota_gb;
+                await post('/users/' + user.id, data);
+                $('#modal').close(); toast('已保存，正在同步到各节点'); await userDetail(user.id);
+            } else {
+                const created = await post('/users', data);
+                $('#modal').close(); location.hash = 'users/' + created.id;
+            }
+        } catch (err) { formError(err); button.disabled = false; }
+    };
+}
+
+function linkDialog(claim) {
+    const user = claim ? null : currentUser;
+    const candidates = nodes.filter(n => !n.deleted);
+    const options = candidates.map(n => `<option value="${esc(n.id)}" ${usersReady(n) && !user?.links.some(l => l.node_id === n.id) ? '' : 'disabled'}>${esc(n.name)}${usersReady(n) ? '' : n.snapshot.accounts_version === 1 ? '（离线或未接管）' : '（需升级节点程序）'}</option>`).join('');
+    const accountsFor = nodeId => platformData.unlinked.filter(a => a.node_id === nodeId);
+    modal(claim ? '认领统一用户' : '关联节点', `<form id="pu-link-form">${claim ? `<label for="pu-target-user">平台用户</label><select id="pu-target-user"><option value="">新建同名平台用户</option>${platformData.users.filter(u => !u.deleting && !u.links.some(l => l.node_id === claim.node)).map(u => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('')}</select>` : `<label for="pu-node">节点</label><select id="pu-node" required><option value="">选择节点</option>${options}</select><fieldset id="pu-mode-set"><legend>方式</legend><label class="field-check"><input type="radio" name="pu-mode" value="create" checked>在节点上新建统一用户</label><label class="field-check"><input type="radio" name="pu-mode" value="claim">认领节点上已有的统一用户</label></fieldset><div id="pu-create-set"><label>协议实例</label><div id="pu-instances" class="check-list"></div><p class="helper">为该用户在所选实例中新建协议账号，凭据自动生成。SS 和 Snell 一用户一端口，请先安装实例，再在「协议」中归入。</p></div><div id="pu-claim-set" hidden><label for="pu-account">统一用户</label><select id="pu-account"></select></div>`}<fieldset id="pu-prefer-set" ${claim ? '' : 'hidden'}><legend>设置不一致时</legend><label class="field-check"><input type="radio" name="pu-prefer" value="panel" checked>以面板为准，覆盖节点设置</label><label class="field-check"><input type="radio" name="pu-prefer" value="node">以节点为准，更新面板用户</label><p class="helper">认领后保留原凭据，节点上已用的流量计入本周期。</p></fieldset><div class="error" role="alert"></div><div class="modal-foot"><button type="submit" class="primary">${claim ? '认领' : '关联'}</button></div></form>`);
+    const update = () => {
+        if (claim) return;
+        const node = nodes.find(n => n.id === $('#pu-node').value);
+        const mode = $('[name=pu-mode]:checked').value;
+        $('#pu-create-set').hidden = mode !== 'create';
+        $('#pu-claim-set').hidden = $('#pu-prefer-set').hidden = mode !== 'claim';
+        $('#pu-instances').innerHTML = node ? (node.snapshot.instances || []).filter(i => i.managed !== false).map(i => `<label class="field-check"><input type="checkbox" value="${esc(i.core + '|' + i.protocol + '|' + i.port)}" ${SINGLE_USER.includes(i.protocol) ? 'disabled' : ''}>${esc(names[i.protocol] || i.protocol)} · ${i.port}${SINGLE_USER.includes(i.protocol) ? '（一用户一端口）' : ''}</label>`).join('') || '<p class="muted">该节点没有协议实例</p>' : '<p class="muted">请先选择节点</p>';
+        $('#pu-account').innerHTML = node ? accountsFor(node.id).map(a => `<option value="${esc(a.account_id)}">${esc(a.name)}（${(a.members || []).length} 个协议）</option>`).join('') || '<option value="">该节点没有未关联的统一用户</option>' : '';
+    };
+    if (!claim) { $('#pu-node').onchange = update; document.querySelectorAll('[name=pu-mode]').forEach(r => r.onchange = update); update(); }
+    $('#pu-link-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target); button.disabled = true;
+        const prefer = $('[name=pu-prefer]:checked').value;
+        try {
+            let userId = user?.id, payload;
+            if (claim) {
+                userId = $('#pu-target-user').value;
+                if (!userId) userId = (await post('/users', {name: platformData.unlinked.find(a => a.account_id === claim.account).name})).id;
+                payload = {node_id: claim.node, account_id: claim.account, prefer};
+            } else if ($('[name=pu-mode]:checked').value === 'claim') {
+                payload = {node_id: $('#pu-node').value, account_id: $('#pu-account').value, prefer};
+            } else {
+                payload = {node_id: $('#pu-node').value, members: [...document.querySelectorAll('#pu-instances input:checked')].map(c => { const [core, protocol, port] = c.value.split('|'); return {core, protocol, port: Number(port)}; })};
+            }
+            await post('/users/' + userId + '/links', payload);
+            $('#modal').close(); toast('已提交，节点在线时自动同步'); location.hash = 'users/' + userId; await userDetail(userId);
+        } catch (err) { formError(err); button.disabled = false; }
+    };
+}
+
+function membersDialog(linkId) {
+    const link = currentUser.links.find(l => l.id === linkId), node = nodes.find(n => n.id === link.node_id);
+    const instances = node?.snapshot.instances || [];
+    const claimable = instances.flatMap(i => (i.users || []).filter(u => !u.account_id).map(u => ({core: i.core, protocol: i.protocol, port: i.port, name: u.name})));
+    modal('协议 · ' + link.node_name, `<form id="pu-member-form"><label for="pu-member-action">操作</label><select id="pu-member-action"><option value="add">新建协议账号</option><option value="claim">归入已有协议用户</option><option value="remove">移除协议</option></select><label for="pu-member-target">目标</label><select id="pu-member-target"></select><div id="pu-remove-set" hidden><label class="field-check"><input type="radio" name="pu-remove-mode" value="release" checked>保留为普通协议用户</label><label class="field-check"><input type="radio" name="pu-remove-mode" value="delete">同时删除该协议用户（旧连接失效）</label></div><p class="helper" id="pu-member-help"></p><div class="error" role="alert"></div><div class="modal-foot"><button type="submit" class="primary">提交</button></div></form>`);
+    const update = () => {
+        const action = $('#pu-member-action').value;
+        const list = action === 'add' ? instances.filter(i => !SINGLE_USER.includes(i.protocol) && i.managed !== false).map(i => ({core: i.core, protocol: i.protocol, port: i.port}))
+            : action === 'claim' ? claimable : link.members;
+        $('#pu-member-target').innerHTML = list.map(t => `<option value="${esc(JSON.stringify(t))}">${memberText(t)}</option>`).join('') || '<option value="">没有可选目标</option>';
+        $('#pu-remove-set').hidden = action !== 'remove';
+        $('#pu-member-help').textContent = action === 'add' ? '凭据自动生成，用户名与平台用户相同。' : action === 'claim' ? '保留原凭据；该协议用户原有的配额与到期由此用户统一管理，已用流量计入本周期。SS 和 Snell 用户请先安装实例再归入。' : 'Snell 成员只能保留实例。';
+    };
+    $('#pu-member-action').onchange = update; update();
+    $('#pu-member-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target); button.disabled = true;
+        try {
+            const action = $('#pu-member-action').value, target = JSON.parse($('#pu-member-target').value || 'null');
+            if (!target) throw new Error('没有可选目标');
+            const data = {action, target: {core: target.core, protocol: target.protocol, port: target.port}};
+            if (target.name) data.name = target.name;
+            if (action === 'remove') data.mode = $('[name=pu-remove-mode]:checked').value;
+            await post('/links/' + linkId + '/members', data);
+            $('#modal').close(); toast('已提交，节点在线时自动同步'); await userDetail(currentUser.id);
+        } catch (err) { formError(err); button.disabled = false; }
+    };
+}
+
+function choiceDialog(title, text, choices, submit) {
+    modal(title, `<form id="pu-choice-form"><p>${text}</p>${choices.map(([value, label], i) => `<label class="field-check"><input type="radio" name="pu-choice" value="${value}" ${i ? '' : 'checked'}>${label}</label>`).join('')}<div class="error" role="alert"></div><div class="modal-foot"><button data-action="close" type="button">取消</button><button type="submit" class="danger">确认</button></div></form>`);
+    $('#pu-choice-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target); button.disabled = true;
+        try { await submit($('[name=pu-choice]:checked')?.value); $('#modal').close(); } catch (err) { formError(err); button.disabled = false; }
+    };
+}
+
+async function userAction(action, b) {
+    if (action === 'pu-create') userForm(null);
+    else if (action === 'pu-edit') userForm(currentUser);
+    else if (action === 'pu-link') linkDialog(null);
+    else if (action === 'pu-claim') linkDialog({node: b.dataset.node, account: b.dataset.account});
+    else if (action === 'pu-members') membersDialog(b.dataset.link);
+    else if (action === 'pu-reset-usage') choiceDialog('重置用量', '清零该用户在所有节点上的本周期用量，超额停用的节点会自动恢复。', [], async () => { await post('/users/' + currentUser.id + '/reset-usage'); toast('用量已清零'); await userDetail(currentUser.id); });
+    else if (action === 'pu-reset-credentials') choiceDialog('重置全部凭据', '为该用户在所有节点的每个协议生成新凭据，旧连接全部失效，之后请重新导出连接信息。', [], async () => { await post('/users/' + currentUser.id + '/reset-credentials', {}); toast('已提交，节点在线时自动同步'); await userDetail(currentUser.id); });
+    else if (action === 'pu-unlink') choiceDialog('解除节点关联', '解除后面板不再管理该节点上的这个用户。', [['release', '保留节点上的统一用户，改为在节点本地管理'], ['delete', '删除节点上的统一用户和全部协议账号（旧连接失效）']], async mode => { await post('/links/' + b.dataset.link + '/remove', {mode}); toast('已提交，节点在线时自动执行'); await userDetail(currentUser.id); });
+    else if (action === 'pu-delete') choiceDialog('删除用户', currentUser.links.length ? '先从所有关联节点解除，完成后删除此平台用户。' : '删除此平台用户。', currentUser.links.length ? [['release', '保留各节点上的统一用户（改为本地管理）'], ['delete', '同时删除各节点上的统一用户和协议账号']] : [['release', '确认删除']], async mode => { const r = await post('/users/' + currentUser.id + '/delete', {mode}); if (r.deleted) location.hash = 'users'; else await userDetail(currentUser.id); });
+    else if (action === 'pu-share') {
+        const link = currentUser.links.find(l => l.id === b.dataset.link), node = nodes.find(n => n.id === link.node_id);
+        const instance = node?.snapshot.instances?.find(i => i.core === b.dataset.core && i.protocol === b.dataset.protocol && i.port === Number(b.dataset.port));
+        if (!node || !instance || node.status !== 'online') throw new Error('节点离线或协议实例不存在');
+        selected = node;
+        await submitTask('share', instance, {name: b.dataset.name});
+    }
+}
+
+async function userTraffic() {
+    const main = $('.main');
+    if (!main || $('#user-traffic')) return;
+    const data = await api('/users');
+    main.querySelector('.footer-note')?.insertAdjacentHTML('beforebegin', `<section id="user-traffic"><div class="section-label"><h2>按用户 · 跨节点合计</h2><a href="#users">用户管理 →</a></div><div class="panel table-wrap"><table><thead><tr><th>用户</th><th class="num">本周期合计</th><th class="num">配额</th><th class="num">剩余</th><th>各节点</th><th>状态</th></tr></thead><tbody>${data.users.map(u => `<tr><td><a href="#users/${esc(u.id)}">${esc(u.name)}</a></td><td class="num">${bytes(u.used)}</td><td class="num">${u.quota ? bytes(u.quota) : '不限'}</td><td class="num">${u.quota ? bytes(Math.max(0, u.quota - u.used)) : '不限'}</td><td>${u.links.map(l => esc(l.node_name) + ' ' + bytes(l.cycle_used)).join('<br>') || '—'}</td><td>${stateBadge(userStates, u.state)}</td></tr>`).join('') || '<tr><td colspan="6">暂无平台用户</td></tr>'}</tbody></table></div><p class="helper traffic-note">合计为各节点本周期用量之和，按面板时区和用户的重置日切换周期；离线节点按最后一次快照计算。</p></section>`);
 }
