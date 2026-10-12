@@ -1,5 +1,7 @@
 # 平台统一用户
 
+> 0.3.0-preview.12 起改为「用户管理方式二选一」，见文末同名一节：下面 preview.11 中的三方合并、认领节点统一用户已删除。
+
 本文档跟踪平台统一用户在 Agent 和面板中的实现。节点脚本部分见 `docs/script-accounts.md`，跨层设计见 `.trellis/tasks/10-12-platform-user-management/design.md`。分支 `codex/platform-3.7.4`，只推送预览分支，不创建 GitHub Release。
 
 ## Agent（子任务 3）
@@ -60,3 +62,27 @@ SQLite 升到 `user_version=2`，新增三张表：`platform_users`（平台用�
 - 全部 unittest 119 项通过（跳过 2 项），`node --check` 和三个 cjs 测试通过，脚本测试全部通过。
 
 **真实验收**：未执行。没有部署到测试面板 vps.town，也没有连接任何真实节点。
+
+## 0.3.0-preview.12：用户管理二选一与一键升级
+
+### 用户管理方式
+- 每台节点只认一方，保存在节点的 `meta.user_authority`，随快照上报 `user_authority`、`authority_version=1`。
+- **以节点脚本为准**（新版节点缺省）：面板对用户只读。实例弹窗不显示编辑和新增用户，`create_task` 拒绝 `user_*` 任务；这台节点不能关联平台用户。
+- **以平台为准**：用户只由「用户管理」写入。面板是唯一写入方，节点统一用户总是被覆盖成面板的值（删除了三方合并、冲突提示和认领）；Agent 也会拒绝发到这台节点的 `user_*` 任务。
+- **切换**：节点详情 → 用户管理 → 切换。切到平台时显示将删除的用户数，必须输入节点名称；面板下发 `platform_apply {set_authority}`，节点在事务里清空用户。切回脚本后面板删除这台节点的全部关联（平台用户本身保留）；如果在节点菜单里切回，面板从快照里发现后也会删除关联。
+- **旧版节点**（不上报 `authority_version`）：保持原来的行为（实例弹窗可以编辑用户，不能关联平台用户），节点详情提示升级。
+- **SS 和 Snell**：先在节点上安装实例（用户名填平台用户名），再在用户详情的「协议」里归入。
+
+### 一键升级
+- 节点上报 `upgrade_version=1` 时，节点详情的升级提示显示「一键升级」：`POST /api/nodes/<id>/upgrade` 创建 `agent_upgrade` 任务（不接受参数，节点需在线、已接管、不在维护、没有未完成或待核对的任务）。
+- Agent 收到任务后，在独立进程中启动升级器（systemd 用 `systemd-run --collect`、`KillMode=process`；OpenRC 用新会话），立即上报任务结果。升级器先等这次任务结果上报完成，再沿用原有流程：下载、校验、暂存自检、维护模式、替换 `/opt/vaio-agent`。同时把 `/usr/local/bin/vless-server.sh` 替换为新安装包里的 vendor 脚本（SHA-256 必须等于新包里的 `UPSTREAM_SHA`），旧脚本另存为 `.vaio-backup-<时间>`。之后等待新版上线；失败时同时恢复旧程序和旧脚本。
+- 结果写入 `/var/lib/vaio-agent/last-upgrade.json`，随快照上报 `last_upgrade`，节点详情显示状态（成功、已回滚、失败）、时间和说明。
+- 旧版节点程序不认识升级任务：仍显示原来的 SSH 命令，第一次需要手动升级。
+
+### 测试（preview.12）
+- 脚本：`tests/user-authority.sh`（6 组）；`tests/accounts-api.sh` 新增 set_authority 一组；`tests/accounts-cli.sh` 在 CI 中用真实进程验证切换和清空。
+- Agent：`tests/test_agent_upgrade.py`，共 11 项：校验新包里脚本的 SHA、主脚本的安装/替换/未变/恢复、拒绝符号链接、等待任务上报、结果长度限制、systemd 和 OpenRC 的启动方式、无效任务 ID、升级任务只启动一次且会记录、平台模式拒绝 `user_*`、set_authority 校验、快照字段与上次升级结果。
+- 面板：`tests/test_platform_users_panel.py` 改为平台模式：面板是唯一写入方；切换需要输入节点名并且会删除关联，节点菜单切回也能识别；脚本模式拒绝用户任务；升级任务的创建、拒绝和执行；版本冲突后收敛到面板值。`tests/platform-users.cjs` 新增管理方式区块、切换确认的提交数据和一键升级的检查。
+- 全部 unittest 131 项通过（跳过 2 项），cjs 测试和脚本测试通过；本地预览截图检查了三种节点状态、切换和升级对话框、锁定后的实例弹窗。
+
+**真实验收**：未执行。一键升级的独立进程、主脚本替换和回滚都没有在真实节点上运行过。
