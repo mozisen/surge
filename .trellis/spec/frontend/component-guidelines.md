@@ -13,7 +13,7 @@ The panel is a single vanilla-JS file (`platform/web/app.js`) plus one styleshee
 ## Component Structure
 
 - A view or dialog is one function: render markup, then wire handlers, then call a local `update…()` that applies hidden/disabled/required state.
-- Dialogs go through `modal(title, body, wide = false, extraClass = '')` (`app.js:140`). It replaces the dialog's innerHTML, so listeners attached to the previous body are dropped with it; re-attach on every render.
+- Dialogs go through `modal(title, body, wide = false, extraClass = '')` (`app.js`). It replaces the dialog's innerHTML, so listeners attached to the previous body are dropped with it; re-attach on every render.
 - A dialog that needs its own layout passes `extraClass` (for example `install`) and scopes all CSS to `dialog.<class>`. Do not change the base `dialog`, `.modal-body`, `.modal-foot` or `.wide` rules for one dialog.
 
 ### Convention: element ids are the test contract
@@ -33,13 +33,54 @@ $('#install-advanced').hidden = groups.every(id => $('#' + id).hidden);
 
 ## Styling Patterns
 
-- Only the variables on `:root` in `style.css` (`--ink`, `--muted`, `--line`, `--surface`, `--accent-soft`); no new colours.
+- Greys only. Tokens on `:root` in `style.css`: `--ink #000`, `--ink-2 #333`, `--muted #6b6b6b`, `--line #d9d9d9`, `--line-soft #ececec`, `--canvas #f5f5f5`, `--surface #fff`. Legacy names (`--accent`, `--accent-soft`, `--danger`, `--bg`, `--nav`, …) are aliases kept so old rules resolve; do not add new colours (`#8c8c8c`/`#b3b3b3` exist only for placeholder/hover/chart baseline).
+- Radius by hierarchy: `--r-badge` 3px, `--r-control` 6px, `--r-panel` 8px, `--r-dialog` 12px. Panels have no shadow; only `dialog` and `#toast` do.
+- System font stack only (no webfonts: the panel is self-hosted and must not call third parties). Numbers use the global `tabular-nums`; `.mono` is for machine strings (ports, service names, commands, filenames, event keys), not for metrics or timestamps.
+- Numeric table columns get `class="num"` on both `th` and `td` (right-aligned).
 - Groups are a 13px/600 heading over a 1px `--line` top divider. Use `fieldset` for semantics with `border: 0; padding: 0`, not boxed sets.
 - An inline action next to an input ("生成") uses `.input-action` (`grid-template-columns: 1fr auto`) and keeps the button's id.
-- A long dialog keeps the head and `.modal-foot` fixed and scrolls only the middle (`.install-scroll`), so the primary button is always visible.
-- Narrow screens use the existing 760px breakpoint; check 375px for horizontal scroll.
+- A long dialog keeps the head and `.modal-foot` fixed and scrolls only the middle (`.install-scroll`), so the primary button is always visible. A `.modal-foot` that is the last child gets the top rule and grey band via `dialog:not(.install)`; `dialog.install` styles its own footer.
+- Narrow screens use the 1150px and 760px breakpoints; check 375px for horizontal scroll. Under `(pointer: coarse)` every control, `summary`, checkbox label and text link is at least 44px high.
 
----
+### Convention: monochrome status badges
+
+**What**: `badge(status)` returns `<span class="badge STATUS">文字</span>` and nothing else; the state mark is a CSS `::before`:
+
+| Classes | Mark |
+|---|---|
+| `online`, `running` | solid dot, weight 600 |
+| `succeeded`, `resolved` | check, muted |
+| `offline`, `stopped`, `revoked`, `cancelled` | hollow ring, muted |
+| `queued`, `pending` | dashed ring |
+| `failed`, `unknown` | inverted (white on black) with "!" — needs a human |
+
+**Why**: colour is not allowed, so shape + fill + weight carry the state. A new status needs a CSS rule; without one it falls back to an outlined ring.
+
+### Convention: shared render helpers
+
+Defined before `card()`, outside both test slices:
+
+```js
+reading(value, unit)            // .reading-value 32px + .reading-unit 13px muted
+stat(title, value, foot, unit = '', positive = false)   // 4th arg is a unit, not an icon
+meter(label, percent)           // 10 segments; known -> role="meter" + aria-valuenow, unknown -> aria-hidden bar + visible "—"
+```
+
+`trafficPage()` lives inside the `traffic-display.cjs` slice (`let trafficNodeId = ''` … `function protocolTable(`) and that harness only provides `esc/badge/bytes/date/icon/shell/names/nodes`. Never call `reading()`/`meter()` or any other outside helper from it.
+
+#### Wrong
+```js
+// inside trafficPage(): ReferenceError in tests/traffic-display.cjs
+`<td>${reading(total.value, 'GiB')}</td>`
+```
+#### Correct
+```js
+`<td class="num">${trafficValue(total.value)}</td>`
+```
+
+### Pattern: whole-row link in the node list
+
+`.node-row` is a grid row; the name `<a href="#nodes/ID">` gets `::after { position:absolute; inset:0 }` so the row is clickable. Keep every other interactive element out of `.node-row` (the overlay would cover it) and keep the inset focus outline on the link.
 
 ## Accessibility
 
