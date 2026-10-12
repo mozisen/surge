@@ -28,7 +28,7 @@ def verify(path):
         if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise ValueError('备份完整性校验失败')
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if not {'settings', 'nodes', 'tasks', 'sessions', 'audit'} <= tables or db.execute('PRAGMA user_version').fetchone()[0] > 1:
+        if not {'settings', 'nodes', 'tasks', 'sessions', 'audit'} <= tables or db.execute('PRAGMA user_version').fetchone()[0] > 2:
             raise ValueError('备份格式不兼容')
         if db.execute('PRAGMA foreign_key_check').fetchone():
             raise ValueError('备份关联校验失败')

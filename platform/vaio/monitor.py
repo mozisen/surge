@@ -10,7 +10,7 @@ import time
 import urllib.request
 from urllib.parse import urlsplit
 
-from . import backups
+from . import backups, platform_users
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS samples(node_id TEXT NOT NULL, bucket INTEGER NOT NULL, metrics TEXT NOT NULL, PRIMARY KEY(node_id,bucket));
@@ -91,6 +91,13 @@ def transition(db, key, title, active, now, enabled):
     db.execute('INSERT INTO notifications(at,title,status) VALUES(?,?,?)', (now, message, 'pending' if enabled else 'disabled'))
 
 
+def days_left(value, today):
+    try:
+        return (datetime.date.fromisoformat(value) - today).days
+    except (TypeError, ValueError):
+        return 9999
+
+
 def scan(store, now=None):
     now = time.time() if now is None else now
     config = settings(store, True)
@@ -111,6 +118,8 @@ def scan(store, now=None):
                 continue
             for item in snap.get('instances', []):
                 for user in item.get('users', []):
+                    if user.get('account_id'):
+                        continue  # unified-account members alert once per account below
                     prefix = node['id'] + ':' + item['core'] + ':' + item['protocol'] + ':' + str(item['port']) + ':' + user['name']
                     label = node['name'] + ' · ' + item['protocol'] + ':' + str(item['port']) + ' · ' + user['name']
                     if item.get('traffic_state') == 'ready':
@@ -122,8 +131,28 @@ def scan(store, now=None):
                     except ValueError:
                         days = 9999
                     transition(db, 'expiry:' + prefix, label + ' · 已到期或将在 3 天内到期', days <= 3, now, enabled)
+            linked = {r['account_id'] for r in db.execute('SELECT account_id FROM platform_links WHERE node_id=?', (node['id'],))}
+            for account_id, account in snap.get('accounts', {}).items():
+                if account_id in linked:
+                    continue
+                label = node['name'] + ' · 统一用户 ' + account.get('name', '')
+                quota = account.get('quota', 0)
+                transition(db, 'account-quota:' + node['id'] + ':' + account_id, label + ' · 流量已达配额的 80%', bool(quota and account.get('cycle_used', 0) >= quota * .8), now, enabled)
+                transition(db, 'account-over:' + node['id'] + ':' + account_id, label + ' · 流量已用尽', bool(quota and account.get('cycle_used', 0) >= quota), now, enabled)
+                transition(db, 'account-expiry:' + node['id'] + ':' + account_id, label + ' · 已到期或将在 3 天内到期', days_left(account.get('expire_date', ''), today) <= 3, now, enabled)
+        platform_users.rollover(db, now)
+        platform_users.forget_missing(db)
+        for user in db.execute('SELECT * FROM platform_users').fetchall():
+            used = platform_users.usage(db, user['id'])
+            label = '平台用户 ' + user['name']
+            transition(db, 'puser-quota:' + user['id'], label + ' · 总流量已达配额的 80%', bool(user['quota'] and used >= user['quota'] * .8), now, enabled)
+            transition(db, 'puser-over:' + user['id'], label + ' · 总流量已用尽，已停用全部节点', bool(user['quota'] and used >= user['quota']), now, enabled)
+            transition(db, 'puser-expiry:' + user['id'], label + ' · 已到期或将在 3 天内到期', bool(user['enabled']) and days_left(user['expire_date'], today) <= 3, now, enabled)
+            failing = db.execute("SELECT 1 FROM platform_links WHERE user_id=? AND state IN ('failed','unknown')", (user['id'],)).fetchone()
+            transition(db, 'puser-sync:' + user['id'], label + ' · 节点同步失败或结果未知', bool(failing), now, enabled)
+        platform_users.schedule(db, now)
         for task in db.execute("SELECT tasks.*, nodes.name FROM tasks JOIN nodes ON nodes.id=tasks.node_id WHERE tasks.status IN ('failed','unknown') AND finished>?", (now - 3600,)).fetchall():
-            transition(db, 'task:' + task['id'], task['name'] + ' · 任务失败或结果未知：' + {'install':'安装协议','update':'修改实例','delete':'删除实例','user_add':'新增用户','user_update':'修改用户','user_delete':'删除用户','start':'启动服务','stop':'停止服务','restart':'重启服务','share':'导出连接','inspect':'检查配置'}.get(task['action'], '节点操作') + '（' + task['id'][:8] + '）', True, now, enabled)
+            transition(db, 'task:' + task['id'], task['name'] + ' · 任务失败或结果未知：' + {'install':'安装协议','update':'修改实例','delete':'删除实例','user_add':'新增用户','user_update':'修改用户','user_delete':'删除用户','start':'启动服务','stop':'停止服务','restart':'重启服务','share':'导出连接','inspect':'检查配置','platform_apply':'平台用户同步'}.get(task['action'], '节点操作') + '（' + task['id'][:8] + '）', True, now, enabled)
         db.execute('DELETE FROM samples WHERE bucket<?', (int(now//60)-7*1440,))
         db.execute('DELETE FROM notifications WHERE at<?', (now-30*86400,))
         db.execute("DELETE FROM incidents WHERE key LIKE 'task:%' AND at<?", (now-2*86400,))

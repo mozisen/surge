@@ -17,6 +17,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
+from . import platform_users
 from .common import MUTATIONS, LEGACY_COMBINATIONS, digest, require_text, validate_task
 from .install_options import ADVANCED_INSTALL_FIELDS, REALITY_INSTALL_FIELDS
 from .store import Store
@@ -490,11 +491,13 @@ def create_app(config=None):
             if not current:
                 return jsonify(error="节点身份已失效"), 401
             db.execute("UPDATE nodes SET last_seen=?,snapshot=? WHERE id=?", (time.time(), json.dumps(snapshot), node_id))
+            platform_users.ingest(db, node_id, snapshot)
             db.execute("INSERT OR IGNORE INTO samples VALUES(?,?,?)", (node_id, int(time.time() // 60), json.dumps(snapshot.get("metrics", {}))))
             # Ambiguous tasks are never automatically replayed.
             db.execute("UPDATE tasks SET status='unknown',message='执行结果未确认；请核对节点后重新操作',finished=? WHERE node_id=? AND status='running' AND started<?",
                        (time.time(), node_id, time.time() - 2100))
             db.execute("UPDATE tasks SET result=NULL WHERE action='share' AND finished<?", (time.time() - 600,))
+            platform_users.schedule(db)
             busy = db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status='running'", (node_id,)).fetchone()
             task = None
             if not busy and not current["maintenance"] and data.get("ready") is True:
@@ -523,12 +526,14 @@ def create_app(config=None):
             if not isinstance(detail, dict) or len(json.dumps(detail)) > 32000:
                 raise ValueError("结果过大")
             # Keep only intentionally supported result fields; raw logs never enter the panel DB.
-            detail = {k: v for k, v in detail.items() if k in ("connection", "config_details", "backup", "steps", "affected")}
+            detail = {k: v for k, v in detail.items() if k in ("connection", "config_details", "backup", "steps", "affected", "accounts")}
             if task["action"] != "share":
                 detail.pop("connection", None)
                 detail.pop("config_details", None)
             db.execute("UPDATE tasks SET status=?,finished=?,message=?,result=? WHERE id=?",
                        (data["status"], time.time(), message, json.dumps(detail), task_id))
+            if task["action"] == "platform_apply":
+                platform_users.task_finished(db, task, data["status"], message)
             audit(db, "task." + data["status"], node_id, task_id)
         return jsonify(ok=True)
 
@@ -628,6 +633,7 @@ def create_app(config=None):
         with store.connect() as db:
             if not db.execute("UPDATE tasks SET status='resolved',message=? WHERE id=? AND status='unknown'", ("人工核对：" + note, task_id)).rowcount:
                 return jsonify(error="仅待核对任务可以标记已核对"), 409
+            platform_users.release_task(db, task_id)
             audit(db, "task.resolved", detail=task_id)
         return jsonify(ok=True)
 
@@ -637,8 +643,104 @@ def create_app(config=None):
         with store.connect() as db:
             if not db.execute("UPDATE tasks SET status='cancelled',finished=? WHERE id=? AND status='queued'", (time.time(), task_id)).rowcount:
                 return jsonify(error="仅等待中的任务可以取消"), 409
+            platform_users.release_task(db, task_id)
             audit(db, "task.cancelled", detail=task_id)
         return jsonify(ok=True)
+
+    def platform_nodes(db):
+        return {r["id"]: r for r in db.execute("SELECT * FROM nodes").fetchall()}
+
+    @app.get("/api/users")
+    @admin
+    def platform_user_list():
+        with store.connect() as db:
+            nodes = platform_nodes(db)
+            users = [platform_users.describe(db, u, nodes) for u in db.execute("SELECT * FROM platform_users ORDER BY name").fetchall()]
+            unlinked = platform_users.unlinked_accounts(db, {k: v for k, v in nodes.items() if v["deleted"] is None})
+        return jsonify(users=users, unlinked=unlinked)
+
+    @app.post("/api/users")
+    @admin
+    def platform_user_create():
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            identity = platform_users.create_user(db, body())
+            audit(db, "platform.user_created", detail=identity)
+        return jsonify(id=identity), 201
+
+    @app.get("/api/users/<user_id>")
+    @admin
+    def platform_user_detail(user_id):
+        with store.connect() as db:
+            user = db.execute("SELECT * FROM platform_users WHERE id=?", (user_id,)).fetchone()
+            if not user:
+                return jsonify(error="用户不存在"), 404
+            return jsonify(user=platform_users.describe(db, user, platform_nodes(db)))
+
+    def platform_change(user_id, event, action):
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM platform_users WHERE id=?", (user_id,)).fetchone():
+                return jsonify(error="用户不存在"), 404
+            result = action(db)
+            audit(db, event, detail=user_id)
+            platform_users.schedule(db)
+        return jsonify(ok=True, **(result or {}))
+
+    @app.post("/api/users/<user_id>")
+    @admin
+    def platform_user_update(user_id):
+        data = body()
+        return platform_change(user_id, "platform.user_updated", lambda db: {"changed": sorted(platform_users.update_user(db, user_id, data))})
+
+    @app.post("/api/users/<user_id>/delete")
+    @admin
+    def platform_user_delete(user_id):
+        mode = body().get("mode")
+        return platform_change(user_id, "platform.user_deleted", lambda db: {"deleted": platform_users.delete_user(db, user_id, mode)})
+
+    @app.post("/api/users/<user_id>/links")
+    @admin
+    def platform_link_add(user_id):
+        data = body()
+        if set(data) - {"node_id", "members", "account_id", "prefer"} or not isinstance(data.get("node_id"), str):
+            raise ValueError("关联参数无效")
+        return platform_change(user_id, "platform.link_added", lambda db: {"link_id": platform_users.add_link(
+            db, user_id, data["node_id"], data.get("members"), data.get("account_id"), data.get("prefer", "panel"))})
+
+    @app.post("/api/users/<user_id>/reset-usage")
+    @admin
+    def platform_user_reset_usage(user_id):
+        return platform_change(user_id, "platform.usage_reset", lambda db: platform_users.reset_usage(db, user_id))
+
+    @app.post("/api/users/<user_id>/reset-credentials")
+    @admin
+    def platform_user_reset_credentials(user_id):
+        data = body()
+        return platform_change(user_id, "platform.credentials_reset", lambda db: platform_users.reset_credentials(db, user_id, data.get("link_id"), data.get("member")))
+
+    def link_change(link_id, event, action):
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            link = db.execute("SELECT * FROM platform_links WHERE id=?", (link_id,)).fetchone()
+            if not link:
+                return jsonify(error="关联不存在"), 404
+            action(db, link)
+            audit(db, event, link["node_id"], link["user_id"])
+            platform_users.schedule(db)
+        return jsonify(ok=True)
+
+    @app.post("/api/links/<link_id>/remove")
+    @admin
+    def platform_link_remove(link_id):
+        mode = body().get("mode")
+        return link_change(link_id, "platform.link_removed", lambda db, link: platform_users.remove_link(db, link_id, mode))
+
+    @app.post("/api/links/<link_id>/members")
+    @admin
+    def platform_link_member(link_id):
+        data = body()
+        return link_change(link_id, "platform.member_changed", lambda db, link: platform_users.member_op(db, link, data))
 
     @app.get("/api/audit")
     @admin

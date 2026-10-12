@@ -27,16 +27,19 @@ class Store:
         with self.connect() as db:
             db.executescript(SCHEMA)
             from .monitor import SCHEMA as MONITOR_SCHEMA
+            from .platform_users import SCHEMA as PLATFORM_SCHEMA
             db.executescript(MONITOR_SCHEMA)
+            db.executescript(PLATFORM_SCHEMA)
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("PRAGMA user_version").fetchone()[0] > 1:
+            # 2: platform users. Older databases (and restored v1 backups) gain the tables above.
+            if db.execute("PRAGMA user_version").fetchone()[0] > 2:
                 raise RuntimeError("数据库来自更新版本，请使用对应版本面板")
             columns = {row[1] for row in db.execute("PRAGMA table_info(nodes)")}
             for name, definition in (("notes", "TEXT NOT NULL DEFAULT ''"),
                                      ("deleted", "REAL"), ("maintenance", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in columns:
                     db.execute("ALTER TABLE nodes ADD COLUMN " + name + " " + definition)
-            db.execute("PRAGMA user_version=1")
+            db.execute("PRAGMA user_version=2")
         os.chmod(self.path, 0o600)
 
     @contextlib.contextmanager

@@ -1,0 +1,494 @@
+"""Platform users: one person across nodes, each node holding a unified account.
+
+The panel is authoritative for cross-node quota. Synced fields merge three ways
+(base = last agreed values, node, panel); when both sides changed a field the
+later modification wins. Every node change goes through one platform_apply task
+per node, never replayed when its outcome is unknown.
+"""
+import datetime
+import hashlib
+import json
+import re
+import time
+import uuid
+
+from .common import ACCOUNT_FIELDS, UUID_PATTERN, require_text, validate_platform_task
+
+SCHEMA = '''
+CREATE TABLE IF NOT EXISTS platform_users(
+ id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, note TEXT NOT NULL DEFAULT '',
+ enabled INTEGER NOT NULL DEFAULT 1, expire_date TEXT NOT NULL DEFAULT '',
+ quota INTEGER NOT NULL DEFAULT 0, reset_day INTEGER NOT NULL DEFAULT 0,
+ cycle TEXT NOT NULL DEFAULT 'total', mtime TEXT NOT NULL DEFAULT '{}', deleting TEXT,
+ created REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS platform_links(
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES platform_users(id),
+ node_id TEXT NOT NULL REFERENCES nodes(id), account_id TEXT NOT NULL,
+ origin TEXT NOT NULL, base TEXT, base_rev INTEGER, members TEXT NOT NULL DEFAULT '[]',
+ cycle_used INTEGER NOT NULL DEFAULT 0, last_raw TEXT NOT NULL DEFAULT '{}',
+ state TEXT NOT NULL DEFAULT 'pending', removing TEXT, notice TEXT NOT NULL DEFAULT '',
+ retry_after REAL NOT NULL DEFAULT 0, created REAL NOT NULL,
+ UNIQUE(user_id, node_id), UNIQUE(node_id, account_id));
+CREATE TABLE IF NOT EXISTS platform_pending(
+ id INTEGER PRIMARY KEY, link_id TEXT NOT NULL REFERENCES platform_links(id) ON DELETE CASCADE,
+ op TEXT NOT NULL, task_id TEXT, created REAL NOT NULL);
+'''
+
+GIB = 1073741824
+RETRY_DELAY = 300
+ONLINE = 45
+STATE_TEXT = {"": "正常", "manual": "已停用", "expired": "已到期", "quota": "流量已用尽", "platform_quota": "平台总流量已用尽"}
+
+
+def cycle_key(day, today):
+    if not day:
+        return "total"
+    start = today.replace(day=day)
+    if today < start:
+        start = (today.replace(day=1) - datetime.timedelta(days=1)).replace(day=day)
+    return start.isoformat()
+
+
+def fields_of(row):
+    return {"name": row["name"], "note": row["note"], "enabled": bool(row["enabled"]), "expire_date": row["expire_date"],
+            "quota": row["quota"], "reset_day": row["reset_day"]}
+
+
+def validate_fields(data, create=False):
+    allowed = {"name", "note", "enabled", "expire_date", "quota_gb", "reset_day"}
+    if not isinstance(data, dict) or set(data) - allowed or (create and "name" not in data):
+        raise ValueError("用户字段无效")
+    out = {}
+    if "name" in data:
+        out["name"] = require_text(data["name"], "用户名", 32, r"[A-Za-z0-9_-]+")
+    if "note" in data:
+        if not isinstance(data["note"], str) or len(data["note"]) > 200 or any(ord(c) < 32 for c in data["note"]):
+            raise ValueError("备注最多 200 字，且不能包含控制字符")
+        out["note"] = data["note"]
+    if "enabled" in data:
+        if type(data["enabled"]) is not bool:
+            raise ValueError("用户状态无效")
+        out["enabled"] = data["enabled"]
+    if "expire_date" in data:
+        value = data["expire_date"]
+        if not isinstance(value, str) or (value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)):
+            raise ValueError("到期日期格式应为 YYYY-MM-DD")
+        if value:
+            datetime.date.fromisoformat(value)
+        out["expire_date"] = value
+    if "quota_gb" in data:
+        if type(data["quota_gb"]) is not int or not 0 <= data["quota_gb"] <= 999999:
+            raise ValueError("配额必须为 0–999999 GiB")
+        out["quota"] = data["quota_gb"] * GIB
+    if "reset_day" in data:
+        if type(data["reset_day"]) is not int or not 0 <= data["reset_day"] <= 28:
+            raise ValueError("月度重置日必须为 1–28，0 表示不自动重置")
+        out["reset_day"] = data["reset_day"]
+    return out
+
+
+def node_accounts(node):
+    return json.loads(node["snapshot"]).get("accounts", {})
+
+
+def node_ready(node, now):
+    snapshot = json.loads(node["snapshot"])
+    return (node["deleted"] is None and not node["revoked"] and node["adopted"] and not node["maintenance"]
+            and node["last_seen"] and now - node["last_seen"] < ONLINE and snapshot.get("accounts_version") == 1
+            and not snapshot.get("error"))
+
+
+def usage(db, user_id):
+    return db.execute("SELECT COALESCE(SUM(cycle_used),0) FROM platform_links WHERE user_id=?", (user_id,)).fetchone()[0]
+
+
+def state_of(user, used, today):
+    if not user["enabled"]:
+        return "manual"
+    if user["expire_date"] and user["expire_date"] < today.isoformat():
+        return "expired"
+    if user["quota"] and used >= user["quota"]:
+        return "quota"
+    return ""
+
+
+# ---------------------------------------------------------------- user API
+
+def create_user(db, data, now=None):
+    now = time.time() if now is None else now
+    fields = validate_fields(data, create=True)
+    if db.execute("SELECT 1 FROM platform_users WHERE lower(name)=lower(?)", (fields["name"],)).fetchone():
+        raise ValueError("用户名已存在")
+    identity = str(uuid.uuid4())
+    row = {"note": "", "enabled": True, "expire_date": "", "quota": 0, "reset_day": 0, **fields}
+    db.execute("INSERT INTO platform_users(id,name,note,enabled,expire_date,quota,reset_day,cycle,mtime,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+               (identity, row["name"], row["note"], int(row["enabled"]), row["expire_date"], row["quota"], row["reset_day"],
+                cycle_key(row["reset_day"], datetime.date.fromtimestamp(now)), json.dumps({k: int(now) for k in ACCOUNT_FIELDS}), now, now))
+    return identity
+
+
+def update_user(db, user_id, data, now=None, mtimes=None):
+    """Apply field changes; mtimes (node clock) are used when a node change wins."""
+    now = time.time() if now is None else now
+    user = db.execute("SELECT * FROM platform_users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        raise ValueError("用户不存在")
+    fields = data if mtimes is not None else validate_fields(data)
+    if "name" in fields and db.execute("SELECT 1 FROM platform_users WHERE lower(name)=lower(?) AND id<>?", (fields["name"], user_id)).fetchone():
+        raise ValueError("用户名已存在")
+    current, mtime = fields_of(user), json.loads(user["mtime"])
+    changed = {k: v for k, v in fields.items() if current[k] != v}
+    if not changed:
+        return {}
+    for key, value in changed.items():
+        mtime[key] = int((mtimes or {}).get(key, now))
+        db.execute("UPDATE platform_users SET " + key + "=? WHERE id=?", (int(value) if key == "enabled" else value, user_id))
+    if "reset_day" in changed:
+        # Changing the reset day keeps this cycle's usage (same as node billing).
+        db.execute("UPDATE platform_users SET cycle=? WHERE id=?", (cycle_key(changed["reset_day"], datetime.date.fromtimestamp(now)), user_id))
+    db.execute("UPDATE platform_users SET mtime=?,updated=? WHERE id=?", (json.dumps(mtime), now, user_id))
+    return changed
+
+
+def add_link(db, user_id, node_id, members=None, account_id=None, prefer="panel", now=None):
+    """Create a node account for the user, or claim an existing unlinked one."""
+    now = time.time() if now is None else now
+    user = db.execute("SELECT * FROM platform_users WHERE id=? AND deleting IS NULL", (user_id,)).fetchone()
+    node = db.execute("SELECT * FROM nodes WHERE id=? AND deleted IS NULL AND revoked=0", (node_id,)).fetchone()
+    if not user or not node:
+        raise ValueError("用户或节点不存在")
+    if json.loads(node["snapshot"]).get("accounts_version") != 1:
+        raise ValueError("该节点程序或脚本版本过旧，不支持统一用户，请先升级节点")
+    if db.execute("SELECT 1 FROM platform_links WHERE user_id=? AND node_id=?", (user_id, node_id)).fetchone():
+        raise ValueError("该用户已关联此节点")
+    accounts = node_accounts(node)
+    if account_id is None:
+        targets = []
+        for member in members or []:
+            if not isinstance(member, dict) or set(member) != {"core", "protocol", "port"}:
+                raise ValueError("协议实例无效")
+            if member["protocol"] in SINGLE_USER:
+                raise ValueError("该协议一用户一端口：请先为该用户安装实例，再归入")
+            targets.append({"target": {k: member[k] for k in ("core", "protocol", "port")}, "name": user["name"]})
+        if any(a.get("name", "").lower() == user["name"].lower() for a in accounts.values()):
+            raise ValueError("节点上已有同名统一用户，请改用认领")
+        validate_platform_task({"action": "platform_apply", "params": {"ops": [{"op": "create", "account_id": str(uuid.uuid4()),
+                                "fields": {"name": user["name"]}, "members": targets}]}})
+        identity, origin, base = str(uuid.uuid4()), "created", None
+    else:
+        if not isinstance(account_id, str) or not re.fullmatch(UUID_PATTERN, account_id) or account_id not in accounts:
+            raise ValueError("节点上没有该统一用户，请刷新后重试")
+        account = accounts[account_id]
+        if account.get("platform_user_id") and account["platform_user_id"] != user_id:
+            raise ValueError("该统一用户已关联其他平台用户")
+        if db.execute("SELECT 1 FROM platform_links WHERE node_id=? AND account_id=?", (node_id, account_id)).fetchone():
+            raise ValueError("该统一用户已被认领")
+        if prefer not in ("panel", "node"):
+            raise ValueError("请选择以哪一方的设置为准")
+        # Base selects the winner: the side equal to base is treated as unchanged.
+        base = {k: account.get(k) for k in ACCOUNT_FIELDS} if prefer == "panel" else fields_of(user)
+        identity, origin, targets = account_id, "claimed", []
+    link_id = str(uuid.uuid4())
+    db.execute("INSERT INTO platform_links(id,user_id,node_id,account_id,origin,base,base_rev,members,state,created) VALUES(?,?,?,?,?,?,?,?,?,?)",
+               (link_id, user_id, node_id, identity, origin, json.dumps(base) if base else None,
+                accounts.get(identity, {}).get("rev") if base else None, json.dumps(targets), "pending", now))
+    return link_id
+
+
+def queue_op(db, link_id, op, now=None):
+    validate_platform_task({"action": "platform_apply", "params": {"ops": [op]}})
+    db.execute("INSERT INTO platform_pending(link_id,op,created) VALUES(?,?,?)", (link_id, json.dumps(op), time.time() if now is None else now))
+    db.execute("UPDATE platform_links SET state='pending',retry_after=0 WHERE id=?", (link_id,))
+
+
+SINGLE_USER = ("ss-legacy", "ss2022", "snell", "snell-v5", "snell-v6")
+
+
+def member_op(db, link, data):
+    """Queue an explicit member change on a linked node account."""
+    if not isinstance(data, dict) or set(data) - {"action", "target", "name", "mode", "count_existing"}:
+        raise ValueError("成员操作参数无效")
+    target = data.get("target")
+    if not isinstance(target, dict) or set(target) != {"core", "protocol", "port"}:
+        raise ValueError("协议实例无效")
+    action = data.get("action")
+    if action == "add":
+        if target["protocol"] in SINGLE_USER:
+            raise ValueError("该协议一用户一端口：请先为该用户安装实例，再归入")
+        user = db.execute("SELECT name FROM platform_users WHERE id=?", (link["user_id"],)).fetchone()
+        op = {"op": "member_add", "account_id": link["account_id"], "target": target, "name": data.get("name") or user["name"]}
+    elif action == "claim":
+        op = {"op": "member_claim", "account_id": link["account_id"], "target": target, "name": data.get("name"),
+              "count_existing": data.get("count_existing", True)}
+    elif action == "remove":
+        mode = data.get("mode", "release")
+        if mode == "delete" and target["protocol"].startswith("snell"):
+            raise ValueError("Snell 成员请保留实例，或在实例管理中卸载")
+        op = {"op": "member_remove", "account_id": link["account_id"], "target": target, "name": data.get("name"), "mode": mode}
+    else:
+        raise ValueError("成员操作无效")
+    queue_op(db, link["id"], op)
+
+
+def reset_credentials(db, user_id, link_id=None, member=None):
+    links = db.execute("SELECT * FROM platform_links WHERE user_id=? AND removing IS NULL" + (" AND id=?" if link_id else ""),
+                       (user_id, link_id) if link_id else (user_id,)).fetchall()
+    if not links:
+        raise ValueError("没有可重置凭据的节点")
+    for link in links:
+        queue_op(db, link["id"], {"op": "reset_credentials", "account_id": link["account_id"], **({"member": member} if member else {})})
+
+
+def release_task(db, task_id):
+    """A cancelled or manually resolved sync task: let the next plan recompute."""
+    task = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not task or task["action"] != "platform_apply":
+        return
+    db.execute("DELETE FROM platform_pending WHERE task_id=?", (task_id,))
+    accounts = {op["account_id"] for op in json.loads(task["request"])["params"]["ops"]}
+    for link in db.execute("SELECT * FROM platform_links WHERE node_id=?", (task["node_id"],)).fetchall():
+        if link["account_id"] in accounts:
+            db.execute("UPDATE platform_links SET state='pending',notice='',retry_after=0 WHERE id=?", (link["id"],))
+
+
+def remove_link(db, link_id, mode):
+    if mode not in ("release", "delete"):
+        raise ValueError("请选择保留或删除节点上的用户")
+    link = db.execute("SELECT * FROM platform_links WHERE id=?", (link_id,)).fetchone()
+    if not link:
+        raise ValueError("关联不存在")
+    db.execute("UPDATE platform_links SET removing=?,state='pending',retry_after=0 WHERE id=?", (mode, link_id))
+
+
+def delete_user(db, user_id, mode):
+    if not db.execute("SELECT 1 FROM platform_users WHERE id=?", (user_id,)).fetchone():
+        raise ValueError("用户不存在")
+    links = db.execute("SELECT id FROM platform_links WHERE user_id=?", (user_id,)).fetchall()
+    if not links:
+        db.execute("DELETE FROM platform_users WHERE id=?", (user_id,))
+        return True
+    for link in links:
+        remove_link(db, link["id"], mode)
+    db.execute("UPDATE platform_users SET deleting=? WHERE id=?", (mode, user_id))
+    return False
+
+
+# ---------------------------------------------------------------- snapshots
+
+def ingest(db, node_id, snapshot, now=None):
+    """Called inside the poll transaction: usage accounting and three-way merge."""
+    now = time.time() if now is None else now
+    accounts = snapshot.get("accounts", {}) if snapshot.get("accounts_version") == 1 else {}
+    for link in db.execute("SELECT * FROM platform_links WHERE node_id=?", (node_id,)).fetchall():
+        account = accounts.get(link["account_id"])
+        if account is None:
+            continue
+        # Usage: raw script counters per member; a counter drop counts the new value once.
+        last, used = json.loads(link["last_raw"]), link["cycle_used"]
+        for member in account.get("members", []):
+            if type(member.get("used")) is not int:
+                continue
+            key = "|".join(str(member[k]) for k in ("core", "protocol", "port", "name"))
+            previous = last.get(key)
+            raw = member["used"]
+            # First sight counts the existing counter (claimed users keep their usage).
+            delta = raw if previous is None or raw < previous else raw - previous
+            used += delta
+            last[key] = raw
+        db.execute("UPDATE platform_links SET cycle_used=?,last_raw=? WHERE id=?", (used, json.dumps(last), link["id"]))
+        if link["removing"]:
+            continue
+        user = db.execute("SELECT * FROM platform_users WHERE id=?", (link["user_id"],)).fetchone()
+        node_values = {k: account.get(k) for k in ACCOUNT_FIELDS}
+        if link["base"] is None:
+            # First sight of an account the panel created: what was created is the base.
+            db.execute("UPDATE platform_links SET base=?,base_rev=? WHERE id=?", (json.dumps(node_values), account.get("rev"), link["id"]))
+            continue
+        base, panel = json.loads(link["base"]), fields_of(user)
+        node_mtime, panel_mtime = account.get("mtime", {}), json.loads(user["mtime"])
+        take, notes = {}, []
+        for key in ACCOUNT_FIELDS:
+            node_changed, panel_changed = node_values[key] != base.get(key), panel[key] != base.get(key)
+            if node_changed and not panel_changed:
+                take[key] = node_values[key]
+            elif node_changed and panel_changed and node_values[key] != panel[key]:
+                if node_mtime.get(key, 0) > panel_mtime.get(key, 0):
+                    take[key] = node_values[key]
+                notes.append(key)
+        if take:
+            if "name" in take and db.execute("SELECT 1 FROM platform_users WHERE lower(name)=lower(?) AND id<>?", (take["name"], user["id"])).fetchone():
+                take.pop("name")
+                notes.append("name")
+            update_user(db, user["id"], take, now, mtimes={k: node_mtime.get(k, int(now)) for k in take})
+            panel = {**panel, **take}
+        if notes:
+            labels = {"name": "用户名", "note": "备注", "enabled": "启停", "expire_date": "到期日期", "quota": "配额", "reset_day": "重置日"}
+            db.execute("UPDATE platform_links SET notice=? WHERE id=?",
+                       ("节点与面板同时修改了" + "、".join(labels[k] for k in dict.fromkeys(notes)) + "，已按后改的一方合并", link["id"]))
+            db.execute("INSERT INTO audit(at,event,node_id,detail) VALUES(?,?,?,?)", (now, "platform.merge", node_id, user["id"] + " " + ",".join(notes)))
+        if all(panel[k] == node_values[k] for k in ACCOUNT_FIELDS):
+            db.execute("UPDATE platform_links SET base=?,base_rev=? WHERE id=?", (json.dumps(node_values), account.get("rev"), link["id"]))
+
+
+def rollover(db, now=None):
+    """Panel-timezone cycles; a new cycle clears every link's usage (quota block lifts)."""
+    now = time.time() if now is None else now
+    today = datetime.date.fromtimestamp(now)
+    for user in db.execute("SELECT * FROM platform_users WHERE reset_day>0").fetchall():
+        key = cycle_key(user["reset_day"], today)
+        if user["cycle"] == "total" or key > user["cycle"]:
+            if user["cycle"] != "total":
+                db.execute("UPDATE platform_links SET cycle_used=0 WHERE user_id=?", (user["id"],))
+            db.execute("UPDATE platform_users SET cycle=? WHERE id=?", (key, user["id"]))
+
+
+def reset_usage(db, user_id):
+    db.execute("UPDATE platform_links SET cycle_used=0 WHERE user_id=?", (user_id,))
+
+
+# ---------------------------------------------------------------- planning
+
+def plan(db, node, now=None):
+    """Operations needed on one node: (ops, pending ids, link ids)."""
+    now = time.time() if now is None else now
+    accounts, ops, pending_ids, link_ids = node_accounts(node), [], [], []
+    for link in db.execute("SELECT * FROM platform_links WHERE node_id=? ORDER BY created", (node["id"],)).fetchall():
+        if link["retry_after"] > now:
+            continue
+        user = db.execute("SELECT * FROM platform_users WHERE id=?", (link["user_id"],)).fetchone()
+        account, before = accounts.get(link["account_id"]), len(ops)
+        if link["removing"]:
+            if account is not None:
+                ops.append({"op": "unlink", "account_id": link["account_id"]} if link["removing"] == "release"
+                           else {"op": "delete", "account_id": link["account_id"], "mode": "delete"})
+        elif account is None:
+            if link["origin"] == "created":
+                op = {"op": "create", "account_id": link["account_id"], "platform_user_id": user["id"],
+                      "fields": fields_of(user), "members": json.loads(link["members"])}
+                ops.append(op)
+        else:
+            if account.get("platform_user_id") != user["id"]:
+                ops.append({"op": "link", "account_id": link["account_id"], "platform_user_id": user["id"]})
+            if link["base"] is not None:
+                base, panel = json.loads(link["base"]), fields_of(user)
+                patch = {k: panel[k] for k in ACCOUNT_FIELDS if panel[k] != base.get(k) and panel[k] != account.get(k)}
+                if patch:
+                    ops.append({"op": "update", "account_id": link["account_id"], "base_rev": account.get("rev", 0), "fields": patch})
+            block = "quota" if user["quota"] and usage(db, user["id"]) >= user["quota"] else ""
+            if account.get("platform_block", "") != block:
+                ops.append({"op": "block", "account_id": link["account_id"], "platform_block": block})
+            for row in db.execute("SELECT * FROM platform_pending WHERE link_id=? AND task_id IS NULL ORDER BY id", (link["id"],)).fetchall():
+                ops.append(json.loads(row["op"]))
+                pending_ids.append(row["id"])
+        if len(ops) > before:
+            link_ids.append(link["id"])
+        elif link["state"] == "pending" and account is not None and not link["removing"]:
+            db.execute("UPDATE platform_links SET state='synced' WHERE id=?", (link["id"],))
+    return ops[:200], pending_ids, link_ids
+
+
+def schedule(db, now=None):
+    """Queue at most one platform_apply per eligible node; identical plans are not re-queued."""
+    now = time.time() if now is None else now
+    queued = []
+    for node in db.execute("SELECT * FROM nodes WHERE deleted IS NULL").fetchall():
+        if not node_ready(node, now):
+            continue
+        if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status IN ('queued','running','unknown')", (node["id"],)).fetchone():
+            continue
+        ops, pending_ids, link_ids = plan(db, node, now)
+        if not ops:
+            continue
+        request = validate_platform_task({"action": "platform_apply", "params": {"ops": ops}})
+        key = "platform:" + node["id"] + ":" + hashlib.sha256(json.dumps([node["snapshot"], request], sort_keys=True).encode()).hexdigest()
+        if db.execute("SELECT 1 FROM tasks WHERE request_key=?", (key,)).fetchone():
+            continue
+        task_id = str(uuid.uuid4())
+        db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
+                   (task_id, node["id"], "platform_apply", json.dumps(request), "queued", now, key))
+        db.execute("INSERT INTO audit(at,event,node_id,detail) VALUES(?,?,?,?)", (now, "task.queued", node["id"], task_id + " platform_apply system"))
+        for pending in pending_ids:
+            db.execute("UPDATE platform_pending SET task_id=? WHERE id=?", (task_id, pending))
+        for link_id in link_ids:
+            db.execute("UPDATE platform_links SET state='pending' WHERE id=?", (link_id,))
+        queued.append(task_id)
+    return queued
+
+
+def task_finished(db, task, status, message, now=None):
+    """Record a platform_apply outcome on the affected links."""
+    now = time.time() if now is None else now
+    request = json.loads(task["request"])
+    accounts = {op["account_id"] for op in request["params"]["ops"]}
+    links = [l for l in db.execute("SELECT * FROM platform_links WHERE node_id=?", (task["node_id"],)).fetchall() if l["account_id"] in accounts]
+    if status == "succeeded":
+        db.execute("DELETE FROM platform_pending WHERE task_id=?", (task["id"],))
+        for link in links:
+            if link["removing"]:
+                db.execute("DELETE FROM platform_pending WHERE link_id=?", (link["id"],))
+                db.execute("DELETE FROM platform_links WHERE id=?", (link["id"],))
+            else:
+                db.execute("UPDATE platform_links SET state='synced',notice=CASE WHEN notice LIKE '同步失败%' THEN '' ELSE notice END WHERE id=?", (link["id"],))
+        finish_deletions(db)
+    elif status == "failed":
+        # Explicit one-shot operations are dropped so they never loop; derived ones are
+        # recomputed after a back-off from the next snapshot.
+        db.execute("DELETE FROM platform_pending WHERE task_id=?", (task["id"],))
+        # A version conflict resolves itself: the next poll merges the newer snapshot
+        # before planning, so the retry carries the current revision.
+        delay = 0 if "节点版本" in message or "重新合并" in message else RETRY_DELAY
+        for link in links:
+            db.execute("UPDATE platform_links SET state='failed',notice=?,retry_after=? WHERE id=?",
+                       ("同步失败：" + message[:200], now + delay, link["id"]))
+    else:
+        for link in links:
+            db.execute("UPDATE platform_links SET state='unknown',notice=? WHERE id=?", ("同步结果未确认，请在任务记录中核对", link["id"]))
+
+
+def finish_deletions(db):
+    for user in db.execute("SELECT id FROM platform_users WHERE deleting IS NOT NULL").fetchall():
+        if not db.execute("SELECT 1 FROM platform_links WHERE user_id=?", (user["id"],)).fetchone():
+            db.execute("DELETE FROM platform_users WHERE id=?", (user["id"],))
+
+
+def forget_missing(db):
+    """A removing link whose node account is already gone needs no task."""
+    for link in db.execute("SELECT platform_links.*, nodes.snapshot FROM platform_links JOIN nodes ON nodes.id=platform_links.node_id WHERE removing IS NOT NULL").fetchall():
+        snapshot = json.loads(link["snapshot"])
+        if snapshot.get("accounts_version") == 1 and link["account_id"] not in snapshot.get("accounts", {}):
+            db.execute("DELETE FROM platform_pending WHERE link_id=?", (link["id"],))
+            db.execute("DELETE FROM platform_links WHERE id=?", (link["id"],))
+    finish_deletions(db)
+
+
+# ---------------------------------------------------------------- views
+
+def describe(db, user, nodes, now=None):
+    now = time.time() if now is None else now
+    used = usage(db, user["id"])
+    links = []
+    for link in db.execute("SELECT * FROM platform_links WHERE user_id=? ORDER BY created", (user["id"],)).fetchall():
+        node = nodes.get(link["node_id"])
+        snapshot = json.loads(node["snapshot"]) if node else {}
+        account = snapshot.get("accounts", {}).get(link["account_id"])
+        online = bool(node and node["last_seen"] and now - node["last_seen"] < ONLINE)
+        sync = ("removing" if link["removing"] else link["state"]) if online or link["state"] in ("failed", "unknown") else "offline"
+        links.append({"id": link["id"], "node_id": link["node_id"], "node_name": node["name"] if node else "已删除的节点",
+                      "account_id": link["account_id"], "origin": link["origin"], "cycle_used": link["cycle_used"],
+                      "sync": sync, "notice": link["notice"], "online": online,
+                      "account": account, "members": (account or {}).get("members", [])})
+    return {"id": user["id"], **fields_of(user), "cycle": user["cycle"], "used": used,
+            "state": state_of(user, used, datetime.date.fromtimestamp(now)), "deleting": user["deleting"],
+            "mtime": json.loads(user["mtime"]), "links": links}
+
+
+def unlinked_accounts(db, nodes):
+    claimed = {(r["node_id"], r["account_id"]) for r in db.execute("SELECT node_id, account_id FROM platform_links")}
+    found = []
+    for node in nodes.values():
+        snapshot = json.loads(node["snapshot"])
+        for identity, account in snapshot.get("accounts", {}).items():
+            if (node["id"], identity) not in claimed:
+                found.append({"node_id": node["id"], "node_name": node["name"], "account_id": identity,
+                              "supported": snapshot.get("accounts_version") == 1, **account})
+    return found
