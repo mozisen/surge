@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import platform
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from .billing import effective_usage, traffic_state
 from vaio import __version__
-from vaio.common import PROTOCOLS, PROTOCOL_CORES, config_revision, write_capabilities
+from vaio.common import ACCOUNT_FIELDS, PROTOCOLS, PROTOCOL_CORES, UUID_PATTERN, config_revision, write_capabilities
 
 STANDALONE = {"snell", "snell-v5", "snell-v6", "snell-shadowtls", "snell-v5-shadowtls", "ss2022-shadowtls", "naive"}
 
@@ -82,13 +83,55 @@ def inventory(cfg, status=service_status):
         instances.append({"core": core, "protocol": proto, "port": row["port"],
                           "service": service, "status": services[service], "managed": mutable(core, proto, row),
                           "sni": row.get("sni", ""), "traffic_state": traffic_state(db, core, proto, row), "users": [
-                              {**{k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("expire_date", ""))}, "used": effective_usage(u)[0], "quota": effective_usage(u)[1], "reset_day": u.get("panel_reset_day", 0)}
+                              {**{k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("expire_date", ""))}, "used": effective_usage(u)[0], "quota": effective_usage(u)[1], "reset_day": u.get("panel_reset_day", 0),
+                               "account_id": u.get("account_id") or ""}
                               for u in users_for(row)]})
-    return {"revision": config_revision(db), "instances": instances, "write_capabilities": write_capabilities(), "task_api_version": 2,
+    return {"revision": config_revision(db), "instances": instances, "accounts": accounts(db), "write_capabilities": write_capabilities(), "task_api_version": 2,
             "config_details_version": 2, "install_options_version": 2, "billing_version": 1,
             "hostname": platform.node(), "os": platform.system() + " " + platform.release(),
             "arch": platform.machine(), "agent_version": __version__, "metrics": metrics(),
             "traffic_status": db.get("meta", {}).get("last_traffic_sync_status", "unavailable"), "at": time.time()}
+
+
+def account_state(account, today=None):
+    """Same precedence as the script: manual > expired > quota > platform_quota."""
+    today = (today or datetime.date.today()).isoformat()
+    if account.get("enabled") is False:
+        return "manual"
+    if account.get("expire_date") and account["expire_date"] < today:
+        return "expired"
+    if account.get("quota", 0) and account.get("cycle_used", 0) >= account["quota"]:
+        return "quota"
+    if account.get("platform_block"):
+        return "platform_quota"
+    return ""
+
+
+def accounts(db):
+    """Unified accounts (no credentials) with each member's raw counter and state."""
+    found = {}
+    for core, proto, row in rows(db):
+        for user in users_for(row):
+            found[(core, proto, row["port"], user.get("name"))] = user
+    result = {}
+    for identity, account in (db.get("accounts") or {}).items():
+        if not isinstance(account, dict):
+            continue
+        members = []
+        for member in account.get("members", []):
+            if not isinstance(member, dict):
+                continue
+            user = found.get((member.get("core"), member.get("protocol"), member.get("port"), member.get("name")))
+            members.append({"core": member.get("core"), "protocol": member.get("protocol"), "port": member.get("port"),
+                            "name": member.get("name"), "used": user.get("used", 0) if user else None,
+                            "enabled": user.get("enabled", True) if user else None,
+                            "disable_reason": user.get("disable_reason", "") if user else ""})
+        result[identity] = {**{k: account.get(k) for k in ACCOUNT_FIELDS}, "cycle": account.get("cycle", ""),
+                            "cycle_used": account.get("cycle_used", 0), "rev": account.get("rev", 0),
+                            "mtime": account.get("mtime", {}), "platform_user_id": account.get("platform_user_id"),
+                            "platform_block": account.get("platform_block", ""), "state": account_state(account),
+                            "members": members}
+    return result
 
 
 def metrics():
@@ -146,8 +189,58 @@ def sanitize_snapshot(snapshot):
         clean_item["traffic_state"] = item.get("traffic_state") if item.get("traffic_state") in ("ready", "unavailable", "unsupported") else "unavailable"
         clean_item.update(port=item["port"], managed=item.get("managed") is True, users=[])
         for user in item.get("users", [])[:1000]:
+            owner = user.get("account_id")
             clean_item["users"].append({"name": text(user.get("name"), 32), "enabled": user.get("enabled") is True,
                                         "used": max(0, int(user.get("used", 0))), "quota": max(0, int(user.get("quota", 0))),
-                                        "reset_day": max(0, min(28, int(user.get("reset_day", 0)))), "expire_date": text(user.get("expire_date"), 10)})
+                                        "reset_day": max(0, min(28, int(user.get("reset_day", 0)))), "expire_date": text(user.get("expire_date"), 10),
+                                        "account_id": owner if isinstance(owner, str) and re.fullmatch(UUID_PATTERN, owner) else ""})
         clean["instances"].append(clean_item)
+    clean["accounts_version"] = 1 if snapshot.get("accounts_version") == 1 else 0
+    clean["accounts"] = sanitize_accounts(snapshot.get("accounts", {}))
+    return clean
+
+
+def sanitize_accounts(data):
+    if not isinstance(data, dict) or len(data) > 1000:
+        raise ValueError("统一用户数量无效")
+    def number(value, high=10 ** 18):
+        return value if type(value) is int and 0 <= value < high else 0
+    def date(value):
+        return value if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) else ""
+    def uuid_or_none(value):
+        return value if isinstance(value, str) and re.fullmatch(UUID_PATTERN, value) else None
+    clean, total = {}, 0
+    for identity, account in data.items():
+        if not isinstance(identity, str) or not re.fullmatch(UUID_PATTERN, identity) or not isinstance(account, dict):
+            raise ValueError("统一用户数据无效")
+        members = account.get("members", [])
+        if not isinstance(members, list) or len(members) > 50:
+            raise ValueError("统一用户成员无效")
+        total += len(members)
+        if total > 20000:
+            raise ValueError("统一用户成员数量无效")
+        name = account.get("name")
+        mtime = account.get("mtime") if isinstance(account.get("mtime"), dict) else {}
+        clean[identity] = {
+            "name": name if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name) else "",
+            "note": "".join(c for c in str(account.get("note") or "")[:200] if ord(c) >= 32),
+            "enabled": account.get("enabled") is not False, "expire_date": date(account.get("expire_date")),
+            "quota": number(account.get("quota")), "reset_day": number(account.get("reset_day"), 29),
+            "cycle": str(account.get("cycle") or "")[:10], "cycle_used": number(account.get("cycle_used")),
+            "rev": number(account.get("rev")),
+            "mtime": {k: mtime[k] for k in (*ACCOUNT_FIELDS, "members") if type(mtime.get(k)) is int and 0 <= mtime[k] < 10 ** 11},
+            "platform_user_id": uuid_or_none(account.get("platform_user_id")),
+            "platform_block": "quota" if account.get("platform_block") == "quota" else "",
+            "state": account.get("state") if account.get("state") in ("", "manual", "expired", "quota", "platform_quota") else "",
+            "members": []}
+        for member in members:
+            if not isinstance(member, dict) or member.get("core") not in ("xray", "singbox") or type(member.get("port")) is not int \
+                    or not 1 <= member["port"] <= 65535:
+                raise ValueError("统一用户成员无效")
+            used = member.get("used")
+            clean[identity]["members"].append({
+                "core": member["core"], "protocol": str(member.get("protocol") or "")[:32], "port": member["port"],
+                "name": str(member.get("name") or "")[:32], "used": used if type(used) is int and used >= 0 else None,
+                "enabled": member.get("enabled") if type(member.get("enabled")) is bool else None,
+                "disable_reason": member.get("disable_reason") if member.get("disable_reason") in ("", "manual", "expired", "quota", "platform_quota") else ""})
     return clean

@@ -89,6 +89,103 @@ def validate_task(data):
             "params": params, "revision": data.get("revision", "")}
 
 
+UUID_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+ACCOUNT_FIELDS = ("name", "note", "enabled", "expire_date", "quota", "reset_day")
+ACCOUNT_OPS = {
+    "create": {"op", "account_id", "fields", "platform_user_id", "members"},
+    "update": {"op", "account_id", "base_rev", "fields"},
+    "link": {"op", "account_id", "platform_user_id"},
+    "unlink": {"op", "account_id"},
+    "block": {"op", "account_id", "platform_block"},
+    "member_add": {"op", "account_id", "target", "name"},
+    "member_claim": {"op", "account_id", "target", "name", "count_existing"},
+    "member_remove": {"op", "account_id", "target", "name", "mode"},
+    "reset_credentials": {"op", "account_id", "member"},
+    "reset_usage": {"op", "account_id"},
+    "delete": {"op", "account_id", "mode"},
+}
+
+
+def _integer(value, low, high):
+    return type(value) is int and low <= value <= high
+
+
+def _account_target(value):
+    if not isinstance(value, dict) or set(value) != {"core", "protocol", "port"}:
+        raise ValueError("统一用户成员目标无效")
+    if value["core"] not in ("xray", "singbox") or not isinstance(value["protocol"], str) or not re.fullmatch(r"[a-z0-9-]{1,32}", value["protocol"]):
+        raise ValueError("统一用户成员目标无效")
+    port(value["port"])
+
+
+def _account_fields(value, create=False):
+    if not isinstance(value, dict) or not value or set(value) - set(ACCOUNT_FIELDS) or (create and "name" not in value):
+        raise ValueError("统一用户字段无效")
+    if "name" in value:
+        require_text(value["name"], "用户名", 32, r"[A-Za-z0-9_-]+")
+    if "note" in value and (not isinstance(value["note"], str) or len(value["note"]) > 200 or any(ord(c) < 32 for c in value["note"])):
+        raise ValueError("备注最多 200 字，且不能包含控制字符")
+    if "enabled" in value and type(value["enabled"]) is not bool:
+        raise ValueError("用户状态无效")
+    if "expire_date" in value:
+        if not isinstance(value["expire_date"], str) or (value["expire_date"] and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value["expire_date"])):
+            raise ValueError("到期日期格式应为 YYYY-MM-DD")
+    if "quota" in value and not _integer(value["quota"], 0, 9999999999999999):
+        raise ValueError("配额无效")
+    if "reset_day" in value and not _integer(value["reset_day"], 0, 28):
+        raise ValueError("月度重置日必须为 1–28，0 表示不自动重置")
+
+
+def validate_platform_task(data):
+    """Node-wide unified-account sync task; mirrors the script's account_apply contract."""
+    if not isinstance(data, dict) or set(data) != {"action", "params"} or data["action"] != "platform_apply":
+        raise ValueError("任务字段无效")
+    params = data["params"]
+    if not isinstance(params, dict) or set(params) != {"ops"} or not isinstance(params["ops"], list) or not 1 <= len(params["ops"]) <= 200:
+        raise ValueError("统一用户操作列表无效")
+    for op in params["ops"]:
+        if not isinstance(op, dict) or op.get("op") not in ACCOUNT_OPS or set(op) - ACCOUNT_OPS[op["op"]]:
+            raise ValueError("统一用户操作无效")
+        if not isinstance(op.get("account_id"), str) or not re.fullmatch(UUID_PATTERN, op["account_id"]):
+            raise ValueError("统一用户 ID 无效")
+        kind = op["op"]
+        if kind == "create":
+            _account_fields(op.get("fields"), create=True)
+            members = op.get("members", [])
+            if not isinstance(members, list) or len(members) > 50:
+                raise ValueError("统一用户成员无效")
+            for member in members:
+                if not isinstance(member, dict) or set(member) - {"target", "name"}:
+                    raise ValueError("统一用户成员无效")
+                _account_target(member.get("target"))
+                if "name" in member:
+                    require_text(member["name"], "用户名", 32, r"[A-Za-z0-9_-]+")
+        if kind == "update":
+            if not _integer(op.get("base_rev"), 0, 999999999999):
+                raise ValueError("统一用户版本无效")
+            _account_fields(op.get("fields"))
+        if kind in ("create", "link") and ("platform_user_id" in op or kind == "link"):
+            if not isinstance(op.get("platform_user_id"), str) or not re.fullmatch(UUID_PATTERN, op["platform_user_id"]):
+                raise ValueError("平台用户 ID 无效")
+        if kind == "block" and op.get("platform_block") not in ("", "quota"):
+            raise ValueError("平台停用原因无效")
+        if kind in ("member_add", "member_claim", "member_remove"):
+            _account_target(op.get("target"))
+            if kind != "member_add" or "name" in op:
+                require_text(op.get("name"), "用户名", 32, r"[A-Za-z0-9_-]+")
+        if kind == "member_claim" and "count_existing" in op and type(op["count_existing"]) is not bool:
+            raise ValueError("用量计入选项无效")
+        if kind in ("member_remove", "delete") and op.get("mode", "release") not in ("release", "delete"):
+            raise ValueError("移除方式无效")
+        if kind == "reset_credentials" and "member" in op:
+            member = op["member"]
+            if not isinstance(member, dict) or set(member) != {"core", "protocol", "port", "name"}:
+                raise ValueError("统一用户成员无效")
+            _account_target({k: member[k] for k in ("core", "protocol", "port")})
+            require_text(member["name"], "用户名", 32, r"[A-Za-z0-9_-]+")
+    return {"action": "platform_apply", "params": params}
+
+
 def config_revision(db):
     # Counters and notification metadata change independently of configuration.
     volatile = {"used", "counter_up", "counter_down", "counter_generation", "last_alert_percent",

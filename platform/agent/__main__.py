@@ -50,7 +50,7 @@ class Agent:
         self.state.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.cfg = cfg
         self.script_api = ScriptAPI() if str(cfg) == "/etc/vless-reality" else None
-        self.bridge = bridge or Bridge(cfg, state)
+        self.bridge = bridge or Bridge(cfg, state, script_api=self.script_api)
         self.journal_path = self.state / "journal.json"
         self.journal = json.loads(self.journal_path.read_text()) if self.journal_path.exists() else {}
         for item in self.journal.values():
@@ -104,6 +104,8 @@ class Agent:
             snapshot["error"] = "自动计费策略执行结果未确认，已停止自动重试；请在节点核对 enforcement-backup"
         if self.script_api:
             snapshot["script_api"] = self.script_api.status()
+            # Unified-account sync needs the script's transactional account API.
+            snapshot["accounts_version"] = 1 if snapshot["script_api"].get("accounts_api") == 1 else 0
         task = self.api("/poll", {"snapshot": snapshot, "ready": future is None}).get("task")
         if task and future is None:
             task_id = task["id"]

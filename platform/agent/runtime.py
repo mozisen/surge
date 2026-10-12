@@ -93,7 +93,8 @@ class Runtime:
             return output.decode().strip() if capture else ""
 
     def upstream(self, operation, *args):
-        allowed = {"install_xray", "install_singbox", "install_snell", "install_snell_v5", "install_snell_v6", "_snell_update_counter_port", "install_acme_tool"}
+        allowed = {"install_xray", "install_singbox", "install_snell", "install_snell_v5", "install_snell_v6", "_snell_update_counter_port", "install_acme_tool",
+                   "accounts_apply"}
         if operation not in allowed:
             raise ValueError("未授权的脚本操作")
         source = (ROOT / "vendor/vless-server.sh").read_bytes()

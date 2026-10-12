@@ -8,12 +8,14 @@ import secrets
 import socket
 import uuid
 import hashlib
+import logging
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from vaio.install_options import SS_METHODS
-from vaio.common import MUTATIONS, config_revision, validate_task
+from vaio.common import MUTATIONS, config_revision, validate_platform_task, validate_task
 from .addresses import discover
 from .config_details import config_details
 from .inventory import mutable, read_db, rows, service_for, users_for
@@ -29,16 +31,40 @@ class TransactionRolledBack(RuntimeError):
     """Runtime and database restoration completed."""
 
 
+# Script account_apply failure codes → operator-facing messages. Every failure was
+# rejected before writing or rolled back; none is replayed.
+ACCOUNT_FAILURES = {
+    "rev_conflict": "统一用户已在节点上修改，未写入；面板将按最新数据重新合并",
+    "account_exists": "节点上已存在同一统一用户",
+    "account_not_found": "节点上没有该统一用户，请刷新后重试",
+    "unsupported_snell_operation": "Snell 成员请先安装实例后归入，移除时请保留实例",
+    "unsupported_protocol": "该协议不支持加入统一用户",
+    "invalid_request": "统一用户请求格式无效",
+    "request_id_conflict": "任务 ID 已用于不同请求，已拒绝执行",
+    "lock_timeout": "节点正在执行其他配置事务，请稍后重试",
+    "invalid_database": "节点数据库格式无效，请在节点检查",
+    "storage_error": "节点无法写入事务记录，请检查磁盘空间与权限",
+}
+
+
 class Bridge:
-    def __init__(self, cfg="/etc/vless-reality", state="/var/lib/vaio-agent", runtime=None):
+    def __init__(self, cfg="/etc/vless-reality", state="/var/lib/vaio-agent", runtime=None, script_api=None):
         self.cfg, self.state = Path(cfg), Path(state)
         self.runtime = runtime or Runtime(self.cfg, self.state)
+        self.script_api = script_api
+
+    @contextmanager
+    def txn_locked(self):
+        # Shared with the script's --api account_apply: one configuration transaction at a time.
+        self.cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(self.cfg / ".txn.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
 
     @contextmanager
     def locked(self):
-        self.cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with open(self.cfg / ".db.lock", "a") as lock:
+        with self.txn_locked(), open(self.cfg / ".db.lock", "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
@@ -82,9 +108,13 @@ class Bridge:
         identity = task.get("id", str(uuid.uuid4()))
         if not isinstance(identity, str) or str(uuid.UUID(identity)) != identity:
             raise ValueError("任务 ID 无效")
-        validated = validate_task({k: v for k, v in task.items() if k != "id"})
-        if validated["action"] not in MUTATIONS:
-            return self._execute({**validated, "id": identity})
+        platform = isinstance(task, dict) and task.get("action") == "platform_apply"
+        if platform:
+            validated = validate_platform_task({k: v for k, v in task.items() if k != "id"})
+        else:
+            validated = validate_task({k: v for k, v in task.items() if k != "id"})
+            if validated["action"] not in MUTATIONS:
+                return self._execute({**validated, "id": identity})
         if (self.state / "enforcement-pending.json").exists():
             raise TransactionUnknown("自动计费策略上次执行未确认，请在节点核对 enforcement-backup 后解除阻塞")
         fingerprint = hashlib.sha256(json.dumps(validated, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -106,7 +136,7 @@ class Bridge:
             intent = {"fingerprint": fingerprint, "status": "running"}
             atomic_write(record, json.dumps(intent))
             try:
-                result = self._execute({**validated, "id": identity})
+                result = self._platform_apply(validated, identity) if platform else self._execute({**validated, "id": identity})
             except TransactionUnknown:
                 atomic_write(record, json.dumps({**intent, "status": "unknown"}))
                 raise
@@ -123,6 +153,49 @@ class Bridge:
                 raise TransactionUnknown("事务未确认完成，请在节点核对备份；记录 " + str(record))
             atomic_write(record, json.dumps({**intent, "status": "succeeded", "result": result}))
             return result
+
+    def _platform_apply(self, task, identity):
+        """Unified-account sync through the script's transactional API.
+
+        No Agent lock is held: the script takes the shared transaction lock itself."""
+        if self.script_api is None:
+            raise ValueError("节点脚本接口不可用，无法同步统一用户")
+        if (self.state / "enforcement-pending.json").exists():
+            raise TransactionUnknown("自动策略执行结果未知，请先在节点核对")
+        try:
+            reply = self.script_api.write(task["params"], identity)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            reply = None
+        if reply is None or reply.get("status") == "unknown":
+            # The process may have finished the transaction; ask instead of re-running it.
+            try:
+                reply = self.script_api.result(identity)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                reply = None
+            if reply is None or reply.get("status") not in ("succeeded", "failed"):
+                raise TransactionUnknown("统一用户同步结果未确认，未重放；请在节点核对 " + str(self.cfg / "api-results" / (identity + ".json")))
+        data = reply.get("data") if isinstance(reply.get("data"), dict) else {}
+        if reply["status"] == "succeeded":
+            accounts = data.get("accounts") if isinstance(data.get("accounts"), dict) else {}
+            return {"accounts": {k: {"rev": v.get("rev") if type(v.get("rev")) is int else None, "exists": v.get("exists") is True}
+                                 for k, v in accounts.items() if isinstance(v, dict)},
+                    "steps": ["节点脚本校验请求与统一用户版本", "保存事务备份", "写入统一用户并派生成员状态", "按协议重建并校验运行配置"]}
+        code = reply.get("code")
+        if code == "apply_failed":
+            detail = str(data.get("message") or "")[:200]
+            raise TransactionRolledBack("统一用户应用失败，节点已回滚" + ("：" + detail if detail else ""))
+        message = ACCOUNT_FAILURES.get(code, "统一用户同步被节点拒绝")
+        if code == "rev_conflict" and type(data.get("rev")) is int:
+            message += "（节点版本 " + str(data["rev"]) + "）"
+        raise ValueError(message)
+
+    def settle_accounts(self):
+        """Run the script's account settlement even when the node's installed CLI predates it."""
+        db = read_db(self.cfg)
+        if not db.get("accounts") and not any(u.get("account_id") for _, _, r in rows(db) for u in users_for(r)):
+            return
+        with self.txn_locked():
+            self.runtime.upstream("accounts_apply")
 
     def _execute(self, task):
         task_id = task.get("id", str(uuid.uuid4()))
@@ -227,6 +300,9 @@ class Bridge:
                     if len(found) != 1:
                         raise ValueError("用户不存在或不唯一")
                     user = found[0]
+                    # Expiry, quota and state of unified-account members are derived by the script.
+                    if user.get("account_id") and (action == "user_delete" or set(params) & {"quota_gb", "reset_day", "expire_date", "enabled"}):
+                        raise ValueError("该用户属于统一用户，请修改统一用户；凭据与连接信息仍可单独处理")
                 if action == "user_delete":
                     if params["name"] == "default":
                         raise ValueError("默认用户请禁用；保留记录以兼容原脚本")
@@ -338,6 +414,10 @@ class Bridge:
 
     def reconcile(self):
         """Locally enforce expiry / externally collected quotas even if the panel is offline."""
+        try:
+            self.settle_accounts()
+        except (OSError, ValueError, RuntimeError):
+            logging.error("统一用户结算失败，将在下次检查重试；详情见 runtime.log")
         with self.locked():
             pending = self.state / "enforcement-pending.json"
             if pending.exists():

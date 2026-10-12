@@ -1,4 +1,5 @@
-"""Read-only preview bridge. API capabilities never grant task execution rights."""
+"""Script API bridge. Protocol capabilities never grant task execution rights; only the
+unified-account transaction (account_apply) is written through it."""
 import hashlib
 import json
 import os
@@ -17,26 +18,49 @@ class ScriptAPI:
         self.cached = None
         self.checked = 0
 
-    def read(self, action):
-        if action not in {'capabilities', 'inventory'}:
-            raise ValueError('preview API is read-only')
+    def _call(self, request, timeout):
+        """Run one --api request; returns (exit status, parsed response)."""
         if hashlib.sha256(self.script.read_bytes()).hexdigest() != UPSTREAM_SHA:
             raise ValueError('script checksum mismatch')
-        identity = str(uuid.uuid4())
-        request = {'api_version': 1, 'request_id': identity, 'action': action}
         # Keep stdout bounded in memory; stderr may contain private local paths.
         with tempfile.TemporaryFile() as output:
             result = subprocess.run(['bash', str(self.script), '--api'],
                 input=json.dumps(request).encode(), stdout=output, stderr=subprocess.DEVNULL,
-                timeout=8, env={**os.environ, 'VLESS_SCRIPT_SOURCE_REF': 'codex/platform-api'})
+                timeout=timeout, env={**os.environ, 'VLESS_SCRIPT_SOURCE_REF': 'codex/platform-api'})
             output.seek(0)
             raw = output.read(1024 * 1024 + 1)
-        if result.returncode or len(raw) > 1024 * 1024:
-            raise ValueError('script API unavailable')
+        if len(raw) > 1024 * 1024:
+            raise ValueError('script API response too large')
         data = json.loads(raw)
-        if not isinstance(data, dict) or data.get('api_version') != 1 or data.get('request_id') != identity or data.get('status') != 'succeeded':
+        if not isinstance(data, dict) or data.get('api_version') != 1 or data.get('request_id') != request['request_id'] \
+                or data.get('status') not in ('succeeded', 'failed', 'unknown'):
             raise ValueError('invalid API response')
+        return result.returncode, data
+
+    def read(self, action):
+        if action not in {'capabilities', 'inventory'}:
+            raise ValueError('preview API is read-only')
+        code, data = self._call({'api_version': 1, 'request_id': str(uuid.uuid4()), 'action': action}, 8)
+        if code or data['status'] != 'succeeded':
+            raise ValueError('script API unavailable')
         return data
+
+    @staticmethod
+    def _request_id(value):
+        if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+            raise ValueError('invalid request id')
+        return value
+
+    def write(self, params, request_id):
+        """Unified-account transaction. The task ID is the script's idempotency key."""
+        request = {'api_version': 1, 'request_id': self._request_id(request_id), 'action': 'account_apply', 'params': params}
+        return self._call(request, 300)[1]
+
+    def result(self, request_id):
+        """Read-only lookup of a previous account_apply; never re-executes it."""
+        request = {'api_version': 1, 'request_id': str(uuid.uuid4()), 'action': 'result',
+                   'params': {'request_id': self._request_id(request_id)}}
+        return self._call(request, 30)[1]
 
     def status(self):
         now = time.monotonic()
@@ -60,8 +84,12 @@ class ScriptAPI:
                 raise ValueError('invalid version')
             # Do not forward arbitrary API fields, users, resources, or revision.
             # Script snapshot revisions include traffic and are not task revisions.
+            accounts = c.get('accounts_api')
+            accounts_ready = isinstance(accounts, dict) and accounts.get('version') == 1 \
+                and isinstance(accounts.get('actions'), list) and 'account_apply' in accounts['actions']
             self.cached = {'status': 'ready', 'version': version, 'stage': 'read_only',
-                           'protocol_count': len(protocols), 'instance_count': len(instances)}
+                           'protocol_count': len(protocols), 'instance_count': len(instances),
+                           'accounts_api': 1 if accounts_ready else 0}
         except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
             self.cached = {'status': 'unavailable', 'stage': 'read_only'}
         self.checked = now
