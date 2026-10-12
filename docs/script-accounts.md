@@ -1,4 +1,4 @@
-# 脚本统一用户（3.7.4-preview.3 至 preview.6）
+# 脚本统一用户（3.7.4-preview.3 至 preview.7）
 
 预览版本：`3.7.4-preview.3`，分支 `codex/platform-3.7.4`。只推送预览分支，不更新 main，不创建 GitHub Release。
 
@@ -107,5 +107,25 @@
 - 新增 `tests/protocol-users.sh`，共 6 组：22 个协议的模式和统计方式；免认证 SOCKS；能力 JSON；安装提示。Xray 的 SS2022 用真实的入站生成函数验证多用户和旧格式兼容。共享渲染器覆盖 SS2022 多用户与旧格式、SS 传统版多用户、全部停用时的占位用户。另外覆盖 Snell 分配（新凭据、已占用拒绝）、连接信息（指定地址、未知用户、不支持的协议、地址注入）、平台模式空实例。
 - 其余脚本测试和面板 unittest 131 项通过（跳过 2 项）。
 - Sing-box 的 SS2022 多用户生成器（`generate_singbox_config`）依赖太多，没有单独的函数级测试；它与共享渲染器的格式一致，渲染器已有测试。
+
+**真实验收**：未执行。
+
+## SOCKS 与 ShadowTLS 组合按一用户一实例接入（3.7.4-preview.7）
+
+- **SOCKS**：每个端口实例最多一个用户，用户名就是用户名，密码就是用户凭据。唯一用户停用、到期或超额时，入站换成随机账号，原连接失效。流量按 Xray 入站标签（`socks-<端口>`）统计：生成的 Xray 配置在 policy 中开启了 `statsInboundUplink/Downlink`，流量同步时计入该实例的唯一用户。旧实例（没有 users）沿用原来的实例账号；把旧实例归入统一用户时，原用户名和密码保留为这个用户。
+- **ShadowTLS 组合**（Snell+ShadowTLS、Snell v5+ShadowTLS、SS2022+ShadowTLS）：保持「每台节点一份」，实例归一个用户。分配时更换后端凭据（Snell PSK 或 SS2022 密钥，按加密方式生成 16/32 字节）和 ShadowTLS 握手密码，重写后端配置和前端服务。唯一用户停用、到期或超额时，停止并禁用前后端两个服务；恢复后重新启动。「启动全部服务」也会跳过停用的实例。流量用 nft 按前端端口计数（复用 Snell 的计数表，计数器 ID 由协议名派生），按代际累计。旧实例（没有 users）保持常开。
+- **分享链接**：ShadowTLS 组合按 Surge 格式输出（包含握手密码和 SNI）；SOCKS 沿用原有格式。
+- **能力表**：SOCKS（免认证除外）与三种 ShadowTLS 组合标为已接入；`member_add` 只能分配到空实例，否则返回 `instance_occupied`。
+
+### 测试（preview.7）
+**隔离测试**：新增 `tests/single-user-instances.sh`，共 6 组：
+- SOCKS 账号生成（旧格式、有效用户、停用/到期/超额换成随机账号），用真实的 Xray 入站生成函数验证，并检查入站统计策略。
+- SOCKS 归入旧实例时保留原账号，分配空实例会更换账号，已占用的实例被拒绝，入站流量计入用户。
+- ShadowTLS 分配：重写后端凭据、更换握手密码、重写服务、重启前后端。
+- 停用统一用户时停止服务，恢复时重新启动。
+- nft 端口计数的累计与代际。
+- ShadowTLS 和 SOCKS 成员的分享链接。
+
+其余脚本测试和面板 unittest 151 项通过（跳过 2 项）。没有在真实的 shadow-tls、snell-server、Xray 和 nftables 环境中运行；systemd/OpenRC 服务启停只验证了调用顺序。
 
 **真实验收**：未执行。

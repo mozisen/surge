@@ -107,4 +107,4 @@ SQLite 升到 `user_version=2`，新增三张表：`platform_users`（平台用�
 - `tests/accounts-cli.sh`（CI 中的真实进程）新增：Agent 的 `ScriptAPI.share` 调用真实脚本生成 VLESS 链接，未知成员被拒绝。
 - 全部 unittest 151 项通过（跳过 2 项），cjs 测试和脚本测试通过；本地预览截图检查了安装表单的用户选择、关联对话框的模式标注和 SOCKS 实例弹窗。
 
-**未完成**：SOCKS 和三种 ShadowTLS 组合的一用户一实例适配（脚本子任务 2，3.7.4-preview.7）尚未实现，界面上显示为「暂未接入用户管理」。**真实验收**：未执行。
+**后续**：SOCKS 和三种 ShadowTLS 组合已在脚本 3.7.4-preview.7 接入（见 `docs/script-accounts.md`），新版 Agent 把它们标为已接入。**真实验收**：未执行。
