@@ -59,3 +59,10 @@
   - unittest 92 项通过、2 项跳过；`bash -n vless-server.sh` 通过；shell 回归未运行（脚本未改）。
   - 本机无 Node：用 macOS JavaScriptCore 做了 `app.js` 语法检查，并按 `traffic-display.cjs` 的断言运行流量代码段，均通过。`node --check`、`install-form.cjs`、`traffic-display.cjs` 以 GitHub Actions 为准。
 - 未在真实节点上操作，节点 Agent 与主脚本仍未更新（用户暂缓）。
+- GitHub Actions：`6f7630a` 的 Platform regression 通过（run 38202847858，Python 3.9/3.12 与镜像构建）。其中包括 `node --check web/app.js`、`install-form.cjs`、`traffic-display.cjs`。
+- 2026-10-12 通过 termark 在 vps.town 执行 `vaio-panel update --ref 6f7630ada3f9276b40c2bee2eafdb6f136f837e7`，面板从 `c39fec1` 升级到 `6f7630a`（0.3.0-preview.10）。结果如下：
+  - 日志 `/root/vaio-update-6f7630a.log` 显示 `EXIT=0`。升级器测试 92 项通过、2 项跳过；日志中的「已恢复旧程序」来自临时目录内的回滚自测。
+  - `/opt/vaio-panel/REVISION` 为该提交，服务 active，本地 `127.0.0.1:18080` 与公网首页均返回 200，资源版本为 preview.10。
+  - 服务器上 `web/app.js`、`web/style.css` 的 SHA-256 与本地一致。
+  - 备份位于 `/var/backups/vaio-panel/1791778417878133763`。
+- 未在测试面板上登录做界面验收，也未操作节点。
