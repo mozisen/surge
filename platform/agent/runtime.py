@@ -19,7 +19,7 @@ from .inventory import read_db, rows, service_for, users_for
 from .billing import effective_usage
 
 ROOT = Path(__file__).resolve().parent.parent
-UPSTREAM_SHA = "5e0849fc52cbee27b4ab32d8079a4f1606adade134bced50a633684dcc42374a"
+UPSTREAM_SHA = "d3267afd6699e62633cfe701b9343529cd6ab6a1a4ba1da67558045bee12fbb3"
 
 
 def atomic_write(path, content):

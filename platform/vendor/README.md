@@ -5,8 +5,8 @@
 - 仓库：https://github.com/mozisen/surge
 - 分支：`codex/platform-3.7.4`
 - 提交：与当前根目录脚本同一 Git 提交；使用下列摘要固定内容。
-- 版本：`3.7.4-preview.5`（用户管理方式二选一：以脚本或以平台为准）
-- SHA-256：`5e0849fc52cbee27b4ab32d8079a4f1606adade134bced50a633684dcc42374a`
+- 版本：`3.7.4-preview.6`（协议用户能力表、SS2022 多用户、成员连接信息）
+- SHA-256：`d3267afd6699e62633cfe701b9343529cd6ab6a1a4ba1da67558045bee12fbb3`
 
 原快照未提供许可证，不对该文件另行声明许可证。
 
@@ -31,3 +31,5 @@ SS 单用户入站采集：按唯一端口和标签读取非清零计数，累�
 3.7.4-preview.4 新增 `--api account_apply` 与 `result` 查询：一个请求内的统一用户操作作为事务执行（`$CFG/.txn.lock`、幂等记录 `$CFG/api-results`、备份 `$CFG/api-backups`、失败回滚）。`capabilities` 保持 `stage=read_only_foundation` 与 `write_actions=[]`，另以 `accounts_api.version=1` 声明，现有 Agent 的只读接口检查不受影响。inventory 增加 `accounts` 与用户的 `account_id`，仍不含凭据。
 
 3.7.4-preview.5 新增 `meta.user_authority`（script/platform）。平台模式下本机菜单的用户写操作全部禁用；切换到平台时清空受管实例的全部用户与凭据（行级凭据换成随机值）、统一用户、TG 绑定与用户路由，独立协议不受影响。`--api account_apply` 新增单独成请求的 `set_authority`，脚本模式下拒绝其他统一用户写操作；`accounts_api.version` 升为 2，能力声明与 inventory 带 `user_authority`。
+
+3.7.4-preview.6 新增协议用户能力表（multi/single/none 与统计方式，能力声明 `user_modes`、inventory 每实例 `user_mode/user_stats/user_available`，`accounts_api.version=3`）；SS2022 在 Xray、Sing-box 与共享渲染器中支持多用户（实例 password 为服务端密钥，旧的单密码实例保持原格式），共享渲染器的 SS 传统版支持多用户；Snell 新增成员改为分配到空实例；新增只读的 `--api account_share`；以平台为准时安装空实例。
