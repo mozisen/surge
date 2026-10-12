@@ -206,10 +206,31 @@ button svg {
     height: 16px;
 }
 
+/* Selector buttons (traffic server list): marker + weight show the selection. */
+button[data-action="traffic-node"] {
+    gap: 8px;
+    margin-left: -10px;
+    color: var(--ink-2);
+    font-weight: 400;
+}
+
+button[data-action="traffic-node"]::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border: 1.5px solid #b3b3b3;
+    border-radius: 1px;
+    flex-shrink: 0;
+}
+
 button[aria-current="true"] {
+    color: var(--ink);
     font-weight: 700;
-    text-decoration: underline;
-    text-underline-offset: 3px;
+}
+
+button[data-action="traffic-node"][aria-current="true"]::before {
+    border-color: var(--ink);
+    background: var(--ink);
 }
 
 /* ---------- Form controls ---------- */
@@ -463,16 +484,14 @@ input[type="checkbox"] {
     overflow-wrap: anywhere;
 }
 
-.eyebrow {
-    margin-bottom: 8px;
+.back-link {
+    display: inline-block;
+    margin-bottom: 6px;
+    color: var(--muted);
     font-size: 13px;
 }
 
-.eyebrow a {
-    color: var(--muted);
-}
-
-.eyebrow a:hover {
+.back-link:hover {
     color: var(--ink);
 }
 
@@ -512,12 +531,22 @@ input[type="checkbox"] {
     font-size: 16px;
 }
 
-.section-label > span {
+.section-label > span,
+.section-meta {
     color: var(--muted);
     font-size: 13px;
 }
 
-.section-label > a {
+.section-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 20px;
+    margin-left: auto;
+}
+
+.section-label > a,
+.section-meta a {
     font-size: 13px;
 }
 
@@ -755,6 +784,89 @@ input[type="checkbox"] {
 
 .split > section {
     min-width: 0;
+}
+
+/* Detail aside: unboxed definition list beside the main table. */
+.detail-aside {
+    min-width: 0;
+    padding-left: 24px;
+    border-left: 1px solid var(--line);
+}
+
+.detail-aside .info-block {
+    padding: 0;
+}
+
+.detail-aside .info-block + .info-block {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+}
+
+.detail-aside .info-block h3 {
+    margin-bottom: 8px;
+}
+
+.detail-aside .info-block p {
+    margin: 8px 0 0;
+}
+
+/* Monitor status summary. */
+.status-panel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px 24px;
+    padding: 16px 18px;
+}
+
+.status-main {
+    min-width: 0;
+}
+
+.status-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 4px;
+    font-size: 15px;
+}
+
+.status-title::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border: 1.5px solid var(--ink);
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.status-title.on::before {
+    background: var(--ink);
+}
+
+.status-title.off {
+    color: var(--muted);
+}
+
+.status-title.off::before {
+    border-color: var(--muted);
+}
+
+.status-main p {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 13px;
+}
+
+.status-main p.helper {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.status-panel > button {
+    flex-shrink: 0;
 }
 
 /* ---------- Node list: rack rows ---------- */
@@ -1671,8 +1783,20 @@ dialog.install .install-warning {
         grid-template-columns: 1fr;
     }
 
-    .split > aside {
-        display: none;
+    /* Aside moves below the table. */
+    .detail-aside {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 24px 40px;
+        padding: 20px 0 0;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+    }
+
+    .detail-aside .info-block + .info-block {
+        margin-top: 0;
+        padding-top: 0;
+        border-top: 0;
     }
 }
 
@@ -1871,6 +1995,24 @@ dialog.install .install-warning {
     .notice {
         flex-direction: column;
         align-items: flex-start;
+    }
+
+    .detail-aside {
+        grid-template-columns: 1fr;
+    }
+
+    .detail-aside .info-block + .info-block {
+        padding-top: 20px;
+        border-top: 1px solid var(--line);
+    }
+
+    .status-panel {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .section-meta {
+        margin-left: 0;
     }
 
     .detail-info span + span {
