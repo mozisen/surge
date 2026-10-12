@@ -69,4 +69,4 @@
 
 ## 统一用户管理：脚本 3.7.4-preview.3 / preview.4，面板 0.3.0-preview.11
 
-脚本新增可独立运行的节点级统一用户和事务写接口 `--api account_apply`；Agent 上报统一用户并执行 `platform_apply`；面板新增「用户管理」，跨节点合计流量、双向同步。版本、改动和测试结果见 `docs/platform-user-management.md`。未部署到测试面板，未操作任何节点。
+脚本新增可独立运行的节点级统一用户和事务写接口 `--api account_apply`；Agent 上报统一用户并执行 `platform_apply`；面板新增「用户管理」，跨节点合计流量、双向同步。版本、改动和测试结果见 `docs/platform-user-management.md`。2026-10-12 已将测试面板 vps.town 升级到 `6b819ef`（0.3.0-preview.11），并在数据库副本上完成接口验收；节点未操作。
