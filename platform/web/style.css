@@ -319,6 +319,12 @@ input[type="checkbox"] {
     font-weight: 600;
 }
 
+/* Empty alert regions collapse (never display:none) so they don't leave a gap. */
+.error:empty {
+    min-height: 0;
+    margin-top: 0;
+}
+
 .subtext {
     margin: 0;
     color: var(--muted);
@@ -1401,6 +1407,62 @@ dialog::backdrop {
     margin: 16px 0;
 }
 
+.modal-body > p:first-child {
+    margin-top: 16px;
+}
+
+/* Section divider: full-bleed rule, same weight as the head and foot rules. */
+.modal-body > hr {
+    margin: 24px calc(-1 * var(--pad)) 20px;
+    border-top-color: var(--line);
+}
+
+.modal-body > hr + p {
+    margin-top: 0;
+}
+
+.modal-body > hr ~ .action-row {
+    margin: 12px 0 8px;
+}
+
+/* Instance dialog: service line, actions, then the user table. */
+.instance-service {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+}
+
+.modal-body > .instance-service + .action-row {
+    margin: 12px 0 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--line-soft);
+}
+
+/* Task record: header line plus kv rows read as a log header. */
+.task-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+}
+
+.modal-body .kv {
+    font-size: 13px;
+}
+
+.modal-body .kv span:last-child {
+    font-variant-numeric: tabular-nums;
+}
+
+.modal-body code {
+    overflow-wrap: anywhere;
+}
+
+.modal-body textarea[readonly] + button {
+    margin-top: 8px;
+}
+
 .modal-body .table-wrap {
     border: 1px solid var(--line);
     border-radius: var(--r-panel);
@@ -1442,13 +1504,16 @@ dialog:not(.install) .modal-body > form:last-child > .modal-foot:last-child {
 pre {
     max-height: 290px;
     overflow: auto;
-    padding: 14px;
-    border: 1px solid var(--line-soft);
-    border-radius: var(--r-control);
+    margin: 12px 0;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-left: 2px solid var(--ink);
+    border-radius: 0 var(--r-control) var(--r-control) 0;
     background: var(--canvas);
     color: var(--ink);
     font-family: var(--mono);
     font-size: 12px;
+    line-height: 1.75;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
@@ -1591,8 +1656,18 @@ dialog.install .modal-foot {
 
 .protocol-card .protocol-card-count {
     margin-top: 6px;
-    color: var(--ink);
-    font-weight: 600;
+    padding-top: 6px;
+    border-top: 1px solid var(--line-soft);
+    align-self: stretch;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 400;
+}
+
+.protocol-card {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    box-shadow: none;
 }
 
 .protocol-card:hover,
@@ -1737,7 +1812,7 @@ dialog.install .install-warning {
     margin: 0;
     padding: 11px 18px;
     border: 0;
-    border-radius: var(--r-control);
+    border-radius: var(--r-panel);
     background: var(--ink);
     color: #fff;
     font-size: 14px;
