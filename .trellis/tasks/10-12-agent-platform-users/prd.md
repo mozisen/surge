@@ -10,5 +10,5 @@
 - 实例任务拒绝修改统一用户成员的到期、配额、重置日、启停，也拒绝删除成员；share、inspect、reset_credentials 允许。
 
 ## Acceptance Criteria
-- [ ] `tests/test_platform_users_agent.py`：能力协商（旧脚本、校验和不符时不宣告）、成功、失败、rev_conflict、unknown 后查询、超时、指纹冲突、锁顺序、实例任务拒绝、快照归一化
-- [ ] 现有 unittest 全部通过
+- [x] `tests/test_platform_users_agent.py`：能力协商（旧脚本、校验和不符时不宣告）、成功、失败、rev_conflict、unknown 后查询、超时、指纹冲突、锁顺序、实例任务拒绝、快照归一化
+- [x] 现有 unittest 全部通过
