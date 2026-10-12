@@ -63,6 +63,17 @@ class BillingTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_task(dict(action='user_update',protocol='vless',core='xray',port=24443,params={'name':'default','reset_day':bad},revision='a'*64))
 
+    def test_account_settlement_counters_do_not_change_revision(self):
+        data = fixture()
+        data['accounts'] = {'a': {'name': 'alice', 'quota': 1, 'cycle_used': 1, 'members': [{'core': 'xray', 'protocol': 'vless', 'port': 24443, 'name': 'default', 'last_raw': 1}]}}
+        revision = config_revision(data)
+        data['accounts']['a']['cycle_used'] = 9
+        data['accounts']['a']['members'][0]['last_raw'] = 9
+        data['meta']['accounts_reload_pending'] = ['xray|vless']
+        self.assertEqual(config_revision(data), revision)
+        data['accounts']['a']['quota'] = 2
+        self.assertNotEqual(config_revision(data), revision)
+
     def test_scoped_billing_transaction_and_failure_recovery(self):
         with tempfile.TemporaryDirectory() as d:
             cfg=Path(d)/'cfg';cfg.mkdir();state=Path(d)/'state'

@@ -93,7 +93,9 @@ def config_revision(db):
     # Counters and notification metadata change independently of configuration.
     volatile = {"used", "counter_up", "counter_down", "counter_generation", "last_alert_percent",
                 "last_alert_date", "last_expire_notice", "updated", "last_sync", "traffic_observed_at",
-                "traffic_observed_xray", "traffic_observed_singbox", "panel_used", "panel_last_used", "panel_cycle"}
+                "traffic_observed_xray", "traffic_observed_singbox", "panel_used", "panel_last_used", "panel_cycle",
+                # Script unified-account settlement updates these on every traffic sync.
+                "cycle_used", "last_raw", "accounts_reload_pending"}
     def clean(value):
         if isinstance(value, dict):
             return {k: clean(v) for k, v in value.items() if k not in volatile and not k.startswith("last_traffic_")}
