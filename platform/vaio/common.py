@@ -9,6 +9,28 @@ PROTOCOLS = {"vless": "VLESS Reality", "hy2": "Hysteria2", "snell": "Snell v4",
              "snell-v5": "Snell v5", "snell-v6": "Snell v6", "trojan": "Trojan", "anytls": "AnyTLS", "ss-legacy": "SS", "ss2022": "SS2022"}
 PROTOCOL_CORES = {"ss-legacy": ("singbox",), "ss2022": ("singbox",), "vless": ("xray", "singbox"), "hy2": ("singbox",), "anytls": ("singbox",),
                   "trojan": ("xray", "singbox"), "snell": ("xray",), "snell-v5": ("xray",), "snell-v6": ("xray",)}
+# Every protocol id the node script knows. Instance writes stay limited to PROTOCOL_CORES;
+# reading a member's connection (share) and inspect work for all of them.
+SCRIPT_PROTOCOLS = {"vless", "vless-xhttp", "vless-xhttp-cdn", "vless-ws", "vless-ws-notls", "vmess-ws", "vless-vision",
+                    "trojan", "trojan-ws", "socks", "ss2022", "ss-legacy", "hy2", "tuic", "anytls", "snell", "snell-v5",
+                    "snell-v6", "snell-shadowtls", "snell-v5-shadowtls", "ss2022-shadowtls", "naive"}
+MULTI_USER = {"vless", "vless-vision", "vless-ws", "vless-ws-notls", "vless-xhttp", "vless-xhttp-cdn", "vmess-ws", "trojan",
+              "trojan-ws", "ss-legacy", "ss2022", "hy2", "tuic", "anytls"}
+SINGLE_USER = {"socks", "snell", "snell-v5", "snell-v6", "snell-shadowtls", "snell-v5-shadowtls", "ss2022-shadowtls"}
+
+
+def user_mode(protocol, row=None):
+    """Same table as the script's _proto_user_mode."""
+    if protocol == "socks" and (row or {}).get("auth_mode") == "noauth":
+        return "none"
+    return "multi" if protocol in MULTI_USER else "single" if protocol in SINGLE_USER else "none"
+
+
+def user_stats(protocol, row=None):
+    mode = user_mode(protocol, row)
+    return "user" if mode == "multi" else ("inbound" if protocol == "socks" else "port") if mode == "single" else "none"
+
+
 LEGACY_COMBINATIONS = {("xray", "vless"), ("singbox", "hy2"), ("xray", "snell"), ("xray", "snell-v5"), ("xray", "snell-v6")}
 
 
@@ -43,11 +65,15 @@ def validate_task(data):
     if action not in ACTIONS:
         raise ValueError("不支持的操作")
     p = data.get("protocol")
-    if p not in PROTOCOLS:
-        raise ValueError("协议尚未实现安全写入适配，请查看节点能力列表")
     core = data.get("core")
-    if core not in PROTOCOL_CORES[p]:
-        raise ValueError("协议内核不受支持，请查看节点能力列表")
+    if action in ("share", "inspect") and p in SCRIPT_PROTOCOLS and p not in PROTOCOLS:
+        if core not in ("xray", "singbox"):
+            raise ValueError("协议内核不受支持，请查看节点能力列表")
+    else:
+        if p not in PROTOCOLS:
+            raise ValueError("协议尚未实现安全写入适配，请查看节点能力列表")
+        if core not in PROTOCOL_CORES[p]:
+            raise ValueError("协议内核不受支持，请查看节点能力列表")
     port(data.get("port"))
     params = data.get("params", {})
     if not isinstance(params, dict):

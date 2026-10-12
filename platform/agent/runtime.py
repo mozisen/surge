@@ -366,8 +366,9 @@ class Runtime:
                 raise ValueError("运行配置与数据库不一致，无法唯一定位端口")
             old = config["inbounds"][matches[0]] if matches else None
             if old:
-                if proto in ("ss-legacy", "ss2022") and (old.get("type") != "shadowsocks" or old.get("users") or old.get("destinations")):
-                    raise ValueError("运行配置不是受管的单用户 SS 实例")
+                # Multi-user SS (users list) is rendered by the shared renderer too; relays are not.
+                if proto in ("ss-legacy", "ss2022") and (old.get("type") != "shadowsocks" or old.get("destinations")):
+                    raise ValueError("运行配置不是受管的 SS 实例")
                 if (proto == "vless" and core == "xray" and (old.get("protocol") != "vless" or old.get("streamSettings", {}).get("security") != "reality")) or (proto == "hy2" and old.get("type") != "hysteria2"):
                     raise ValueError("运行协议与数据库不一致")
                 if proto == "vless" and core == "singbox" and (old.get("type") != "vless" or not old.get("tls", {}).get("reality", {}).get("enabled")):

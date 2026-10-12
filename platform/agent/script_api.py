@@ -56,6 +56,15 @@ class ScriptAPI:
         request = {'api_version': 1, 'request_id': self._request_id(request_id), 'action': 'account_apply', 'params': params}
         return self._call(request, 300)[1]
 
+    def share(self, target, name, host):
+        """A member's connection link from the script (read-only; nothing is recorded)."""
+        request = {'api_version': 1, 'request_id': str(uuid.uuid4()), 'action': 'account_share',
+                   'params': {'target': target, 'name': name, **({'host': host} if host else {})}}
+        code, data = self._call(request, 30)
+        if data['status'] != 'succeeded' or not isinstance(data.get('data'), dict) or not isinstance(data['data'].get('connection'), str):
+            raise ValueError({'user_not_found': '用户不存在', 'unsupported_protocol': '该协议不支持用户管理'}.get(data.get('code'), '节点脚本无法生成连接信息'))
+        return data['data']['connection'][:8000]
+
     def result(self, request_id):
         """Read-only lookup of a previous account_apply; never re-executes it."""
         request = {'api_version': 1, 'request_id': str(uuid.uuid4()), 'action': 'result',
@@ -85,8 +94,8 @@ class ScriptAPI:
             # Do not forward arbitrary API fields, users, resources, or revision.
             # Script snapshot revisions include traffic and are not task revisions.
             accounts = c.get('accounts_api')
-            # Version 2 adds set_authority; the account operations of version 1 are unchanged.
-            accounts_ready = isinstance(accounts, dict) and accounts.get('version') in (1, 2) \
+            # Version 2 adds set_authority, 3 adds account_share and user modes; earlier operations are unchanged.
+            accounts_ready = isinstance(accounts, dict) and accounts.get('version') in (1, 2, 3) \
                 and isinstance(accounts.get('actions'), list) and 'account_apply' in accounts['actions']
             self.cached = {'status': 'ready', 'version': version, 'stage': 'read_only',
                            'protocol_count': len(protocols), 'instance_count': len(instances),

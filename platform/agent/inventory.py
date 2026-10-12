@@ -10,8 +10,9 @@ from pathlib import Path
 
 from .billing import effective_usage, traffic_state
 from vaio import __version__
-from vaio.common import ACCOUNT_FIELDS, PROTOCOLS, PROTOCOL_CORES, UUID_PATTERN, config_revision, write_capabilities
+from vaio.common import ACCOUNT_FIELDS, PROTOCOLS, PROTOCOL_CORES, UUID_PATTERN, config_revision, user_mode, user_stats, write_capabilities
 
+SNELL_USERS = {"snell", "snell-v5", "snell-v6"}
 STANDALONE = {"snell", "snell-v5", "snell-v6", "snell-shadowtls", "snell-v5-shadowtls", "ss2022-shadowtls", "naive"}
 
 
@@ -82,11 +83,15 @@ def inventory(cfg, status=service_status):
             services[service] = status(service)
         instances.append({"core": core, "protocol": proto, "port": row["port"],
                           "service": service, "status": services[service], "managed": mutable(core, proto, row),
-                          "sni": row.get("sni", ""), "traffic_state": traffic_state(db, core, proto, row), "users": [
+                          "sni": row.get("sni", ""), "traffic_state": traffic_state(db, core, proto, row),
+                          "user_mode": user_mode(proto, row), "user_stats": user_stats(proto, row),
+                          "user_available": user_mode(proto, row) == "multi" or (proto.startswith("snell") and proto in SNELL_USERS
+                                                                                and db.get("meta", {}).get("snell_users", {}).get(proto) is True),
+                          "users": [
                               {**{k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("expire_date", ""))}, "used": effective_usage(u)[0], "quota": effective_usage(u)[1], "reset_day": u.get("panel_reset_day", 0),
                                "account_id": u.get("account_id") or ""}
                               for u in users_for(row)]})
-    return {"revision": config_revision(db), "instances": instances, "accounts": accounts(db),
+    return {"revision": config_revision(db), "instances": instances, "accounts": accounts(db), "share_version": 2,
             "user_authority": "platform" if db.get("meta", {}).get("user_authority") == "platform" else "script",
             "authority_version": 1, "upgrade_version": 1, "write_capabilities": write_capabilities(), "task_api_version": 2,
             "config_details_version": 2, "install_options_version": 2, "billing_version": 1,
@@ -189,6 +194,9 @@ def sanitize_snapshot(snapshot):
             raise ValueError("实例端口无效")
         clean_item = {k: text(item.get(k), 100) for k in ("core", "protocol", "service", "status", "sni")}
         clean_item["traffic_state"] = item.get("traffic_state") if item.get("traffic_state") in ("ready", "unavailable", "unsupported") else "unavailable"
+        clean_item["user_mode"] = item.get("user_mode") if item.get("user_mode") in ("multi", "single", "none") else ""
+        clean_item["user_stats"] = item.get("user_stats") if item.get("user_stats") in ("user", "inbound", "port", "none") else ""
+        clean_item["user_available"] = item.get("user_available") is True
         clean_item.update(port=item["port"], managed=item.get("managed") is True, users=[])
         for user in item.get("users", [])[:1000]:
             owner = user.get("account_id")
@@ -201,6 +209,7 @@ def sanitize_snapshot(snapshot):
     clean["authority_version"] = 1 if snapshot.get("authority_version") == 1 else 0
     clean["user_authority"] = "platform" if snapshot.get("user_authority") == "platform" else "script"
     clean["upgrade_version"] = 1 if snapshot.get("upgrade_version") == 1 else 0
+    clean["share_version"] = 2 if snapshot.get("share_version") == 2 else 0
     upgrade = snapshot.get("last_upgrade")
     if isinstance(upgrade, dict):
         clean["last_upgrade"] = {"status": upgrade.get("status") if upgrade.get("status") in ("succeeded", "rolled_back", "failed") else "failed",

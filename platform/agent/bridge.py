@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from vaio.install_options import SS_METHODS
-from vaio.common import MUTATIONS, config_revision, validate_platform_task, validate_task, validate_upgrade_task
+from vaio.common import MUTATIONS, PROTOCOLS, config_revision, validate_platform_task, validate_task, validate_upgrade_task
 from .addresses import discover
 from .config_details import config_details
 from .inventory import mutable, read_db, rows, service_for, users_for
@@ -229,6 +229,12 @@ class Bridge:
             if action in MUTATIONS and task["revision"] != config_revision(db):
                 raise ValueError("节点配置已变化，已拒绝过期任务；请刷新后重新操作")
             before = None if action == "install" else self.find(db, core, proto, task["port"])
+            if action == "share" and before and (proto not in PROTOCOLS or not mutable(core, proto, before)):
+                # Instances outside the Agent's adapters: the node script builds the member's link.
+                if self.script_api is None:
+                    raise ValueError("节点脚本接口不可用，无法生成连接信息")
+                host = task["params"].get("host") or (lambda a: a.get("ipv4") or a.get("ipv6"))(discover())
+                return {"connection": self.script_api.share({"core": core, "protocol": proto, "port": task["port"]}, task["params"]["name"], host)}
             if before and not mutable(core, proto, before):
                 raise ValueError("该实例首版仅支持查看")
             if before and proto.startswith("snell") and before.get("snell_id") and not re.fullmatch(r"[0-9a-f]{24}", str(before["snell_id"])):
@@ -347,6 +353,9 @@ class Bridge:
                         for field in ("uuid", "password", "psk"):
                             if old_credential is not None and after.get(field) == old_credential:
                                 after[field] = user["uuid"]
+            if action == "install" and db.get("meta", {}).get("user_authority") == "platform":
+                # Platform-managed nodes get an empty instance; users are assigned through the platform.
+                after["users"] = []
             if after:
                 for billing_user in users_for(after):
                     advance(billing_user)

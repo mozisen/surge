@@ -67,6 +67,13 @@ reply = api.write({'ops': [{'op': 'update', 'account_id': account, 'base_rev': d
 assert reply['status'] == 'succeeded', reply
 assert api.result(task)['status'] == 'succeeded'
 assert api.result(str(uuid.uuid4()))['code'] == 'result_not_found'
+link = api.share({'core': 'xray', 'protocol': 'vless', 'port': 443}, 'bob', '203.0.113.5')
+assert link.startswith('vless://') and '203.0.113.5:443' in link and 'BOB_SECRET' in link, link
+try:
+    api.share({'core': 'xray', 'protocol': 'vless', 'port': 443}, 'nobody', '203.0.113.5')
+    raise AssertionError('unknown member shared')
+except ValueError:
+    pass
 PY
 [[ "$(jq -r --arg a "$A" '.accounts[$a].note' /etc/vless-reality/db.json)" == agent ]] || fail $LINENO
 echo 'PASS agent ScriptAPI against the vendored script'
