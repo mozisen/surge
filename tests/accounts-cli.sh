@@ -6,9 +6,11 @@ fail() { echo "FAIL line $1"; exit 1; }
 repo=$(cd "$(dirname "$0")/.." && pwd)
 if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 401 )) || [[ $EUID -ne 0 ]] || [[ -e /etc/vless-reality ]]; then
     echo 'SKIP accounts CLI integration (needs root, Bash 4.1+ and an unused /etc/vless-reality)'
+    # GitHub Actions must really run it; a silent skip there would hide a broken setup.
+    [[ "${CI:-}" != true ]] || fail $LINENO
     exit 0
 fi
-command -v flock >/dev/null || { echo 'SKIP accounts CLI integration (needs flock)'; exit 0; }
+command -v flock >/dev/null || { echo 'SKIP accounts CLI integration (needs flock)'; [[ "${CI:-}" != true ]] || fail $LINENO; exit 0; }
 trap 'rm -rf /etc/vless-reality' EXIT
 mkdir -p /etc/vless-reality
 cat > /etc/vless-reality/db.json <<'JSON'
