@@ -881,11 +881,17 @@ async function historyDialog() {
     });
     const charts = [['系统负载', x=>x.load], ['内存使用率（%）', x=>x.memory_total?100*x.memory_used/x.memory_total:null], ['磁盘使用率（%）',x=>x.disk_total?100*x.disk_used/x.disk_total:null], ['网卡接收速率（Mbps）',x=>x.network_rx_rate], ['网卡发送速率（Mbps）',x=>x.network_tx_rate]];
     const end = Date.now()/1000, start=end-86400;
+    const tick = n => String(Number(n.toFixed(n >= 100 ? 0 : n >= 1 ? 1 : 2)));
+    const stamp = t => new Date(t * 1000).toLocaleString('zh-CN', {hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'});
     const content=charts.map(([title,value])=>{
         const points=data.samples.filter(x=>Number.isFinite(value(x))), peak=Math.max(0,...points.map(value)), max=Math.max(1,peak);
         let d='',previous=0;
-        for(const x of points) { const px=((x.at-start)/86400*600).toFixed(2), py=(105-value(x)/max*90).toFixed(2); d+=(x.at-previous>120?'M':'L')+px+','+py+' ';previous=x.at; }
-        return `<section class="history-chart"><h3>${title}</h3>${points.length?`<p class="helper">最新 ${value(points[points.length-1]).toFixed(2)} · 最高 ${peak.toFixed(2)} · ${points.length} 个采样点</p><svg viewBox="0 0 600 120" role="img" aria-label="${title}过去24小时变化"><path d="${d}" fill="none" stroke="currentColor" stroke-width="2"/></svg>`:'<p>暂无采样数据</p>'}</section>`;
+        const segments=[];
+        for(const x of points) { const px=((x.at-start)/86400*600).toFixed(2), py=(105-value(x)/max*90).toFixed(2); if(x.at-previous>120) segments.push([]); segments[segments.length-1].push([px,py]); d+=(x.at-previous>120?'M':'L')+px+','+py+' ';previous=x.at; }
+        // Area under each continuous run, closed to the baseline separately so gaps stay empty.
+        const area=segments.map(seg=>`M${seg[0][0]},105 ${seg.map(([px,py])=>'L'+px+','+py).join(' ')} L${seg[seg.length-1][0]},105 Z`).join(' ');
+        const unit=(title.match(/（(.+)）/)||[])[1]||'';
+        return `<section class="history-chart"><div class="chart-head"><div><h3>${title}</h3>${points.length?`<p class="helper">最新 ${value(points[points.length-1]).toFixed(2)} · 最高 ${peak.toFixed(2)} · ${points.length} 个采样点</p>`:''}</div>${points.length?`<div class="chart-reading">${reading(value(points[points.length-1]).toFixed(2), unit)}</div>`:''}</div>${points.length?`<div class="chart-plot"><svg viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="${title}过去24小时变化"><path class="chart-area" d="${area}"/><g class="chart-grid"><line x1="0" x2="600" y1="15" y2="15"/><line x1="0" x2="600" y1="60" y2="60"/><line class="chart-base" x1="0" x2="600" y1="105" y2="105"/></g><path class="chart-line" d="${d}"/></svg><span class="chart-tick tick-max">${tick(max)}</span><span class="chart-tick tick-half">${tick(max/2)}</span><span class="chart-tick tick-zero">0</span></div><div class="chart-time"><span>${stamp(start)}</span><span>${stamp(end)}</span></div>`:'<p>暂无采样数据</p>'}</section>`;
     }).join('');
     modal('资源历史 · '+selected.name, `<p class="helper">过去 24 小时，每分钟采样一次；保留 7 天数据。断线时间段留空。</p>${content}<p class="helper">${date(start)} — ${date(end)}</p>`, true);
 }

@@ -1551,8 +1551,24 @@ pre {
 }
 
 .history-chart {
-    padding: 16px 0;
+    padding: 18px 0;
     border-bottom: 1px solid var(--line-soft);
+}
+
+.history-chart:last-of-type {
+    border-bottom: 0;
+}
+
+.chart-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 4px 16px;
+    margin-bottom: 10px;
+}
+
+.chart-head > div:first-child {
+    min-width: 0;
 }
 
 .history-chart h3 {
@@ -1560,11 +1576,93 @@ pre {
     font-size: 14px;
 }
 
+.chart-head .helper {
+    margin: 2px 0 0;
+}
+
+.chart-reading {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    flex-shrink: 0;
+    color: var(--ink);
+    line-height: 1.2;
+}
+
+.chart-reading .reading-value {
+    font-size: 20px;
+}
+
+/* Plot: the SVG stretches to the width; tick labels are HTML so they never distort. */
+.chart-plot {
+    position: relative;
+    padding-right: 44px;
+}
+
 .history-chart svg {
     display: block;
     width: 100%;
-    height: auto;
+    height: 120px;
     color: var(--ink);
+    overflow: visible;
+}
+
+.chart-grid line {
+    stroke: var(--line);
+    stroke-dasharray: 2 3;
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+}
+
+.chart-grid .chart-base {
+    stroke: #b3b3b3;
+    stroke-dasharray: none;
+}
+
+.chart-area {
+    fill: var(--line-soft);
+    stroke: none;
+}
+
+.chart-line {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+}
+
+/* Grid lines sit at y = 15 / 60 / 105 of the 120-unit viewBox. */
+.chart-tick {
+    position: absolute;
+    right: 0;
+    width: 38px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1;
+    transform: translateY(-50%);
+}
+
+.tick-max {
+    top: 12.5%;
+}
+
+.tick-half {
+    top: 50%;
+}
+
+.tick-zero {
+    top: 87.5%;
+}
+
+.chart-time {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 4px 44px 0 0;
+    color: var(--muted);
+    font-size: 11px;
 }
 
 .traffic-note {
@@ -2127,6 +2225,11 @@ dialog.install .install-warning {
     .install-intro-head {
         flex-direction: column;
         gap: 8px;
+    }
+
+    .chart-head {
+        flex-direction: column;
+        align-items: flex-start;
     }
 }
 
