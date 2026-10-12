@@ -18,7 +18,11 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "10-12-script-user-authority",
+    "10-12-agent-authority-upgrade",
+    "10-12-panel-authority-upgrade"
+  ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
