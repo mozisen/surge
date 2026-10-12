@@ -80,7 +80,7 @@ meter(label, percent)           // 10 segments; known -> role="meter" + aria-val
 
 ### Convention: user management lives after the test slices
 
-**What**: the user management section (`usersPage`, `userDetail`, `userForm`, `linkDialog`, `membersDialog`, `userAction`, `userTraffic`) is appended at the end of `app.js` behind the marker comment `// ---------------------------------------------------------------- 用户管理（平台用户）`. `tests/platform-users.cjs` slices from that marker to the end of the file and stubs `esc/bytes/names/icon/meter/stat/shell/modal/api/post/$/nodes/location/submitTask`.
+**What**: the user management section (`usersPage`, `userDetail`, `userForm`, `linkDialog`, `membersDialog`, `userAction`, `userTraffic`) is appended at the end of `app.js` behind the marker comment `// ---------------------------------------------------------------- 用户管理（平台用户）`. `tests/platform-users.cjs` slices from that marker to the end of the file and stubs `esc/bytes/date/names/icon/meter/stat/shell/modal/api/post/$/nodes/location/submitTask`. Node authority (`authorityBlock`, `authorityDialog`) and one-click upgrade (`upgradeDialog`) live in the same section.
 
 **Why**: `trafficPage()` may not call outside helpers, so the per-user traffic table is a separate `userTraffic()` that inserts `#user-traffic` before `.footer-note` after `trafficPage()` renders (also after `traffic-node`). Keep new user-management code after the marker; keep the `pu-` prefix for its `data-action` values (dispatched by `userAction`).
 
