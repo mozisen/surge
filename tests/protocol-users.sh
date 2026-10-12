@@ -16,7 +16,7 @@ load() {
     [[ -n "$body" ]] || { echo "missing $1"; exit 1; }
     eval "$body"
 }
-for fn in _proto_user_mode _proto_user_stats _proto_user_available _proto_user_modes_json _proto_user_hint \
+for fn in _proto_user_mode _proto_user_stats _proto_user_available _proto_user_modes_json _proto_user_hint _is_stls_protocol \
     _ss2022_is_multi _ss2022_active_users _platform_render_inbound add_xray_inbound_v2 \
     _account_jq_defs _account_valid_id _account_valid_name _account_valid_date _account_new_id _account_proto_supported \
     db_account_get db_account_find db_account_create db_account_member_add db_account_member_new _account_assign_single \
@@ -48,12 +48,12 @@ done
 echo '{"xray":{},"singbox":{},"meta":{}}' > "$DB_FILE"
 modes=$(_proto_user_modes_json)
 [[ "$(jq 'keys | length' <<< "$modes")" == 22 ]] || fail $LINENO
-[[ "$(jq -r '"\(.vless.available)|\(.socks.available)|\(.naive.mode)|\(."snell-v5".available)|\(.snell.available)"' <<< "$modes")" == "true|false|none|true|false" ]] || fail $LINENO
+[[ "$(jq -r '"\(.vless.available)|\(.socks.available)|\(.naive.mode)|\(."snell-v5".available)|\(.snell.available)"' <<< "$modes")" == "true|true|none|true|false" ]] || fail $LINENO
 : > "$fixture/messages"
 _proto_user_hint naive; _proto_user_hint snell-v5; _proto_user_hint socks; _proto_user_hint vless
 grep -q '该协议不支持用户管理' "$fixture/messages" || fail $LINENO
 grep -q '一用户一实例' "$fixture/messages" || fail $LINENO
-grep -q '暂未接入用户管理' "$fixture/messages" || fail $LINENO
+[[ "$(grep -c '一用户一实例' "$fixture/messages")" == 2 ]] || fail $LINENO
 [[ "$(wc -l < "$fixture/messages" | tr -d ' ')" == 3 ]] || fail $LINENO
 echo 'PASS capability table covers all 22 protocols, socks noauth is none, install hints'
 

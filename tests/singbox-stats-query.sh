@@ -38,6 +38,8 @@ echo 'PASS detects omitted VLESS/Trojan stats users in existing configuration'
 _ensure_singbox_default_users() { :; }
 check_monthly_traffic_reset() { :; }
 accounts_apply() { :; }
+_stls_sync_traffic() { :; }
+_socks_sync_inbound_stats() { :; }
 _snell_sync_traffic() { :; }
 _sync_ss_inbound_traffic() { :; }
 check_daily_report() { :; }
