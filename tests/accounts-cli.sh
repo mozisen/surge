@@ -70,3 +70,14 @@ assert api.result(str(uuid.uuid4()))['code'] == 'result_not_found'
 PY
 [[ "$(jq -r --arg a "$A" '.accounts[$a].note' /etc/vless-reality/db.json)" == agent ]] || fail $LINENO
 echo 'PASS agent ScriptAPI against the vendored script'
+
+# 切换用户管理方式：脚本模式拒绝写用户；接管时清空用户与凭据（真实进程）
+out=$(call '{"api_version":1,"request_id":"cli-to-script","action":"account_apply","params":{"ops":[{"op":"set_authority","mode":"script"}]}}')
+[[ "$(jq -r '"\(.status)|\(.data.user_authority)"' <<< "$out")" == "succeeded|script" ]] || { echo "$out"; fail $LINENO; }
+out=$(call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"cli-denied",action:"account_apply",params:{ops:[{op:"reset_usage",account_id:$a}]}}')")
+[[ "$(jq -r .code <<< "$out")" == authority_script ]] || fail $LINENO
+out=$(call '{"api_version":1,"request_id":"cli-takeover","action":"account_apply","params":{"ops":[{"op":"set_authority","mode":"platform"}]}}')
+[[ "$(jq -r '"\(.status)|\(.data.user_authority)"' <<< "$out")" == "succeeded|platform" ]] || { echo "$out"; fail $LINENO; }
+[[ "$(jq -r '"\(.xray.vless.users | length)|\(.accounts)"' /etc/vless-reality/db.json)" == "0|null" ]] || fail $LINENO
+! grep -q SECRET /etc/vless-reality/db.json || fail $LINENO
+echo 'PASS real CLI process: authority switch, script-mode rejection, takeover clears users and credentials'
