@@ -23,7 +23,7 @@ for fn in _account_jq_defs _account_valid_id _account_valid_name _account_valid_
     _db_apply db_get_user_field db_list_users is_standalone_protocol _is_snell_users_protocol \
     _api_reply _api_inventory _api_dispatch _api_sha256 _api_account_validate _api_account_precheck _api_account_execute \
     _api_account_backup_files _api_account_restore _api_account_store _api_account_apply _api_account_result \
-    _api_txn_lock _api_txn_unlock; do
+    _api_txn_lock _api_txn_unlock db_authority_get _authority_rows _authority_new_secret _authority_apply; do
     load "$fn"
 done
 API_ACCOUNT_OPS=$(sed -n 's/^API_ACCOUNT_OPS="\(.*\)"$/\1/p' "$repo/vless-server.sh")
@@ -59,13 +59,14 @@ cat > "$DB_FILE" <<'JSON'
 {"xray":{"vless":{"port":443,"uuid":"ROW_SECRET","users":[{"name":"default","uuid":"ROW_SECRET","enabled":true,"used":0}]},
  "trojan":[{"port":1,"password":"T_SECRET","users":[{"name":"bob","uuid":"BOB_SECRET","used":30,"enabled":true}]}],
  "snell-v5":[{"port":9001,"psk":"S_SECRET","snell_id":"aaaaaaaaaaaaaaaaaaaaaaaa","users":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaa","name":"sam","uuid":"S_SECRET","used":5,"enabled":true}]}]},
- "singbox":{"hy2":{"port":8443,"password":"HY_SECRET","users":[]}},"meta":{}}
+ "singbox":{"hy2":{"port":8443,"password":"HY_SECRET","users":[]}},"meta":{"user_authority":"platform"}}
 JSON
 
 # 1. 能力声明：协议级写入仍关闭，统一用户接口单独声明
 call '{"api_version":1,"request_id":"cap","action":"capabilities"}' $LINENO
-[[ "$(out '.data.write_actions == [] and .data.stage == "read_only_foundation" and .data.accounts_api.version == 1')" == true ]] || fail $LINENO
-[[ "$(out '.data.accounts_api.ops | index("member_claim") != null')" == true ]] || fail $LINENO
+[[ "$(out '.data.write_actions == [] and .data.stage == "read_only_foundation" and .data.accounts_api.version == 2')" == true ]] || fail $LINENO
+[[ "$(out '.data.accounts_api.ops | index("member_claim") != null and index("set_authority") != null')" == true ]] || fail $LINENO
+[[ "$(out '"\(.data.accounts_api.version)|\(.data.user_authority)"')" == "2|platform" ]] || fail $LINENO
 echo 'PASS capabilities keep protocol writes closed and declare accounts API'
 
 # 2. 创建（带成员与平台关联），结果与 inventory
@@ -185,3 +186,20 @@ call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"del",action:"account_app
 call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"gone",action:"account_apply",params:{ops:[{op:"reset_usage",account_id:$a}]}}')" $LINENO
 [[ "$(out .code)" == account_not_found ]] || fail $LINENO
 echo 'PASS claim, platform block, credential reset, Snell limits, delete keeps members'
+
+# 10. 以脚本为准时拒绝写用户，只允许切换方式；切换必须单独成请求
+_db_apply '.meta.user_authority = "script"'
+before=$(cat "$DB_FILE")
+call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"in-script",action:"account_apply",params:{ops:[{op:"reset_usage",account_id:$a}]}}')" $LINENO
+[[ "$(out .code)" == authority_script && "$(cat "$DB_FILE")" == "$before" ]] || fail $LINENO
+call "$(jq -nc --arg a "$A" '{api_version:1,request_id:"mixed",action:"account_apply",params:{ops:[{op:"set_authority",mode:"platform"},{op:"reset_usage",account_id:$a}]}}')" $LINENO
+[[ "$(out .code)" == invalid_request ]] || fail $LINENO
+call '{"api_version":1,"request_id":"take","action":"account_apply","params":{"ops":[{"op":"set_authority","mode":"platform"}]}}' $LINENO
+[[ "$(out '"\(.status)|\(.data.user_authority)"')" == "succeeded|platform" ]] || { cat "$fixture/out"; fail $LINENO; }
+[[ "$(q '[.xray.trojan[0].users, .singbox.hy2.users] | map(length) | add')" == 0 && "$(q .xray.trojan[0].password)" != T_SECRET ]] || fail $LINENO
+! grep -q '_SECRET' "$DB_FILE" || fail $LINENO
+call '{"api_version":1,"request_id":"inv2","action":"inventory"}' $LINENO
+[[ "$(out .data.user_authority)" == platform ]] || fail $LINENO
+call '{"api_version":1,"request_id":"back","action":"account_apply","params":{"ops":[{"op":"set_authority","mode":"script"}]}}' $LINENO
+[[ "$(out '"\(.status)|\(.data.user_authority)"')" == "succeeded|script" ]] || fail $LINENO
+echo 'PASS set_authority: script mode rejects user writes, takeover clears credentials, switch back'

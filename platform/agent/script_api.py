@@ -85,7 +85,8 @@ class ScriptAPI:
             # Do not forward arbitrary API fields, users, resources, or revision.
             # Script snapshot revisions include traffic and are not task revisions.
             accounts = c.get('accounts_api')
-            accounts_ready = isinstance(accounts, dict) and accounts.get('version') == 1 \
+            # Version 2 adds set_authority; the account operations of version 1 are unchanged.
+            accounts_ready = isinstance(accounts, dict) and accounts.get('version') in (1, 2) \
                 and isinstance(accounts.get('actions'), list) and 'account_apply' in accounts['actions']
             self.cached = {'status': 'ready', 'version': version, 'stage': 'read_only',
                            'protocol_count': len(protocols), 'instance_count': len(instances),

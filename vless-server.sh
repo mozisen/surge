@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.4"
+readonly VERSION="3.7.4-preview.5"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2240,6 +2240,139 @@ db_account_reset_credentials() {
     done <<< "$(db_account_members "$id")"
     [[ -n "$reloads" ]] || { _err "没有可重置的成员"; return 1; }
     _accounts_reload_or_queue "$reloads"
+}
+
+
+#═══════════════════════════════════════════════════════════════════════════════
+#  用户管理方式：以脚本为准 / 以平台为准（二选一）
+#═══════════════════════════════════════════════════════════════════════════════
+# meta.user_authority = script（缺省）| platform。平台模式下用户只由 Vaio 平台写入，
+# 本机菜单只读；切换到平台时清空全部用户数据（用户、凭据、统一用户、TG 绑定、
+# 用户路由、配额与到期），协议实例保留但没有可用用户。
+
+db_authority_get() {
+    local mode=""
+    [[ -f "$DB_FILE" ]] && mode=$(jq -r '.meta.user_authority // "script"' "$DB_FILE" 2>/dev/null)
+    [[ "$mode" == platform ]] && echo platform || echo script
+}
+
+# 平台模式下的菜单写操作守卫：返回 1 表示已提示并应停止
+_authority_guard() {
+    [[ "$(db_authority_get)" == platform ]] || return 0
+    _warn "本节点的用户由 Vaio 平台管理，本机菜单只读"
+    _info "请在面板「用户管理」中操作；如需本机管理，请在 用户管理 → 用户管理方式 中切回脚本"
+    return 1
+}
+
+# 受用户管理的实例：Xray / Sing-box 的非独立协议，以及已迁移为一用户一实例的 Snell。
+# 输出 core|protocol|index|port|method|fields（index 为多端口数组下标，单对象为 -1）
+_authority_rows() {
+    local core proto index port method fields
+    while IFS='|' read -r core proto index port method fields; do
+        [[ -z "$core" ]] && continue
+        if _is_snell_users_protocol "$proto"; then
+            _snell_managed "$proto" || continue
+        elif is_standalone_protocol "$proto"; then
+            continue
+        fi
+        echo "$core|$proto|$index|$port|$method|$fields"
+    done <<< "$(jq -r '["xray", "singbox"][] as $c | (.[$c] // {}) | to_entries[] | .key as $p | .value as $v |
+        (if ($v | type) == "array" then [range($v | length) | {i: ., r: $v[.]}] else [{i: -1, r: $v}] end)[] |
+        select(.r | type == "object") |
+        "\($c)|\($p)|\(.i)|\(.r.port)|\(.r.method // "")|\([("uuid", "password", "psk") as $f | select(.r[$f] != null) | $f] | join(","))"' "$DB_FILE")"
+}
+
+# 将删除的用户数（按协议实例），用于确认提示。输出 core|protocol|port|count
+_authority_user_counts() {
+    local core proto index port method fields
+    while IFS='|' read -r core proto index port method fields; do
+        [[ -z "$core" ]] && continue
+        echo "$core|$proto|$port|$(jq -r --arg c "$core" --arg p "$proto" --argjson i "$index" '
+            (if $i < 0 then .[$c][$p] else .[$c][$p][$i] end) |
+            if (.users | type) == "array" then (.users | length) elif ((.uuid // .password // .psk) != null) then 1 else 0 end' "$DB_FILE")"
+    done <<< "$(_authority_rows)"
+}
+
+# 生成与原字段同类的新随机凭据，保证旧凭据全部失效
+_authority_new_secret() {
+    local proto="$1" field="$2" method="$3"
+    if [[ "$field" == uuid ]]; then
+        gen_uuid | tr 'A-F' 'a-f'
+    elif [[ "$proto" == ss2022 && "$field" == password ]]; then
+        if [[ "$method" == *256* || "$method" == *chacha20* ]]; then head -c 32 /dev/urandom | base64 | tr -d '\n'
+        else head -c 16 /dev/urandom | base64 | tr -d '\n'; fi
+    else
+        openssl rand -hex 16
+    fi
+}
+
+# 切换数据（不含备份）：platform 清空用户，script 解除平台关联。
+# 重建通过 _accounts_reload_or_queue，接口事务内会延后统一执行。
+_authority_apply() {
+    local mode="$1" core proto index port method fields field value replacements="[]" targets="[]" reloads="" snell=""
+    case "$mode" in
+        script)
+            _db_apply --arg at "$(date +%s)" '.meta.user_authority = "script" | .meta.user_authority_at = ($at | tonumber) |
+                .accounts = ((.accounts // {}) | map_values(del(.platform_user_id, .platform_block)))' || return 1
+            accounts_apply
+            return $?
+            ;;
+        platform) ;;
+        *) _err "用户管理方式无效"; return 1 ;;
+    esac
+    while IFS='|' read -r core proto index port method fields; do
+        [[ -z "$core" ]] && continue
+        targets=$(jq -c --arg c "$core" --arg p "$proto" --argjson i "$index" '. + [{c: $c, p: $p, i: $i}]' <<< "$targets")
+        for field in ${fields//,/ }; do
+            value=$(_authority_new_secret "$proto" "$field" "$method")
+            [[ -n "$value" ]] || { _err "凭据生成失败"; return 1; }
+            replacements=$(jq -c --arg c "$core" --arg p "$proto" --argjson i "$index" --arg f "$field" --arg v "$value" \
+                '. + [{c: $c, p: $p, i: $i, f: $f, v: $v}]' <<< "$replacements")
+        done
+        if _is_snell_users_protocol "$proto"; then
+            [[ " $snell " == *" $proto "* ]] || snell+=" $proto"
+        else
+            reloads+="$core|$proto"$'\n'
+        fi
+    done <<< "$(_authority_rows)"
+    # users 置为空数组而不是删除，避免旧的单用户实例回退成 row 级 default 凭据。
+    _db_apply --argjson rep "$replacements" --argjson targets "$targets" --arg at "$(date +%s)" '
+        reduce $rep[] as $r (.;
+            if $r.i < 0 then .[$r.c][$r.p][$r.f] = $r.v else .[$r.c][$r.p][$r.i][$r.f] = $r.v end) |
+        reduce $targets[] as $r (.;
+            if $r.i < 0 then .[$r.c][$r.p].users = [] else .[$r.c][$r.p][$r.i].users = [] end) |
+        del(.accounts, .meta.accounts_reload_pending) |
+        .meta.user_authority = "platform" | .meta.user_authority_at = ($at | tonumber)' || return 1
+    for proto in $snell; do reloads+="xray|$proto"$'\n'; done
+    _accounts_reload_or_queue "$reloads"
+}
+
+# 菜单入口：带备份与回滚的切换
+db_authority_set() {
+    local mode="$1" backup f
+    [[ "$mode" == platform || "$mode" == script ]] || return 1
+    [[ "$(db_authority_get)" != "$mode" ]] || return 0
+    [[ "$mode" == platform ]] || { _authority_apply script; return $?; }
+    backup="$CFG/authority-backups/$(date +%s)"
+    mkdir -p "$backup" && chmod 700 "$CFG/authority-backups" "$backup" && cp -p "$DB_FILE" "$backup/db.json" || return 1
+    _api_account_backup_files > "$backup/files"
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        cp -p "$f" "$backup/$(printf '%s' "$f" | _api_sha256)" || return 1
+    done < "$backup/files"
+    ACCOUNTS_DEFERRED=""; ACCOUNTS_DEFER_RELOAD=1
+    if _authority_apply platform; then
+        ACCOUNTS_DEFER_RELOAD=""
+        if _accounts_reload_or_queue "$ACCOUNTS_DEFERRED"; then
+            return 0
+        fi
+        _api_account_restore "$backup" "$ACCOUNTS_DEFERRED" || _err "恢复后重建未全部成功，请检查服务状态；备份 $backup"
+    else
+        ACCOUNTS_DEFER_RELOAD=""
+        _api_account_restore "$backup" "" || true
+    fi
+    _err "切换失败，已恢复原用户数据；备份 $backup"
+    return 1
 }
 
 
@@ -28468,6 +28601,7 @@ _select_user_routing() {
 
 # 修改用户路由
 _set_user_routing() {
+    _authority_guard || return 1
     if _is_snell_users_protocol "$2"; then
         _info "官方 Snell 实例不使用 Xray/Sing-box 用户路由，请使用 Snell 实例设置"
         return 0
@@ -28521,6 +28655,7 @@ _set_user_routing() {
 
 # 添加用户
 _add_user() {
+    _authority_guard || return 1
     local core="$1" proto="$2"
     if _is_snell_users_protocol "$proto"; then
         _snell_add_user "$proto"
@@ -28671,6 +28806,7 @@ _add_user() {
 
 # 删除用户
 _delete_user() {
+    _authority_guard || return 1
     local core="$1" proto="$2"
     local proto_name=$(get_protocol_name "$proto")
     
@@ -28732,6 +28868,7 @@ _delete_user() {
 
 # 设置用户配额
 _set_user_quota() {
+    _authority_guard || return 1
     local core="$1" proto="$2"
     local proto_name=$(get_protocol_name "$proto")
     
@@ -28790,6 +28927,7 @@ _set_user_quota() {
 
 # 重置用户流量
 _reset_user_traffic() {
+    _authority_guard || return 1
     local core="$1" proto="$2"
     local proto_name=$(get_protocol_name "$proto")
     
@@ -28856,6 +28994,7 @@ _reset_user_traffic() {
 
 # 启用/禁用用户
 _toggle_user() {
+    _authority_guard || return 1
     local core="$1" proto="$2"
     local proto_name=$(get_protocol_name "$proto")
     
@@ -28917,6 +29056,7 @@ _toggle_user() {
 
 # 设置用户到期日期
 _set_user_expire_date() {
+    _authority_guard || return 1
     local core="$1" proto="$2"
     local proto_name=$(get_protocol_name "$proto")
     
@@ -29319,6 +29459,7 @@ _select_tg_bind_user() {
 }
 
 _tg_generate_user_bind_code() {
+    _authority_guard || return 1
     _select_tg_bind_user || return
     local token token_hash expires_at
     token=$(tg_generate_bind_token)
@@ -29360,6 +29501,7 @@ _tg_show_user_bindings() {
 }
 
 _tg_unbind_user() {
+    _authority_guard || return 1
     local bindings
     bindings=$(db_list_tg_user_bindings)
     [[ -n "$bindings" ]] || { _warn "暂无已绑定用户"; return; }
@@ -30433,6 +30575,10 @@ manage_accounts() {
         _item "0" "返回"
         _line
         read -rp "  请选择: " choice
+        if [[ "$choice" =~ ^[1-57-9mMuU]$ ]] && ! _authority_guard; then
+            _pause
+            continue
+        fi
         case "$choice" in
             1) _account_create_interactive ;;
             2) _account_select && _account_edit_interactive "$SELECTED_ACCOUNT"; continue ;;
@@ -30471,6 +30617,35 @@ manage_accounts() {
     done
 }
 
+# 切换用户管理方式（脚本 / 平台）
+_authority_menu() {
+    local mode counts core proto port count total=0 confirm
+    mode=$(db_authority_get)
+    echo ""
+    _line
+    echo -e "  ${W}用户管理方式${NC}  当前：$([[ "$mode" == platform ]] && echo "以 Vaio 平台为准" || echo "以本机脚本为准")"
+    _line
+    if [[ "$mode" == script ]]; then
+        counts=$(_authority_user_counts)
+        echo -e "  切换为「以平台为准」后，本机全部用户数据将被清除："
+        while IFS='|' read -r core proto port count; do
+            [[ -z "$core" ]] && continue
+            echo -e "   • $(get_protocol_name "$proto") 端口 $port：$count 个用户"
+            total=$((total + count))
+        done <<< "$counts"
+        echo -e "  ${R}共 $total 个用户及其凭据、统一用户、TG 绑定、用户路由、配额与到期都会删除，现有客户端全部失效。${NC}"
+        echo -e "  ${D}协议实例保留；之后由 Vaio 面板「用户管理」新建用户，本机菜单只读。${NC}"
+        read -rp "  输入 CLEAR 确认切换: " confirm
+        [[ "$confirm" == CLEAR ]] || { _info "已取消"; return 0; }
+        db_authority_set platform && _ok "已切换为以平台为准；请在面板「用户管理」中新建用户"
+    else
+        echo -e "  切回「以脚本为准」后，平台停止管理本节点；现有用户和凭据保留，改由本机菜单管理。"
+        read -rp "  确认切回? [y/N]: " confirm
+        [[ "$confirm" =~ ^[yY]$ ]] || return 0
+        db_authority_set script && _ok "已切回以脚本为准"
+    fi
+}
+
 manage_users() {
     while true; do
         _header
@@ -30491,8 +30666,12 @@ manage_users() {
             done <<< "$protocols"
         fi
         
+        if [[ "$(db_authority_get)" == platform ]]; then
+            echo -e "  ${Y}用户由 Vaio 平台管理，本机菜单只读${NC}"
+        fi
         _line
         _item "a" "统一用户（一人多协议，统一到期与流量）"
+        _item "m" "用户管理方式（当前：$([[ "$(db_authority_get)" == platform ]] && echo 平台 || echo 脚本)）"
         _line
         _item "1" "查看用户列表"
         _item "2" "添加用户"
@@ -30587,6 +30766,10 @@ manage_users() {
                 ;;
             a|A)
                 manage_accounts
+                ;;
+            m|M)
+                _authority_menu
+                _pause
                 ;;
             t|T)
                 _configure_tg_notify
@@ -32005,6 +32188,7 @@ NFT
 }
 
 _snell_edit_user() {
+    _authority_guard || return 1
     local proto="$1" name row id port psk dns mode="" tfo staged oldfile updated confirm
     _snell_managed "$proto" || { _err "请先通过添加用户启用 Snell 多用户"; return 1; }
     _show_users_list xray "$proto"
@@ -32115,6 +32299,7 @@ _api_inventory() {
          resources:{ownership_verified:false},
          users:[(.users // [])[] | {name:.name,enabled:.enabled,quota:.quota,used:.used,expire_date:.expire_date,account_id:(.account_id // null)}]}
       ],
+      user_authority:(.meta.user_authority // "script"),
       accounts:(. as $db | ($db.accounts // {}) | with_entries(.key as $id | .value |= {
         name, note:(.note // ""), enabled:(.enabled != false), expire_date:(.expire_date // ""), quota:(.quota // 0),
         reset_day:(.reset_day // 0), cycle:(.cycle // ""), cycle_used:(.cycle_used // 0), rev:(.rev // 0), mtime:(.mtime // {}),
@@ -32130,7 +32315,7 @@ _api_inventory() {
 # 统一用户写接口（accounts_api_version 1）。一个请求内的全部操作作为一个事务：
 # 互斥锁 → 幂等记录 → 备份 → 预检 → 逐项执行（重建延后）→ 统一重建 → 结果。
 # 任一步失败就恢复数据库与配置文件并重建，结果为 failed；恢复失败为 unknown。
-API_ACCOUNT_OPS="create update link unlink block member_add member_claim member_remove reset_credentials reset_usage delete"
+API_ACCOUNT_OPS="create update link unlink block member_add member_claim member_remove reset_credentials reset_usage delete set_authority"
 
 _api_txn_lock() {
     mkdir -p "$CFG" || return 1
@@ -32189,7 +32374,7 @@ _api_account_validate() {
         (if has("quota") then .quota | int(0; 9999999999999999) else true end) and
         (if has("reset_day") then .reset_day | int(0; 28) else true end);
       def mode: (. // "release") | (. == "release" or . == "delete");
-      def op_ok: type == "object" and (.account_id | uuid) and
+      def op_ok: type == "object" and if .op == "set_authority" then allowed(["op", "mode"]) and (.mode == "script" or .mode == "platform") else (.account_id | uuid) and
         if .op == "create" then allowed(["op", "account_id", "fields", "platform_user_id", "members"]) and
             (.fields | fields and has("name")) and (if has("platform_user_id") then .platform_user_id | uuid else true end) and
             ((.members // []) | type == "array" and length <= 50 and
@@ -32207,18 +32392,24 @@ _api_account_validate() {
         elif .op == "reset_credentials" then allowed(["op", "account_id", "member"]) and
             (if has("member") then (.member | allowed(["core", "protocol", "port", "name"]) and ({core, protocol, port} | target) and (.name | name)) else true end)
         elif .op == "delete" then allowed(["op", "account_id", "mode"]) and (.mode | mode)
-        else false end;
-      (.params | allowed(["ops"])) and (.params.ops | type == "array" and length >= 1 and length <= 200 and all(.[]; op_ok))
+        else false end end;
+      (.params | allowed(["ops"])) and (.params.ops | type == "array" and length >= 1 and length <= 200 and all(.[]; op_ok)) and
+        # 切换用户管理方式必须单独成请求
+        ((.params.ops | map(select(.op == "set_authority")) | length) == 0 or (.params.ops | length) == 1)
     ' <<< "$1" >/dev/null 2>&1
 }
 
 # 数据库预检：账户存在性、base_rev、协议支持范围。输出首个问题 "code|account_id|当前rev"。
 _api_account_precheck() {
     local request="$1" line op id proto mode
+    # 以脚本为准时，平台只能切换用户管理方式，不能写用户。
+    if [[ "$(db_authority_get)" != platform ]] && jq -e 'any(.params.ops[]; .op != "set_authority")' <<< "$request" >/dev/null; then
+        echo "authority_script||"; return 1
+    fi
     line=$(jq -r --slurpfile db "$DB_FILE" '
         ($db[0].accounts // {}) as $accounts |
         ([.params.ops[] | select(.op == "create") | .account_id]) as $created |
-        first(.params.ops[] | .account_id as $id |
+        first(.params.ops[] | select(.op != "set_authority") | .account_id as $id |
           if .op == "create" then
             (if $accounts[.account_id] != null then "account_exists|\(.account_id)|" else empty end)
           elif ($accounts[$id] == null and (($created | index($id)) == null)) then "account_not_found|\($id)|"
@@ -32236,7 +32427,7 @@ _api_account_precheck() {
         if [[ -n "$proto" ]] && ! _account_proto_supported "$proto"; then
             echo "unsupported_protocol|$id|"; return 1
         fi
-    done <<< "$(jq -r --slurpfile db "$DB_FILE" '.params.ops[] |
+    done <<< "$(jq -r --slurpfile db "$DB_FILE" '.params.ops[] | select(.op != "set_authority") |
         if .op == "create" then (.members // [])[] as $m | "create|\(.account_id)|\($m.target.protocol)|"
         elif .target then "\(.op)|\(.account_id)|\(.target.protocol)|\(.mode // "")"
         elif .op == "delete" then (.account_id as $id | .mode as $mode | ($db[0].accounts[$id].members // [])[] | "delete|\($id)|\(.protocol)|\($mode // "release")")
@@ -32292,6 +32483,7 @@ _api_account_execute() {
                 fi ;;
             reset_usage) db_account_reset_usage "$id" || return 1 ;;
             delete) db_account_delete "$id" "$(jq -r '.mode // "release"' <<< "$op")" || return 1 ;;
+            set_authority) _authority_apply "$(jq -r .mode <<< "$op")" || return 1 ;;
             *) return 1 ;;
         esac
     done
@@ -32367,7 +32559,7 @@ _api_account_apply() {
         ACCOUNTS_DEFER_RELOAD=""
         reloaded="$ACCOUNTS_DEFERRED"
         if _accounts_reload_or_queue "$ACCOUNTS_DEFERRED" >>"$log" 2>&1; then
-            data=$(jq -c --slurpfile db "$DB_FILE" '{accounts: ([.params.ops[].account_id] | unique | map({key: ., value: {rev: ($db[0].accounts[.].rev // null), exists: ($db[0].accounts[.] != null)}}) | from_entries)}' <<< "$request")
+            data=$(jq -c --slurpfile db "$DB_FILE" '{user_authority: ($db[0].meta.user_authority // "script"), accounts: ([.params.ops[].account_id | select(. != null)] | unique | map({key: ., value: {rev: ($db[0].accounts[.].rev // null), exists: ($db[0].accounts[.] != null)}}) | from_entries)}' <<< "$request")
             _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" --argjson d "$data" '{fingerprint:$f,status:"succeeded",data:$d}')"
             _api_txn_unlock
             _api_reply succeeded ok "$data"
@@ -32430,9 +32622,10 @@ _api_dispatch() {
     action=$(jq -r .action <<< "$request")
     case "$action" in
         capabilities)
-            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" --arg ops "$API_ACCOUNT_OPS" '
+            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" --arg ops "$API_ACCOUNT_OPS" --arg authority "$(db_authority_get)" '
               {stage:"read_only_foundation",actions:["capabilities","inventory","plan","result","account_apply"],write_actions:[],
-               accounts_api:{version:1,actions:["account_apply","result"],ops:($ops|split(" ")),
+               user_authority:$authority,
+               accounts_api:{version:2,actions:["account_apply","result"],ops:($ops|split(" ")),
                  transaction:true,idempotent:true,snell_member_add:false},
                protocols:([($x|split(" ")[])|{core:"xray",protocol:.,write_supported:false}] +
                  [($s|split(" ")[])|{core:"singbox",protocol:.,write_supported:false}] +

@@ -16,7 +16,7 @@ mkdir -p /etc/vless-reality
 cat > /etc/vless-reality/db.json <<'JSON'
 {"version":"4.0.0","xray":{"vless":{"port":443,"uuid":"ROW_SECRET","sni":"a.example","users":[
   {"name":"default","uuid":"ROW_SECRET","enabled":true,"used":0,"quota":0,"expire_date":""},
-  {"name":"bob","uuid":"BOB_SECRET","enabled":true,"used":7,"quota":0,"expire_date":""}]}},"singbox":{},"meta":{}}
+  {"name":"bob","uuid":"BOB_SECRET","enabled":true,"used":7,"quota":0,"expire_date":""}]}},"singbox":{},"meta":{"user_authority":"platform"}}
 JSON
 call() { printf '%s' "$1" | bash "$repo/vless-server.sh" --api 2>/dev/null || true; }
 A=11111111-1111-4111-8111-111111111111
@@ -24,7 +24,7 @@ B=33333333-3333-4333-8333-333333333333
 P=22222222-2222-4222-8222-222222222222
 
 out=$(call '{"api_version":1,"request_id":"cap","action":"capabilities"}')
-[[ "$(jq -r '.data.accounts_api.version' <<< "$out")" == 1 ]] || fail $LINENO
+[[ "$(jq -r '"\(.data.accounts_api.version)|\(.data.user_authority)"' <<< "$out")" == "2|platform" ]] || fail $LINENO
 
 req=$(jq -nc --arg a "$A" --arg p "$P" '{api_version:1,request_id:"cli-create",action:"account_apply",params:{ops:[
   {op:"create",account_id:$a,platform_user_id:$p,fields:{name:"bob",reset_day:1}},
@@ -60,7 +60,7 @@ from agent.script_api import ScriptAPI
 account = sys.argv[1]
 api = ScriptAPI()
 status = api.status()
-assert status['status'] == 'ready' and status['accounts_api'] == 1, status
+assert status['status'] == 'ready' and status['accounts_api'] >= 1, status
 db = __import__('json').load(open('/etc/vless-reality/db.json'))
 task = str(uuid.uuid4())
 reply = api.write({'ops': [{'op': 'update', 'account_id': account, 'base_rev': db['accounts'][account]['rev'], 'fields': {'note': 'agent'}}]}, task)

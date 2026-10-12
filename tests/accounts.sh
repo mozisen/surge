@@ -23,7 +23,7 @@ for fn in _account_jq_defs _account_valid_id _account_valid_name _account_valid_
     _account_member_guard _account_ask_expire _account_instances _account_claimable_users _account_reason_text \
     _account_show_list _account_select _account_show_detail _account_create_interactive _account_edit_interactive \
     _account_add_protocol_interactive _account_claim_interactive _account_pick_member _account_remove_member_interactive \
-    _account_member_share _account_share_interactive _account_merge_interactive manage_accounts format_bytes \
+    _account_member_share _account_share_interactive _account_merge_interactive manage_accounts format_bytes db_authority_get _authority_guard \
     _db_apply db_get_user_field db_list_users is_standalone_protocol _is_snell_users_protocol reset_monthly_user_traffic; do
     load "$fn"
 done
