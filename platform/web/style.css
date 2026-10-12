@@ -575,29 +575,38 @@ input[type="checkbox"] {
 
 .stat {
     min-width: 0;
-    padding: 18px 20px;
+    padding: 16px 20px 18px;
 }
 
 .stat + .stat {
     border-left: 1px solid var(--line);
 }
 
-.stat-top {
+.stat-label {
     color: var(--muted);
     font-size: 13px;
 }
 
-.stat-top svg {
-    display: none;
+.stat-value {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0 4px;
+    margin: 2px 0 4px;
+    color: var(--ink);
+    line-height: 1.25;
 }
 
-.stat-value {
-    margin: 4px 0 2px;
-    color: var(--ink);
+.reading-value {
     font-size: 32px;
     font-weight: 500;
-    line-height: 1.25;
     overflow-wrap: anywhere;
+}
+
+.reading-unit {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 400;
 }
 
 .stat-foot {
@@ -748,150 +757,188 @@ input[type="checkbox"] {
     min-width: 0;
 }
 
-/* ---------- Node cards (redrawn as rack rows in a later step) ---------- */
+/* ---------- Node list: rack rows ---------- */
 
-.node-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 16px;
-}
-
-.node-card {
-    position: relative;
-    padding: 18px;
+.node-list {
     background: var(--surface);
     border: 1px solid var(--line);
     border-radius: var(--r-panel);
-    transition: border-color .12s;
+    overflow: hidden;
 }
 
-.node-card:hover {
-    border-color: var(--ink);
+/* Every row shares one column template so fields line up down the list. */
+.node-row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 76px minmax(140px, 1.1fr) minmax(220px, 1.5fr) minmax(130px, .9fr) minmax(150px, 1.2fr) 76px;
+    grid-template-areas: "state name meters traffic protos count";
+    align-items: center;
+    gap: 8px 20px;
+    min-height: 68px;
+    padding: 12px 16px;
+    transition: background-color .12s;
 }
 
-.node-card h3 {
-    max-width: 80%;
+.node-row + .node-row {
+    border-top: 1px solid var(--line-soft);
+}
+
+.node-row:hover {
+    background: var(--canvas);
+}
+
+.node-state {
+    grid-area: state;
+}
+
+.node-name {
+    grid-area: name;
+    min-width: 0;
+}
+
+.node-name h3 {
     margin: 0;
-    font-size: 16px;
+    font-size: 14px;
+    line-height: 1.4;
     overflow-wrap: anywhere;
 }
 
-.node-card a {
+.node-name a {
     color: var(--ink);
 }
 
-.node-card a::after {
+/* The name link covers the whole row. */
+.node-name a::after {
     content: "";
     position: absolute;
     inset: 0;
-    border-radius: var(--r-panel);
 }
 
-.node-top {
+.node-name a:focus-visible {
+    outline: 0;
+}
+
+.node-name a:focus-visible::after {
+    outline: 2px solid var(--ink);
+    outline-offset: -2px;
+}
+
+.node-sub {
     display: flex;
+    flex-wrap: wrap;
+    gap: 0 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.node-sub span {
+    overflow-wrap: anywhere;
+}
+
+.node-meters {
+    grid-area: meters;
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.meter {
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr) 36px;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 12px;
-}
-
-.node-symbol {
-    display: grid;
-    place-items: center;
-    color: var(--muted);
-}
-
-.node-group {
-    margin: 2px 0 16px;
-    color: var(--muted);
+    gap: 8px;
     font-size: 12px;
 }
 
-.node-metrics {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-}
-
-.metric-caption {
-    display: flex;
-    justify-content: space-between;
+.meter-label {
     color: var(--muted);
-    font-size: 12px;
 }
 
-.metric-caption span:last-child {
+.meter-bar {
+    display: grid;
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+    gap: 2px;
+    max-width: 140px;
+}
+
+.meter-bar i {
+    height: 8px;
+    border-radius: 1px;
+    background: var(--line-soft);
+}
+
+.meter-bar i.on {
+    background: var(--ink);
+}
+
+.meter-value {
     color: var(--ink);
-}
-
-progress {
-    display: block;
-    width: 100%;
-    height: 4px;
-    margin: 6px 0 12px;
-    border: 0;
-    border-radius: 2px;
-    overflow: hidden;
-    background: var(--line-soft);
-    appearance: none;
-}
-
-progress::-webkit-progress-bar {
-    background: var(--line-soft);
-}
-
-progress::-webkit-progress-value {
-    background: var(--ink);
-}
-
-progress::-moz-progress-bar {
-    background: var(--ink);
+    text-align: right;
 }
 
 .node-traffic {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 20px;
-    margin: 4px 0 14px;
-    color: var(--muted);
-    font-size: 13px;
-}
-
-.node-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--line-soft);
-    color: var(--muted);
+    grid-area: traffic;
+    display: grid;
+    gap: 2px;
+    color: var(--ink-2);
     font-size: 12px;
-}
-
-.node-footer > span {
-    display: flex;
-    align-items: center;
-    gap: 4px;
     white-space: nowrap;
 }
 
-.node-footer svg {
-    width: 13px;
-    height: 13px;
+.node-row .protocol-chips {
+    grid-area: protos;
 }
 
 .protocol-chips {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+    min-width: 0;
 }
 
 .protocol-chips span {
-    padding: 1px 6px;
+    padding: 0 6px;
     border: 1px solid var(--line);
     border-radius: var(--r-badge);
     color: var(--ink-2);
     font-family: var(--mono);
     font-size: 11px;
+    line-height: 18px;
+}
+
+.protocol-chips span.none {
+    border-style: dashed;
+    color: var(--muted);
+    font-family: var(--font);
+}
+
+.node-count {
+    grid-area: count;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    color: var(--ink-2);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.node-count svg {
+    width: 14px;
+    height: 14px;
+    color: var(--muted);
+}
+
+/* Offline: last snapshot, shown muted. Pending: nothing reported yet. */
+.node-row.offline .node-meters,
+.node-row.offline .node-traffic,
+.node-row.offline .meter-value,
+.node-row.pending .node-traffic {
+    color: var(--muted);
+}
+
+.node-row.offline .meter-bar i.on {
+    background: var(--muted);
 }
 
 /* ---------- Status badges: shape + fill + weight, no colour ---------- */
@@ -1083,6 +1130,9 @@ td button + button {
 .onboarding {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
+    margin: 0;
+    padding: 0;
+    list-style: none;
     border-top: 1px solid var(--line);
 }
 
@@ -1600,8 +1650,21 @@ dialog.install .install-warning {
         padding: 28px 28px 32px;
     }
 
-    .node-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+    /* Fold rack rows into compact blocks. */
+    .node-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas: "name state" "meters meters" "traffic count" "protos protos";
+        gap: 10px 16px;
+    }
+
+    .node-meters {
+        grid-template-columns: repeat(2, minmax(0, 220px));
+        gap: 4px 24px;
+    }
+
+    .node-traffic {
+        display: flex;
+        gap: 4px 20px;
     }
 
     .split {
@@ -1740,12 +1803,35 @@ dialog.install .install-warning {
         border-top: 1px solid var(--line);
     }
 
-    .stat-value {
+    .reading-value {
         font-size: 26px;
     }
 
-    .node-grid {
+    /* Overview header: title + 回收站 on one line, filter + search below. */
+    .section-label:has(> .tools) {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 10px 8px;
+    }
+
+    .section-label > .tools {
+        display: contents;
+    }
+
+    .section-label > .tools > [data-action="trash"] {
+        justify-self: end;
+    }
+
+    .tools #group-filter {
+        width: 120px;
+    }
+
+    .node-meters {
         grid-template-columns: 1fr;
+    }
+
+    .meter-bar {
+        max-width: none;
     }
 
     .section-label .tools {
