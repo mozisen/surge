@@ -223,10 +223,10 @@ id3=$(db_account_create frank 0 "" 0)
 db_account_member_add "$id3" xray trojan 2 erin true
 if _account_member_guard xray trojan 2>/dev/null erin; then fail $LINENO; fi
 _account_member_guard singbox hy2 erin || fail $LINENO
-[[ "$(_account_ask_expire 2027-01-01 <<< '')" == 2027-01-01 ]] || fail $LINENO
-[[ "$(_account_ask_expire 2027-01-01 <<< 0)" == "" ]] || fail $LINENO
-[[ "$(_account_ask_expire '' <<< 2028-02-03)" == 2028-02-03 ]] || fail $LINENO
-if _account_ask_expire '' <<< 'tomorrow' >/dev/null; then fail $LINENO; fi
+[[ "$(_account_ask_expire 2027-01-01 <<< '' 2>/dev/null)" == 2027-01-01 ]] || fail $LINENO
+[[ "$(_account_ask_expire 2027-01-01 <<< 0 2>/dev/null)" == "" ]] || fail $LINENO
+[[ "$(_account_ask_expire '' <<< 2028-02-03 2>/dev/null)" == 2028-02-03 ]] || fail $LINENO
+if _account_ask_expire '' <<< 'tomorrow' >/dev/null 2>&1; then fail $LINENO; fi
 inst=$(_account_instances)
 grep -qx 'xray|vless|443' <<< "$inst" || fail $LINENO
 grep -qx 'singbox|hy2|8443' <<< "$inst" || fail $LINENO
