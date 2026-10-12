@@ -11,7 +11,7 @@
 - 修改同步字段时维护 `rev` 和各字段的 `mtime`，为后续的双向同步做准备。预留 `platform_user_id` 和 `platform_block`：脚本识别它们，并提供「解除平台关联」菜单；参与状态计算，但不锁定本地编辑。
 
 ## Acceptance Criteria
-- [ ] `tests/accounts.sh`：创建、加成员（多协议、Snell）、跨协议合计、超额停用全部成员、月重置恢复、调高配额恢复、到期停用和延长恢复、手动停用不被自动恢复、计数归零（核心重启）的处理、归入保留凭据和用量、批量归并预览、删除时保留或删除成员、rev 和 mtime 递增、platform_block 生效、解除关联
-- [ ] 现有 `tests/*.sh` 全部通过（singbox-stats-live.sh 除外，需要说明）；`bash -n` 通过
-- [ ] 同步 vendor 副本、`UPSTREAM_SHA`、vendor README
-- [ ] `docs/script-accounts.md`：版本、菜单说明、测试结果，隔离测试和真实验收分开写
+- [x] `tests/accounts.sh`：创建、加成员（多协议、Snell）、跨协议合计、超额停用全部成员、月重置恢复、调高配额恢复、到期停用和延长恢复、手动停用不被自动恢复、计数归零（核心重启）的处理、归入保留凭据和用量、批量归并预览、删除时保留或删除成员、rev 和 mtime 递增、platform_block 生效、解除关联
+- [x] 现有 `tests/*.sh` 全部通过（singbox-stats-live.sh 除外，需要说明）；`bash -n` 通过
+- [x] 同步 vendor 副本、`UPSTREAM_SHA`、vendor README
+- [x] `docs/script-accounts.md`：版本、菜单说明、测试结果，隔离测试和真实验收分开写
