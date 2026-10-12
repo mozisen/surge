@@ -5,8 +5,8 @@
 - 仓库：https://github.com/mozisen/surge
 - 分支：`codex/platform-3.7.4`
 - 提交：与当前根目录脚本同一 Git 提交；使用下列摘要固定内容。
-- 版本：`3.7.4-preview.3`（新增节点级统一用户）
-- SHA-256：`a75afa1de4393062723110582d29df0562989d155f13a64101ea78475816af7b`
+- 版本：`3.7.4-preview.4`（新增统一用户写接口 `--api account_apply`）
+- SHA-256：`cf16cd7cb54956aa3be2dcb5317f1211ac5d8d0c47d72b150255393e5a71f111`
 
 原快照未提供许可证，不对该文件另行声明许可证。
 
@@ -27,3 +27,5 @@ SS 单用户入站采集：按唯一端口和标签读取非清零计数，累�
 合并前的平台接口线固定版本为 3.7.3-preview.5，分支 `codex/ss-traffic`，SHA-256 为 `7b6414342f0f02fef269c366d894327796efc62f0b6eacab67f1adab61cc9117`。本次合并入正式版 3.7.3 的配额执行与修复，以及 3.7.4-preview.1 的 Sing-box 核心更新状态修复。月重置沿用 3.7.3 的逐用户重置（覆盖 Xray、Sing-box 与 Snell，仅恢复因超额停用的用户），并继续跳过面板计费用户。
 
 3.7.4-preview.3 新增节点级统一用户（db.json 顶层 `accounts`，协议用户的 `account_id`）。成员协议用户的到期、配额、启停由脚本派生，共享渲染器与 Agent 无需修改即可正确执行；面板配置版本号忽略统一用户的用量字段。上一固定版本为 3.7.4-preview.2，SHA-256 为 `7ce9467d90298512b62ef4072fa977a98985850074150802981e855511ab7aa6`。
+
+3.7.4-preview.4 新增 `--api account_apply` 与 `result` 查询：一个请求内的统一用户操作作为事务执行（`$CFG/.txn.lock`、幂等记录 `$CFG/api-results`、备份 `$CFG/api-backups`、失败回滚）。`capabilities` 保持 `stage=read_only_foundation` 与 `write_actions=[]`，另以 `accounts_api.version=1` 声明，现有 Agent 的只读接口检查不受影响。inventory 增加 `accounts` 与用户的 `account_id`，仍不含凭据。
