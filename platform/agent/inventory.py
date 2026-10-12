@@ -85,8 +85,8 @@ def inventory(cfg, status=service_status):
                           "service": service, "status": services[service], "managed": mutable(core, proto, row),
                           "sni": row.get("sni", ""), "traffic_state": traffic_state(db, core, proto, row),
                           "user_mode": user_mode(proto, row), "user_stats": user_stats(proto, row),
-                          "user_available": user_mode(proto, row) == "multi" or (proto.startswith("snell") and proto in SNELL_USERS
-                                                                                and db.get("meta", {}).get("snell_users", {}).get(proto) is True),
+                          "user_available": user_mode(proto, row) == "multi" or (user_mode(proto, row) == "single" and (
+                              proto not in SNELL_USERS or db.get("meta", {}).get("snell_users", {}).get(proto) is True)),
                           "users": [
                               {**{k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("expire_date", ""))}, "used": effective_usage(u)[0], "quota": effective_usage(u)[1], "reset_day": u.get("panel_reset_day", 0),
                                "account_id": u.get("account_id") or ""}

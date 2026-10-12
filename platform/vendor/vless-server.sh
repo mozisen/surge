@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.6"
+readonly VERSION="3.7.4-preview.7"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -1906,7 +1906,8 @@ _account_new_id() {
 # 一用户一实例的新布局；SOCKS 与其他独立协议不支持。
 _account_proto_supported() {
     local proto="$1"
-    [[ "$proto" == socks ]] && return 1
+    [[ "$proto" == socks ]] && return 0
+    _is_stls_protocol "$proto" && return 0
     if _is_snell_users_protocol "$proto"; then
         _snell_managed "$proto"
         return $?
@@ -1957,6 +1958,8 @@ _accounts_reload() {
         [[ -z "$core" ]] && continue
         if _snell_managed "$proto"; then
             _snell_apply_users "$proto" || failed=1
+        elif _is_stls_protocol "$proto"; then
+            _stls_apply "$proto" || failed=1
         elif [[ "$core" == xray ]]; then
             xray=true
         else
@@ -2063,7 +2066,8 @@ _account_materialize_default() {
     local core="$1" proto="$2" port="$3"
     _db_apply --arg c "$core" --arg p "$proto" --argjson port "$port" '
         def fill: if .port == $port and (.users | type) != "array" and ((.uuid // .password // .psk) != null)
-            then .users = [{name: "default", uuid: (.uuid // .password // .psk), enabled: true, used: 0, quota: 0}] else . end;
+            then .users = [{name: (if $p == "socks" and ((.username // "") | test("^[A-Za-z0-9_-]{1,32}$")) then .username else "default" end),
+                uuid: (if $p == "socks" then .password else (.uuid // .password // .psk) end), enabled: true, used: 0, quota: 0}] else . end;
         if (.[$c][$p] | type) == "array" then .[$c][$p] |= map(fill) else .[$c][$p] |= fill end'
 }
 
@@ -2106,6 +2110,10 @@ db_account_member_new() {
     if grep -Fxq "$(tr 'A-Z' 'a-z' <<< "$name")" <<< "$existing"; then
         _err "$(get_protocol_name "$proto") 已有用户 $name，请换一个成员用户名"
         return 1
+    fi
+    if [[ "$(_proto_user_mode "$proto")" == single ]] && ! _is_snell_users_protocol "$proto"; then
+        _account_assign_single "$id" "$core" "$proto" "$port" "$name"
+        return $?
     fi
     if _is_snell_users_protocol "$proto"; then
         # 一用户一实例：指定了空实例就分配给该用户，否则（菜单）新建实例。
@@ -2159,10 +2167,24 @@ _account_assign_single() {
         [proto_rows($c; $p)[] | select(.port == $port)] | if length == 1 then (.[0].users // [] | length) else "missing" end' "$DB_FILE")
     [[ "$count" != missing ]] || { _err "协议实例不存在"; return 1; }
     [[ "$count" == 0 ]] || { _err "该实例已有用户（一用户一实例），请先移除原用户"; return 1; }
-    credential=$(openssl rand -hex 16) || return 1
-    _db_apply --arg c "$core" --arg p "$proto" --argjson port "$port" --arg n "$name" --arg u "$credential" --arg cr "$(date +%F)" "$(_account_jq_defs)"'
-        def assign: if .port == $port then .psk = $u | .users = [{id: (.snell_id // ""), name: $n, uuid: $u, used: 0, quota: 0,
-            enabled: true, expire_date: "", created: $cr}] else . end;
+    local stls_password method
+    case "$proto" in
+        ss2022-shadowtls)
+            method=$(jq -r --arg p "$proto" '.xray[$p] | if type == "array" then .[0] else . end | .method // ""' "$DB_FILE")
+            if [[ "$method" == *128* ]]; then credential=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+            else credential=$(head -c 32 /dev/urandom | base64 | tr -d '\n'); fi ;;
+        *) credential=$(openssl rand -hex 16) ;;
+    esac
+    [[ -n "$credential" ]] || return 1
+    stls_password=$(openssl rand -hex 16) || return 1
+    # 新凭据使旧连接全部失效；ShadowTLS 的握手密码一并更换。
+    _db_apply --arg c "$core" --arg p "$proto" --argjson port "$port" --arg n "$name" --arg u "$credential" --arg s "$stls_password" \
+        --arg cr "$(date +%F)" "$(_account_jq_defs)"'
+        def assign: if .port == $port then
+            (if ($p | test("^snell")) then .psk = $u elif $p == "socks" then .username = $n | .password = $u else .password = $u end) |
+            (if ($p | test("shadowtls$")) then .stls_password = $s else . end) |
+            .users = [{name: $n, uuid: $u, used: 0, quota: 0, enabled: true, expire_date: "", created: $cr}
+                + (if .snell_id then {id: .snell_id} else {} end)] else . end;
         if (.[$c][$p] | type) == "array" then .[$c][$p] |= map(assign) else .[$c][$p] |= assign end' || return 1
     db_account_member_add "$id" "$core" "$proto" "$port" "$name" false || return 1
     _accounts_reload_or_queue "$core|$proto"
@@ -2297,7 +2319,7 @@ _proto_user_stats() {
 _proto_user_available() {
     case "$(_proto_user_mode "$1" "${2:-}")" in
         multi) return 0 ;;
-        single) _snell_managed "$1" ;;
+        single) if _is_snell_users_protocol "$1"; then _snell_managed "$1"; else return 0; fi ;;
         *) return 1 ;;
     esac
 }
@@ -3712,6 +3734,7 @@ _sync_all_user_traffic_unlocked() {
     # Collect outstanding counters before monthly reset so old usage is not
     # immediately added back to the new month's zero balance.
     _snell_sync_traffic || { mark_traffic_sync_result "snell_error" 0; return 1; }
+    _stls_sync_traffic || { mark_traffic_sync_result "shadowtls_error" 0; return 1; }
     
     # 检查是否需要发送每日报告
     check_daily_report
@@ -3882,6 +3905,7 @@ _sync_all_user_traffic_unlocked() {
         done
     fi
     
+    _socks_sync_inbound_stats "$tmp_stats" || { rm -f "$tmp_stats"; mark_traffic_sync_result "socks_error" "$updated"; return 1; }
     if [[ "$xray_stats_ok" == true ]]; then
         _db_apply --argjson at "$(date +%s)" '.meta.traffic_observed_xray = $at' || return 1
     fi
@@ -5498,7 +5522,7 @@ generate_xray_config() {
             log: {loglevel: "warning", access: "/var/log/xray/access.log", error: "/var/log/xray/error.log"},
             api: {tag: "api", services: ["StatsService"]},
             stats: {},
-            policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}},
+            policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}, system: {statsInboundUplink: true, statsInboundDownlink: true}},
             inbounds: [{listen: "127.0.0.1", port: 10085, protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, tag: "api"}],
             outbounds: $outbounds,
             routing: {domainStrategy: "IPIfNonMatch", rules: [], balancers: $balancers}
@@ -5633,7 +5657,7 @@ generate_xray_config() {
                 log: {loglevel: "warning", access: "/var/log/xray/access.log", error: "/var/log/xray/error.log"},
                 api: {tag: "api", services: ["StatsService"]},
                 stats: {},
-                policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}},
+                policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}, system: {statsInboundUplink: true, statsInboundDownlink: true}},
                 inbounds: [{listen: "127.0.0.1", port: 10085, protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, tag: "api"}],
                 outbounds: $outbounds,
                 routing: {domainStrategy: "IPIfNonMatch", rules: $rules, balancers: $balancers}
@@ -5659,7 +5683,7 @@ generate_xray_config() {
                     log: {loglevel: "warning", access: "/var/log/xray/access.log", error: "/var/log/xray/error.log"},
                     api: {tag: "api", services: ["StatsService"]},
                     stats: {},
-                    policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}},
+                    policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}, system: {statsInboundUplink: true, statsInboundDownlink: true}},
                     inbounds: [{listen: "127.0.0.1", port: 10085, protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, tag: "api"}],
                     outbounds: $outbounds,
                     routing: {domainStrategy: "IPIfNonMatch", rules: [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]}
@@ -5670,7 +5694,7 @@ generate_xray_config() {
                     log: {loglevel: "warning", access: "/var/log/xray/access.log", error: "/var/log/xray/error.log"},
                     api: {tag: "api", services: ["StatsService"]},
                     stats: {},
-                    policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}},
+                    policy: {levels: {"0": {statsUserUplink: true, statsUserDownlink: true}}, system: {statsInboundUplink: true, statsInboundDownlink: true}},
                     inbounds: [{listen: "127.0.0.1", port: 10085, protocol: "dokodemo-door", settings: {address: "127.0.0.1"}, tag: "api"}],
                     outbounds: [$direct, {protocol: "blackhole", tag: "api"}],
                     routing: {domainStrategy: "IPIfNonMatch", rules: [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]}
@@ -5833,6 +5857,124 @@ _ss_legacy_active_users() {
 
 # SS2022：旧的单用户实例（users 缺失，或唯一用户的密钥等于实例密钥）保持单密码格式；
 # 其余按多用户生成：实例 password 为服务端密钥，每个用户的 uuid 为各自的用户密钥。
+# ShadowTLS 组合（Snell+ShadowTLS、Snell v5+ShadowTLS、SS2022+ShadowTLS）：每台节点一份，归一个用户。
+# 有 users 数组时由唯一用户决定启停；旧实例（没有 users）保持原来的常开行为。
+_is_stls_protocol() { [[ "$1" == snell-shadowtls || "$1" == snell-v5-shadowtls || "$1" == ss2022-shadowtls ]]; }
+
+_stls_counter_id() {
+    printf 'vaio-stls-%s' "$1" | _api_sha256 | cut -c1-24
+}
+
+_stls_row() {
+    jq -c --arg p "$1" '.xray[$p] // empty | if type == "array" then .[0] else . end' "$DB_FILE" 2>/dev/null
+}
+
+_stls_active() {
+    local row
+    row=$(_stls_row "$1")
+    [[ -n "$row" ]] || return 1
+    jq -e '(.users | type) == "array"' <<< "$row" >/dev/null 2>&1 || return 0
+    _single_user_active "$row"
+}
+
+# 按数据库写入后端凭据与前端服务（含 ShadowTLS 密码），按唯一用户状态启停前后端服务
+_stls_apply() {
+    local proto="$1" row conf staged
+    row=$(_stls_row "$proto")
+    [[ -n "$row" ]] || return 1
+    if [[ "$proto" == ss2022-shadowtls ]]; then
+        conf="$CFG/ss2022-shadowtls-backend.json"
+        if [[ -f "$conf" ]]; then
+            staged=$(mktemp "$conf.XXXXXX") || return 1
+            jq --arg p "$(jq -r .password <<< "$row")" '.inbounds[0].settings.password = $p' "$conf" > "$staged" &&
+                chmod 600 "$staged" && mv "$staged" "$conf" || { rm -f "$staged"; return 1; }
+        fi
+    else
+        conf="$CFG/${proto}.conf"
+        if [[ -f "$conf" ]]; then
+            staged=$(mktemp "$conf.XXXXXX") || return 1
+            awk -v psk="$(jq -r .psk <<< "$row")" '/^[[:space:]]*psk[[:space:]]*=/ {print "psk = " psk; next} {print}' "$conf" > "$staged" &&
+                chmod 600 "$staged" && mv "$staged" "$conf" || { rm -f "$staged"; return 1; }
+        fi
+    fi
+    create_service "$proto" >/dev/null 2>&1 || { _err "$proto 服务配置写入失败"; return 1; }
+    if jq -e '(.users | type) == "array"' <<< "$row" >/dev/null 2>&1; then
+        # 端口计数复用 Snell 的 nft 计数表；没有 nftables 时只是不统计流量
+        _snell_update_counter_port "$(_stls_counter_id "$proto")" "$(jq -r .port <<< "$row")" 2>/dev/null || true
+    fi
+    if _stls_active "$proto"; then
+        svc enable "vless-${proto}-backend" && svc restart "vless-${proto}-backend" || { _err "$proto 后端服务启动失败"; return 1; }
+        sleep 1
+        svc enable "vless-${proto}" && svc restart "vless-${proto}" || { _err "$proto 服务启动失败"; return 1; }
+    else
+        svc stop "vless-${proto}" 2>/dev/null || true
+        svc disable "vless-${proto}" 2>/dev/null || true
+        svc stop "vless-${proto}-backend" 2>/dev/null || true
+        svc disable "vless-${proto}-backend" 2>/dev/null || true
+    fi
+}
+
+# 端口计数写入唯一用户（与 Snell 相同的累计与代际规则）
+_stls_sync_traffic() {
+    local proto row id snapshot up down generation
+    snapshot=""
+    for proto in snell-shadowtls snell-v5-shadowtls ss2022-shadowtls; do
+        row=$(_stls_row "$proto")
+        [[ -n "$row" ]] && jq -e '(.users | length) == 1' <<< "$row" >/dev/null 2>&1 || continue
+        if [[ -z "$snapshot" ]]; then
+            _snell_nft_ready 2>/dev/null || return 0
+            snapshot=$(nft -j list table inet vless_snell_users 2>/dev/null) || return 0
+        fi
+        id=$(_stls_counter_id "$proto")
+        up=$(jq -r --arg n "u_$id" '[.nftables[].counter? | select(.name == $n)][0].bytes // 0' <<< "$snapshot")
+        down=$(jq -r --arg n "d_$id" '[.nftables[].counter? | select(.name == $n)][0].bytes // 0' <<< "$snapshot")
+        generation=$(jq -r --arg n "u_$id" '[.nftables[].counter? | select(.name == $n)][0].comment // ""' <<< "$snapshot")
+        [[ -n "$generation" ]] || continue
+        _db_apply --arg p "$proto" --arg g "$generation" --argjson up "$up" --argjson down "$down" --argjson at "$(date +%s)" '
+            def count: .users[0] |= (
+                (if .counter_generation == $g then (.counter_up // 0) else 0 end) as $u |
+                (if .counter_generation == $g then (.counter_down // 0) else 0 end) as $d |
+                .used = ((.used // 0) + ([$up - $u, 0] | max) + ([$down - $d, 0] | max)) |
+                .counter_up = $up | .counter_down = $down | .counter_generation = $g | .traffic_observed_at = $at);
+            if (.xray[$p] | type) == "array" then .xray[$p][0] |= count else .xray[$p] |= count end' || return 1
+    done
+}
+
+# SOCKS 入站计数写入该实例的唯一用户（统计文件为 xray statsquery 的「名称 数值」行）
+_socks_sync_inbound_stats() {
+    local stats_file="$1" port up down
+    while IFS= read -r port; do
+        [[ "$port" =~ ^[0-9]+$ ]] || continue
+        up=$(grep -F "inbound>>>socks-${port}>>>traffic>>>uplink " "$stats_file" 2>/dev/null | awk '{print $NF}' | head -n1)
+        down=$(grep -F "inbound>>>socks-${port}>>>traffic>>>downlink " "$stats_file" 2>/dev/null | awk '{print $NF}' | head -n1)
+        up=${up:-0}; down=${down:-0}
+        (( up + down > 0 )) || continue
+        _db_apply --argjson port "$port" --argjson b "$((up + down))" '
+            def count: if .port == $port and (.users | length) == 1 then .users[0].used = ((.users[0].used // 0) + $b) else . end;
+            if (.xray.socks | type) == "array" then .xray.socks |= map(count) else .xray.socks |= count end' || return 1
+    done <<< "$(jq -r '.xray.socks // empty | if type == "array" then .[] else . end | select((.users | length) == 1) | .port' "$DB_FILE" 2>/dev/null)"
+}
+
+# 单个用户是否有效（启用、未到期、未超额）
+_single_user_active() {
+    jq -e --arg today "$(date '+%Y-%m-%d')" '(.users // []) | length == 1 and (.[0] |
+        .enabled != false and ((.quota // 0) == 0 or (.used // 0) < .quota) and ((.expire_date // "") == "" or .expire_date >= $today))' <<< "$1" >/dev/null 2>&1
+}
+
+_socks_accounts() {
+    local cfg="$1" disabled
+    if jq -e '(.users | type) == "array"' <<< "$cfg" >/dev/null 2>&1; then
+        if _single_user_active "$cfg"; then
+            jq -c '[.users[0] | {user: .name, pass: .uuid}]' <<< "$cfg"
+        else
+            disabled=$(openssl rand -hex 16) || return 1
+            jq -nc --arg p "$disabled" '[{user: "vaio-disabled", pass: $p}]'
+        fi
+    else
+        jq -c '[{user: (.username // ""), pass: (.password // "")}]' <<< "$cfg"
+    fi
+}
+
 _ss2022_is_multi() {
     jq -e '(.password // "") != "" and (.users | type) == "array" and ((.users | length) != 1 or .users[0].uuid != .password)' <<< "$1" >/dev/null 2>&1
 }
@@ -6385,6 +6527,10 @@ add_xray_inbound_v2() {
             local sni=$(echo "$cfg" | jq -r '.sni // ""')
             local auth_mode=$(echo "$cfg" | jq -r '.auth_mode // "password"')
             local config_listen_addr=$(echo "$cfg" | jq -r '.listen_addr // empty')
+            # 一用户一实例：有 users 数组时只开放该实例的唯一有效用户（用户名=用户名，密码=凭据），
+            # 停用、到期、超额时换成随机账号；旧实例没有 users 时沿用实例账号。
+            local accounts
+            accounts=$(_socks_accounts "$cfg") || { rm -f "$tmp_inbound"; return 1; }
             local socks_listen_addr="${listen_addr:-}"
             [[ -z "$socks_listen_addr" ]] && socks_listen_addr=$(_listen_addr)
             [[ -n "$config_listen_addr" ]] && socks_listen_addr="$config_listen_addr"
@@ -6399,7 +6545,7 @@ add_xray_inbound_v2() {
                     --arg key "$CFG/certs/server.key" \
                     --arg tag "$inbound_tag" \
                     --arg listen_addr "$socks_listen_addr" \
-                    --arg auth_mode "$auth_mode" \
+                    --arg auth_mode "$auth_mode" --argjson accounts "$accounts" \
                 '{
                     port: $port,
                     listen: $listen_addr,
@@ -6407,7 +6553,7 @@ add_xray_inbound_v2() {
                     settings: ({
                         auth: $auth_mode,
                         udp: true
-                    } + (if $auth_mode == "noauth" then {} else {accounts: [{user: $username, pass: $password}]} end)),
+                    } + (if $auth_mode == "noauth" then {} else {accounts: $accounts} end)),
                     streamSettings: {
                         network: "tcp",
                         security: "tls",
@@ -6425,7 +6571,7 @@ add_xray_inbound_v2() {
                     --arg password "$password" \
                     --arg tag "$inbound_tag" \
                     --arg listen_addr "$socks_listen_addr" \
-                    --arg auth_mode "$auth_mode" \
+                    --arg auth_mode "$auth_mode" --argjson accounts "$accounts" \
                 '{
                     port: $port,
                     listen: $listen_addr,
@@ -6433,7 +6579,7 @@ add_xray_inbound_v2() {
                     settings: ({
                         auth: $auth_mode,
                         udp: true
-                    } + (if $auth_mode == "noauth" then {} else {accounts: [{user: $username, pass: $password}]} end)),
+                    } + (if $auth_mode == "noauth" then {} else {accounts: $accounts} end)),
                     tag: $tag
                 }' > "$tmp_inbound"
             fi
@@ -14789,6 +14935,12 @@ start_services() {
     local ind_proto
     for ind_proto in $standalone_protocols; do
         local service_name="vless-${ind_proto}"
+        # 归属用户已停用、到期或超额的 ShadowTLS 实例保持停止
+        if _is_stls_protocol "$ind_proto" && ! _stls_active "$ind_proto"; then
+            svc stop "$service_name" 2>/dev/null || true
+            svc stop "vless-${ind_proto}-backend" 2>/dev/null || true
+            continue
+        fi
         
         # ShadowTLS 组合协议需要先启动/重启后端服务
         case "$ind_proto" in
@@ -28488,6 +28640,12 @@ _gen_user_share_link() {
         trojan-ws) link=$(gen_trojan_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
         tuic) link=$(gen_tuic_link "$server_addr" "$display_port" "$credential" "$password" "$sni" "$remark") ;;
         anytls) link=$(gen_anytls_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
+        snell-shadowtls|snell-v5-shadowtls)
+            link="${remark} = snell, ${server_addr}, ${display_port}, psk=${credential}, version=$([[ "$proto" == snell-v5-shadowtls ]] && echo 5 || jq -r '.version // 4' <<< "$cfg"), reuse=true, tfo=true, shadow-tls-password=$(jq -r '.stls_password // ""' <<< "$cfg"), shadow-tls-sni=$(jq -r '.sni // ""' <<< "$cfg"), shadow-tls-version=3"
+            ;;
+        ss2022-shadowtls)
+            link="${remark} = ss, ${server_addr}, ${display_port}, encrypt-method=$(jq -r '.method // ""' <<< "$cfg"), password=${credential}, shadow-tls-password=$(jq -r '.stls_password // ""' <<< "$cfg"), shadow-tls-sni=$(jq -r '.sni // ""' <<< "$cfg"), shadow-tls-version=3"
+            ;;
         socks)
             # 旧数据库中默认 SOCKS 账号没有 users 数组，用配置内的
             # username；后续添加的多用户则使用用户名单中的名称。
@@ -29298,6 +29456,10 @@ _set_user_expire_date() {
 # 更新 Xray/Sing-box 配置文件中的用户列表、用户级路由规则、链式代理和负载均衡并重载服务
 _regenerate_config() {
     local core="$1" proto="$2"
+    if _is_stls_protocol "$proto"; then
+        _stls_apply "$proto"
+        return $?
+    fi
     if [[ "$core" == "xray" && "$proto" == "ss-legacy" ]]; then
         # SS 必须使用完整生成器，不能落入下面 VLESS clients 的局部更新。
         rebuild_and_reload_xray
@@ -32593,7 +32755,7 @@ _api_account_precheck() {
         def rows($c; $p): ($db[0][$c][$p] // null) | if . == null then [] elif type == "array" then . else [.] end;
         first(.params.ops[] | select(.op == "member_add" or .op == "create") | .account_id as $id |
             (if .op == "create" then (.members // [])[].target else .target end) as $t |
-            select($t.protocol | test("^snell(-v[56])?$")) |
+            select($t.protocol | test("^(snell(-v[56])?|socks|snell-shadowtls|snell-v5-shadowtls|ss2022-shadowtls)$")) |
             select([rows($t.core; $t.protocol)[] | select(.port == $t.port) | (.users // [] | length)] | .[0] // 0 | . > 0) |
             "instance_occupied|\($id)|") // ""' <<< "$request")
     [[ -z "$line" ]] || { echo "$line"; return 1; }

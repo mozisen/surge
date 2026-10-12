@@ -83,7 +83,7 @@ class ProtocolUsersAgent(unittest.TestCase):
         data = sanitize_snapshot(inventory(self.cfg, status=lambda _: "running"))
         modes = {(i["protocol"], i["port"]): (i["user_mode"], i["user_stats"], i["user_available"]) for i in data["instances"]}
         self.assertEqual(modes[("vless-ws", 2083)], ("multi", "user", True))
-        self.assertEqual(modes[("socks", 1080)], ("single", "inbound", False))
+        self.assertEqual(modes[("socks", 1080)], ("single", "inbound", True))
         self.assertEqual(modes[("socks", 1081)], ("none", "none", False))
         self.assertEqual(modes[("snell-v5", 9001)], ("single", "port", True))
         self.assertEqual(modes[("naive", 443)], ("none", "none", False))
