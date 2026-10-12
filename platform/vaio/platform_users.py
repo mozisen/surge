@@ -154,7 +154,7 @@ def update_user(db, user_id, data, now=None, mtimes=None):
     return changed
 
 
-def add_link(db, user_id, node_id, members=None, now=None):
+def add_link(db, user_id, node_id, members=None, now=None, trusted=False):
     """Create the user's account on a node whose users are managed by the platform."""
     now = time.time() if now is None else now
     user = db.execute("SELECT * FROM platform_users WHERE id=? AND deleting IS NULL", (user_id,)).fetchone()
@@ -172,8 +172,8 @@ def add_link(db, user_id, node_id, members=None, now=None):
     for member in members or []:
         if not isinstance(member, dict) or set(member) != {"core", "protocol", "port"}:
             raise ValueError("协议实例无效")
-        if member["protocol"] in SINGLE_USER:
-            raise ValueError("该协议一用户一端口：请先为该用户安装实例，再归入")
+        if not trusted:
+            check_member_target(snapshot, member)
         targets.append({"target": {k: member[k] for k in ("core", "protocol", "port")}, "name": user["name"]})
     validate_platform_task({"action": "platform_apply", "params": {"ops": [{"op": "create", "account_id": str(uuid.uuid4()),
                             "fields": {"name": user["name"]}, "members": targets}]}})
@@ -189,7 +189,24 @@ def queue_op(db, link_id, op, now=None):
     db.execute("UPDATE platform_links SET state='pending',retry_after=0 WHERE id=?", (link_id,))
 
 
-SINGLE_USER = ("ss-legacy", "ss2022", "snell", "snell-v5", "snell-v6")
+LEGACY_SINGLE_USER = ("ss-legacy", "ss2022", "snell", "snell-v5", "snell-v6")
+
+
+def check_member_target(snapshot, target, adding=True):
+    """New members follow the node's protocol user modes: any multi-user instance, or an empty
+    single-user instance (assigned to the user). Nodes without modes keep the old rule."""
+    instance = next((i for i in snapshot.get("instances", []) if (i.get("core"), i.get("protocol"), i.get("port"))
+                     == (target["core"], target["protocol"], target["port"])), None)
+    if not instance or not instance.get("user_mode"):
+        if target["protocol"] in LEGACY_SINGLE_USER:
+            raise ValueError("该协议一用户一端口：请先为该用户安装实例，再归入")
+        return
+    if instance["user_mode"] == "none":
+        raise ValueError("该协议不支持用户管理")
+    if not instance.get("user_available"):
+        raise ValueError("该协议暂未接入用户管理，请升级节点脚本")
+    if adding and instance["user_mode"] == "single" and instance.get("users"):
+        raise ValueError("该实例已有用户（一用户一实例），请先移除原用户")
 
 
 def member_op(db, link, data):
@@ -201,8 +218,8 @@ def member_op(db, link, data):
         raise ValueError("协议实例无效")
     action = data.get("action")
     if action == "add":
-        if target["protocol"] in SINGLE_USER:
-            raise ValueError("该协议一用户一端口：请先为该用户安装实例，再归入")
+        node = db.execute("SELECT snapshot FROM nodes WHERE id=?", (link["node_id"],)).fetchone()
+        check_member_target(json.loads(node["snapshot"]) if node else {}, target)
         user = db.execute("SELECT name FROM platform_users WHERE id=?", (link["user_id"],)).fetchone()
         op = {"op": "member_add", "account_id": link["account_id"], "target": target, "name": data.get("name") or user["name"]}
     elif action == "claim":
@@ -237,6 +254,49 @@ def release_task(db, task_id):
     for link in db.execute("SELECT * FROM platform_links WHERE node_id=?", (task["node_id"],)).fetchall():
         if link["account_id"] in accounts:
             db.execute("UPDATE platform_links SET state='pending',notice='',retry_after=0 WHERE id=?", (link["id"],))
+
+
+INSTALL_PLAN_SCHEMA = "CREATE TABLE IF NOT EXISTS platform_install_plans(task_id TEXT PRIMARY KEY, node_id TEXT NOT NULL, users TEXT NOT NULL, created REAL NOT NULL)"
+
+
+def plan_install(db, node_id, task_id, user_ids, now=None):
+    """Users to place on an instance once its install task succeeds."""
+    task = db.execute("SELECT * FROM tasks WHERE id=? AND node_id=?", (task_id, node_id)).fetchone()
+    if not task or task["action"] != "install" or task["status"] not in ("queued", "running"):
+        raise ValueError("安装任务不存在或已结束")
+    node = db.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if not platform_managed(json.loads(node["snapshot"])):
+        raise ValueError("该节点的用户由节点脚本管理，不能在安装时选择平台用户")
+    if not isinstance(user_ids, list) or not user_ids or len(user_ids) > 200 or len(set(user_ids)) != len(user_ids):
+        raise ValueError("请选择用户")
+    for user_id in user_ids:
+        if not db.execute("SELECT 1 FROM platform_users WHERE id=? AND deleting IS NULL", (user_id,)).fetchone():
+            raise ValueError("用户不存在")
+    request = json.loads(task["request"])
+    if request["protocol"].startswith("snell") and len(user_ids) != 1:
+        raise ValueError("Snell 一用户一实例，安装时只能选择一个用户")
+    db.execute("INSERT INTO platform_install_plans VALUES(?,?,?,?)", (task_id, node_id, json.dumps(user_ids), time.time() if now is None else now))
+
+
+def install_finished(db, task, status, now=None):
+    plan = db.execute("SELECT * FROM platform_install_plans WHERE task_id=?", (task["id"],)).fetchone()
+    if not plan:
+        return
+    db.execute("DELETE FROM platform_install_plans WHERE task_id=?", (task["id"],))
+    if status != "succeeded":
+        return
+    request = json.loads(task["request"])
+    target = {"core": request["core"], "protocol": request["protocol"], "port": request["port"]}
+    for user_id in json.loads(plan["users"]):
+        user = db.execute("SELECT * FROM platform_users WHERE id=? AND deleting IS NULL", (user_id,)).fetchone()
+        if not user:
+            continue
+        link = db.execute("SELECT * FROM platform_links WHERE user_id=? AND node_id=? AND removing IS NULL", (user_id, task["node_id"])).fetchone()
+        if link:
+            queue_op(db, link["id"], {"op": "member_add", "account_id": link["account_id"], "target": target, "name": user["name"]}, now)
+        else:
+            # The instance was just installed empty; the snapshot may not show it yet.
+            add_link(db, user_id, task["node_id"], [target], now, trusted=True)
 
 
 def remove_link(db, link_id, mode):

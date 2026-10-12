@@ -18,7 +18,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
 from . import platform_users
-from .common import MUTATIONS, LEGACY_COMBINATIONS, digest, require_text, validate_platform_task, validate_task, validate_upgrade_task
+from .common import MUTATIONS, LEGACY_COMBINATIONS, PROTOCOLS, digest, require_text, validate_platform_task, validate_task, validate_upgrade_task
 from .install_options import ADVANCED_INSTALL_FIELDS, REALITY_INSTALL_FIELDS
 from .store import Store
 
@@ -534,6 +534,8 @@ def create_app(config=None):
                        (data["status"], time.time(), message, json.dumps(detail), task_id))
             if task["action"] == "platform_apply":
                 platform_users.task_finished(db, task, data["status"], message)
+            if task["action"] == "install":
+                platform_users.install_finished(db, task, data["status"])
             audit(db, "task." + data["status"], node_id, task_id)
         return jsonify(ok=True)
 
@@ -566,7 +568,8 @@ def create_app(config=None):
                 return jsonify(error="节点不支持高级安装参数，请先升级 Agent"), 409
             if "reset_credentials" in task["params"] and json.loads(node["snapshot"]).get("task_api_version", 1) < 2:
                 return jsonify(error="节点不支持凭据重置，请先升级 Agent"), 409
-            if (task["core"], task["protocol"]) not in LEGACY_COMBINATIONS and {"core": task["core"], "protocol": task["protocol"]} not in capabilities:
+            script_share = task["action"] in ("share", "inspect") and json.loads(node["snapshot"]).get("share_version") == 2 and task["protocol"] not in PROTOCOLS
+            if not script_share and (task["core"], task["protocol"]) not in LEGACY_COMBINATIONS and {"core": task["core"], "protocol": task["protocol"]} not in capabilities:
                 return jsonify(error="节点尚未声明此协议写入能力，请先升级 Agent"), 409
             snapshot = json.loads(node["snapshot"])
             if task["action"].startswith("user_") and snapshot.get("authority_version") == 1:
@@ -767,6 +770,18 @@ def create_app(config=None):
                        (task_id, node_id, action, json.dumps(request), "queued", time.time(), "system:" + task_id))
             audit(db, "task.queued", node_id, task_id + " " + action)
         return jsonify(id=task_id, status="queued"), 201
+
+    @app.post("/api/nodes/<node_id>/install-users")
+    @admin
+    def install_users(node_id):
+        data = body()
+        if set(data) - {"task_id", "user_ids"} or not isinstance(data.get("task_id"), str):
+            raise ValueError("参数无效")
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            platform_users.plan_install(db, node_id, data["task_id"], data.get("user_ids"))
+            audit(db, "platform.install_users", node_id, data["task_id"])
+        return jsonify(ok=True)
 
     @app.post("/api/nodes/<node_id>/authority")
     @admin

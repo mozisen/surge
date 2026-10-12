@@ -30,6 +30,8 @@ class Store:
             from .platform_users import SCHEMA as PLATFORM_SCHEMA
             db.executescript(MONITOR_SCHEMA)
             db.executescript(PLATFORM_SCHEMA)
+            from .platform_users import INSTALL_PLAN_SCHEMA
+            db.execute(INSTALL_PLAN_SCHEMA)
             db.execute("BEGIN IMMEDIATE")
             # 2: platform users. Older databases (and restored v1 backups) gain the tables above.
             if db.execute("PRAGMA user_version").fetchone()[0] > 2:

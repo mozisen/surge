@@ -71,6 +71,10 @@ class SimNode:
             return outcome
         if task["action"] == "agent_upgrade":
             return "succeeded", "已启动升级"
+        if task["action"] in ("install", "share"):
+            if task["action"] == "install":
+                self.protocol_users[(task["core"], task["protocol"], task["port"])] = {}
+            return "succeeded", "操作完成"
         if task["params"]["ops"][0]["op"] == "set_authority":
             self.authority = task["params"]["ops"][0]["mode"]
             if self.authority == "platform":
@@ -110,7 +114,11 @@ class SimNode:
                 account["members"].append({**t, "name": op["name"]})
             elif kind == "delete":
                 del self.accounts[identity]
-            elif kind in ("reset_credentials", "member_add", "member_remove", "reset_usage"):
+            elif kind == "member_add":
+                t = op["target"]
+                self.protocol_users[(t["core"], t["protocol"], t["port"])][op["name"]] = {"used": 0, "account_id": identity}
+                account["members"].append({**t, "name": op["name"]})
+            elif kind in ("reset_credentials", "member_remove", "reset_usage"):
                 pass
         return "succeeded", "操作完成"
 
@@ -327,6 +335,77 @@ class PlatformUsersPanel(unittest.TestCase):
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertTrue(db.execute("SELECT 1 FROM sqlite_master WHERE name='platform_links'").fetchone())
         backups.verify(backups.directory(self.store) / backups.create(self.store))
+
+
+class ProtocolUserModes(PlatformUsersPanel):
+    def mode_node(self):
+        node = SimNode(self, 'M')
+        node.protocol_users[('xray', 'vless-ws', 2083)] = {}
+        node.protocol_users[('xray', 'snell-v5', 9001)] = {}
+        node.protocol_users[('xray', 'snell-v5', 9002)] = {'busy': {"used": 0}}
+        node.protocol_users[('xray', 'naive', 443)] = {}
+        original = node.snapshot
+        modes = {'vless-ws': ('multi', True), 'snell-v5': ('single', True), 'naive': ('none', False),
+                 'vless': ('multi', True), 'hy2': ('multi', True)}
+        def snapshot():
+            data = original()
+            for item in data['instances']:
+                item['user_mode'], item['user_available'] = modes[item['protocol']]
+            data['share_version'] = 2
+            data['config_details_version'] = 2
+            return data
+        node.snapshot = snapshot
+        node.poll()
+        return node
+
+    def test_member_targets_follow_user_modes(self):
+        node = self.mode_node()
+        user = self.post('/users', {"name": "alice"}, 201)['id']
+        self.post('/users/' + user + '/links', {"node_id": node.id, "members": [{"core": "xray", "protocol": "naive", "port": 443}]}, 400)
+        self.post('/users/' + user + '/links', {"node_id": node.id, "members": [{"core": "xray", "protocol": "snell-v5", "port": 9002}]}, 400)
+        self.post('/users/' + user + '/links', {"node_id": node.id, "members": [{"core": "xray", "protocol": "vless-ws", "port": 2083},
+                                                                                 {"core": "xray", "protocol": "snell-v5", "port": 9001}]})
+        node.settle()
+        account = next(iter(node.accounts.values()))
+        self.assertEqual(sorted(m["protocol"] for m in account["members"]), ["snell-v5", "vless-ws"])
+        link = self.user(user)["links"][0]["id"]
+        self.post('/links/' + link + '/members', {"action": "add", "target": {"core": "xray", "protocol": "naive", "port": 443}}, 400)
+        self.post('/links/' + link + '/members', {"action": "add", "target": {"core": "xray", "protocol": "snell-v5", "port": 9002}}, 400)
+
+    def test_install_plan_places_selected_users(self):
+        node = self.mode_node()
+        alice = self.post('/users', {"name": "alice"}, 201)['id']
+        bob = self.post('/users', {"name": "bob"}, 201)['id']
+        self.post('/users/' + alice + '/links', {"node_id": node.id, "members": []})
+        node.settle()
+        task = {"action": "install", "protocol": "hy2", "core": "singbox", "port": 8443, "params": {"sni": "a.example"}, "revision": "a" * 64}
+        created = self.client.post('/api/nodes/' + node.id + '/tasks', json=task, headers={**self.headers, "Idempotency-Key": "i1"})
+        self.assertEqual(created.status_code, 201, created.json)
+        task_id = created.json["id"]
+        self.post('/nodes/' + node.id + '/install-users', {"task_id": task_id, "user_ids": [alice, bob]})
+        self.post('/nodes/' + node.id + '/install-users', {"task_id": task_id, "user_ids": ["missing"]}, 400)
+        node.settle()   # install succeeds, then the plan becomes member operations
+        names = sorted(a["name"] for a in node.accounts.values())
+        self.assertEqual(names, ["alice", "bob"])
+        self.assertTrue(all(any(m["protocol"] == "hy2" for m in a["members"]) for a in node.accounts.values()))
+        with self.store.connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM platform_install_plans").fetchone())
+        task = {**task, "protocol": "snell-v5", "core": "xray", "port": 9100, "params": {}}
+        created = self.client.post('/api/nodes/' + node.id + '/tasks', json=task, headers={**self.headers, "Idempotency-Key": "i2"})
+        self.post('/nodes/' + node.id + '/install-users', {"task_id": created.json["id"], "user_ids": [alice, bob]}, 400)
+        script = SimNode(self, 'S', authority='script')
+        task = {**task, "port": 9200}
+        created = self.client.post('/api/nodes/' + script.id + '/tasks', json=task, headers={**self.headers, "Idempotency-Key": "i3"})
+        self.post('/nodes/' + script.id + '/install-users', {"task_id": created.json["id"], "user_ids": [alice]}, 400)
+
+    def test_share_works_for_protocols_outside_adapters(self):
+        node = self.mode_node()
+        share = {"action": "share", "protocol": "vless-ws", "core": "xray", "port": 2083, "params": {"name": "alice"}}
+        response = self.client.post('/api/nodes/' + node.id + '/tasks', json=share, headers={**self.headers, "Idempotency-Key": "s1"})
+        self.assertEqual(response.status_code, 201, response.json)
+        old = SimNode(self, 'O', version=0)
+        response = self.client.post('/api/nodes/' + old.id + '/tasks', json=share, headers={**self.headers, "Idempotency-Key": "s2"})
+        self.assertEqual(response.status_code, 409)
 
 
 if __name__ == '__main__':
