@@ -28084,6 +28084,8 @@ _show_users_list() {
         fi
         
         [[ "$enabled" != "true" ]] && status_icon="${R}○${NC}"
+        local account_id; account_id=$(db_user_account_id "$core" "$proto" "$name")
+        [[ -n "$account_id" ]] && expire_fmt+=" ${D}属于 $(jq -r --arg id "$account_id" '.accounts[$id].name // "?"' "$DB_FILE")${NC}"
         
         printf "  %-10s %-9s %-9s %-7s %b  %b\n" "$name" "$used_fmt" "$quota_fmt" "$percent" "$status_icon" "$expire_fmt"
     done <<< "$stats"
@@ -28687,6 +28689,7 @@ _delete_user() {
         [[ "$choice" == "0" ]] && return
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$max" ]]; then
             local name="${user_array[$((choice-1))]}"
+            _account_member_guard "$core" "$proto" "$name" || return
             
             # 禁止删除 default 用户
             if [[ "$name" == "default" ]]; then
@@ -28750,6 +28753,7 @@ _set_user_quota() {
         [[ "$choice" == "0" ]] && return
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$max" ]]; then
             local name="${user_array[$((choice-1))]}"
+            _account_member_guard "$core" "$proto" "$name" || return
             
             echo ""
             echo -e "  ${D}输入新配额 (GB)，0 表示无限制${NC}"
@@ -28815,6 +28819,7 @@ _reset_user_traffic() {
             for user in $users; do
                 db_reset_user_traffic "$core" "$proto" "$user" || reset_failed=1
             done
+            accounts_apply || reset_failed=1
             if [[ "$reset_failed" == 0 ]]; then _ok "所有用户流量已重置"; else _err "部分用户重置或恢复失败，请查看上方提示"; fi
             return
         fi
@@ -28826,6 +28831,8 @@ _reset_user_traffic() {
             [[ ! "$confirm" =~ ^[yY]$ ]] && return
             
             if db_reset_user_traffic "$core" "$proto" "$name"; then
+                # 统一用户成员的本周期用量由统一用户结算，这里只清零协议计数。
+                accounts_apply
                 _ok "用户 $name 流量已重置"
             else
                 _err "重置失败"
@@ -28870,6 +28877,7 @@ _toggle_user() {
         [[ "$choice" == "0" ]] && return
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$max" ]]; then
             local name="${user_array[$((choice-1))]}"
+            _account_member_guard "$core" "$proto" "$name" || return
             local enabled=$(db_get_user_field "$core" "$proto" "$name" "enabled")
             
             local new_state="true"
@@ -28937,6 +28945,7 @@ _set_user_expire_date() {
         [[ "$choice" == "0" ]] && return
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$max" ]]; then
             local name="${user_array[$((choice-1))]}"
+            _account_member_guard "$core" "$proto" "$name" || return
             
             echo ""
             echo -e "  ${D}输入天数(如30) 或日期(2026-03-01)，输入 0 取消到期限制${NC}"
@@ -30068,6 +30077,389 @@ _configure_traffic_stats() {
 }
 
 # 用户管理主菜单
+#═══════════════════════════════════════════════════════════════════════════════
+#  统一用户菜单
+#═══════════════════════════════════════════════════════════════════════════════
+
+_account_reason_text() {
+    case "$1" in
+        manual) echo "已手动停用" ;;
+        expired) echo "已到期" ;;
+        quota) echo "流量已用尽" ;;
+        platform_quota) echo "平台总流量已用尽" ;;
+        *) echo "正常" ;;
+    esac
+}
+
+# 统一用户的成员协议用户：协议菜单中修改到期、配额、启停或删除前调用。
+# 返回 0 表示可以继续，1 表示已提示改为操作统一用户。
+_account_member_guard() {
+    local core="$1" proto="$2" name="$3" owner account_name
+    owner=$(db_user_account_id "$core" "$proto" "$name")
+    [[ -z "$owner" ]] && return 0
+    account_name=$(jq -r --arg id "$owner" '.accounts[$id].name // "?"' "$DB_FILE")
+    _warn "用户 $name 属于统一用户 $account_name，到期、配额、启停由统一用户统一设置"
+    _info "请在 用户管理 → 统一用户 中修改；移除成员后可单独管理"
+    return 1
+}
+
+# 询问到期日期。输入天数或日期，留空沿用 $1（新建时传空表示永不过期），输入 0 表示永不过期。
+_account_ask_expire() {
+    local current="${1:-}" input date
+    echo -e "  ${D}到期: 输入天数(如30)或日期(如2026-03-01)，0 表示永不过期${NC}" >&2
+    read -rp "  到期 [${current:-永不过期}]: " input
+    if [[ -z "$input" ]]; then
+        echo "$current"
+    elif [[ "$input" == 0 ]]; then
+        echo ""
+    elif [[ "$input" =~ ^[0-9]{1,5}$ ]]; then
+        date=$(date -d "+${input} days" +%F 2>/dev/null || date -v+"${input}"d +%F 2>/dev/null)
+        [[ -n "$date" ]] || return 1
+        echo "$date"
+    elif [[ "$input" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        echo "$input"
+    else
+        _err "日期格式无效"
+        return 1
+    fi
+}
+
+_account_show_list() {
+    local list id name enabled expire quota reset_day used members reason platform quota_fmt
+    list=$(db_account_list)
+    echo ""
+    _dline
+    echo -e "  ${C}统一用户${NC} ${D}(一个用户可使用多个协议，到期与流量统一管理)${NC}"
+    _dline
+    if [[ -z "$list" ]]; then
+        echo -e "  ${D}暂无统一用户${NC}"
+        _line
+        return 1
+    fi
+    printf "  ${W}%-3s %-12s %-19s %-11s %-4s %s${NC}\n" "#" "用户名" "本周期 已用/配额" "到期" "协议" "状态"
+    _line
+    local i=1
+    ACCOUNT_IDS=()
+    while IFS='|' read -r id name enabled expire quota reset_day used members reason platform; do
+        [[ -z "$id" ]] && continue
+        ACCOUNT_IDS+=("$id")
+        quota_fmt="不限"; [[ "$quota" -gt 0 ]] && quota_fmt=$(format_bytes "$quota")
+        local status; status=$(_account_reason_text "$reason")
+        [[ -n "$platform" ]] && status+=" ${D}平台${NC}"
+        printf "  %-3s %-12s %-19s %-11s %-4s %b\n" "$i" "$name" "$(format_bytes "$used")/$quota_fmt" "${expire:-永久}" "$members" "$status"
+        ((i++))
+    done <<< "$list"
+    _line
+}
+
+# 选择统一用户，结果写入 SELECTED_ACCOUNT
+_account_select() {
+    _account_show_list || return 1
+    local max=${#ACCOUNT_IDS[@]} choice
+    read -rp "  选择统一用户 [1-$max，0 返回]: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= max )) || return 1
+    SELECTED_ACCOUNT="${ACCOUNT_IDS[$((choice-1))]}"
+}
+
+_account_show_detail() {
+    local id="$1" a core proto port name used enabled
+    a=$(db_account_get "$id") || return 1
+    echo ""
+    _line
+    echo -e "  ${W}$(jq -r .name <<< "$a")${NC}  $(_account_reason_text "$(jq -r --arg today "$(date +%F)" "$(_account_jq_defs) account_reason(\$today)" <<< "$a")")"
+    local quota reset_day
+    quota=$(jq -r '.quota // 0' <<< "$a"); reset_day=$(jq -r '.reset_day // 0' <<< "$a")
+    echo -e "  到期: $(jq -r '.expire_date // "" | if . == "" then "永不过期" else . end' <<< "$a")"
+    echo -e "  本周期: $(format_bytes "$(jq -r '.cycle_used // 0' <<< "$a")") / $([[ "$quota" -gt 0 ]] && format_bytes "$quota" || echo 不限)  $([[ "$reset_day" -gt 0 ]] && echo "每月 $reset_day 日重置" || echo "累计不重置")"
+    [[ -n "$(jq -r '.note // ""' <<< "$a")" ]] && echo -e "  备注: $(jq -r .note <<< "$a")"
+    [[ -n "$(jq -r '.platform_user_id // ""' <<< "$a")" ]] && echo -e "  ${D}已关联 Vaio 平台，本地修改会同步到平台${NC}"
+    echo -e "  ${D}成员协议:${NC}"
+    while IFS='|' read -r core proto port name; do
+        [[ -z "$core" ]] && continue
+        used=$(jq -r --arg c "$core" --arg p "$proto" --argjson port "$port" --arg n "$name" "$(_account_jq_defs)"'
+            member_user({core: $c, protocol: $p, port: $port, name: $n}) | "\(.used // 0)|\(.enabled != false)"' "$DB_FILE")
+        enabled=${used#*|}; used=${used%|*}
+        echo -e "   • $(get_protocol_name "$proto") 端口 $port 用户 $name  累计 $(format_bytes "$used")  $([[ "$enabled" == true ]] && echo "${G}●${NC}" || echo "${R}○${NC}")"
+    done <<< "$(db_account_members "$id")"
+    [[ -n "$(db_account_members "$id")" ]] || echo -e "   ${D}暂无，请添加协议${NC}"
+    _line
+}
+
+_account_create_interactive() {
+    local name quota_gb expire reset_day note id
+    echo ""
+    _line
+    echo -e "  ${W}新建统一用户${NC}"
+    _line
+    read -rp "  用户名 (字母/数字/_/-): " name
+    _account_valid_name "$name" || { _err "用户名无效"; return 1; }
+    read -rp "  流量配额 GB [0=不限]: " quota_gb; quota_gb="${quota_gb:-0}"
+    [[ "$quota_gb" =~ ^[0-9]{1,6}$ ]] || { _err "请输入有效数字"; return 1; }
+    expire=$(_account_ask_expire "") || return 1
+    read -rp "  每月重置日 1-28 [0=累计不重置]: " reset_day; reset_day="${reset_day:-0}"
+    read -rp "  备注 (可留空): " note
+    id=$(db_account_create "$name" "$((10#$quota_gb * 1073741824))" "$expire" "$reset_day" "$note") || return 1
+    _ok "统一用户 $name 已创建"
+    if [[ "$quota_gb" != 0 ]] && ! traffic_cron_entry_exists; then
+        _warn "流量统计定时任务未开启，配额无法自动执行；请在 流量统计设置 中开启"
+    fi
+    read -rp "  现在为其添加协议? [Y/n]: " confirm
+    [[ "$confirm" =~ ^[nN]$ ]] || _account_add_protocol_interactive "$id"
+}
+
+_account_edit_interactive() {
+    local id="$1" a choice value
+    while true; do
+        _account_show_detail "$id" || return 1
+        a=$(db_account_get "$id")
+        _item "1" "修改到期日期"
+        _item "2" "修改流量配额"
+        _item "3" "修改每月重置日"
+        _item "4" "$([[ "$(jq -r '.enabled != false' <<< "$a")" == true ]] && echo 停用 || echo 启用)此用户"
+        _item "5" "修改备注"
+        _item "6" "修改用户名"
+        _item "0" "返回"
+        _line
+        read -rp "  请选择: " choice
+        case "$choice" in
+            1) value=$(_account_ask_expire "$(jq -r '.expire_date // ""' <<< "$a")") && db_account_set "$id" expire_date "$value" && _ok "到期日期已更新" ;;
+            2) read -rp "  流量配额 GB [0=不限]: " value
+               [[ "$value" =~ ^[0-9]{1,6}$ ]] && db_account_set "$id" quota "$((10#$value * 1073741824))" && _ok "配额已更新（保留本周期已用量）" ;;
+            3) read -rp "  每月重置日 1-28 [0=累计不重置]: " value
+               db_account_set "$id" reset_day "$value" && _ok "重置日已更新（保留本周期已用量）" ;;
+            4) if [[ "$(jq -r '.enabled != false' <<< "$a")" == true ]]; then
+                   db_account_set "$id" enabled false && _ok "已停用全部成员协议"
+               else
+                   db_account_set "$id" enabled true && _ok "已启用（到期或超额时仍保持停用）"
+               fi ;;
+            5) read -rp "  备注: " value; db_account_set "$id" note "$value" && _ok "备注已更新" ;;
+            6) read -rp "  新用户名: " value; db_account_set "$id" name "$value" && _ok "用户名已更新（成员协议用户名不变）" ;;
+            0|"") return 0 ;;
+            *) _err "无效选择" ;;
+        esac
+        _pause
+    done
+}
+
+# 可加入统一用户的协议实例，输出 core|proto|port
+_account_instances() {
+    local core proto port
+    while IFS='|' read -r core proto port; do
+        [[ -z "$core" ]] && continue
+        _account_proto_supported "$proto" && echo "$core|$proto|$port"
+    done <<< "$(jq -r '["xray", "singbox"][] as $c | (.[$c] // {}) | to_entries[] | .key as $p |
+        (.value | if type == "array" then .[] else . end) | select(type == "object") | "\($c)|\($p)|\(.port)"' "$DB_FILE")"
+}
+
+_account_add_protocol_interactive() {
+    local id="$1" items=() line core proto port name choice i=1 seen_snell=""
+    echo ""
+    _line
+    echo -e "  ${W}添加协议${NC} ${D}(为该用户新建协议账号，凭据自动生成)${NC}"
+    _line
+    while IFS='|' read -r core proto port; do
+        [[ -z "$core" ]] && continue
+        # Snell 每个用户独立实例，按协议列出一次即可
+        if _is_snell_users_protocol "$proto"; then
+            [[ " $seen_snell " == *" $proto "* ]] && continue
+            seen_snell+=" $proto"
+            _item "$i" "$(get_protocol_name "$proto") ${D}(新建独立端口实例)${NC}"
+        else
+            _item "$i" "$(get_protocol_name "$proto") ${D}端口 $port${NC}"
+        fi
+        items+=("$core|$proto|$port")
+        ((i++))
+    done <<< "$(_account_instances)"
+    [[ ${#items[@]} -gt 0 ]] || { _err "没有可用的协议实例，请先安装支持多用户的协议"; return 1; }
+    _item "0" "返回"
+    _line
+    read -rp "  选择协议 [0-$((i-1))]: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice < i )) || return 0
+    IFS='|' read -r core proto port <<< "${items[$((choice-1))]}"
+    name=$(jq -r --arg id "$id" '.accounts[$id].name' "$DB_FILE")
+    read -rp "  成员用户名 [$name]: " line
+    [[ -n "$line" ]] && name="$line"
+    if db_account_member_new "$id" "$core" "$proto" "$port" "$name"; then
+        _ok "已添加 $(get_protocol_name "$proto")"
+        _account_member_share "$core" "$proto" "$(db_get_user_port "$core" "$proto" "$name")" "$name"
+    fi
+}
+
+# 未归属统一用户的协议用户，输出 core|proto|port|name|used
+_account_claimable_users() {
+    local core proto port name used
+    while IFS='|' read -r core proto port name used; do
+        [[ -z "$core" ]] && continue
+        _account_proto_supported "$proto" && echo "$core|$proto|$port|$name|$used"
+    done <<< "$(jq -r '["xray", "singbox"][] as $c | (.[$c] // {}) | to_entries[] | .key as $p |
+        (.value | if type == "array" then .[] else . end) | select(type == "object") | . as $row |
+        (if (.users | type) == "array" then .users[] elif ((.uuid // .password // .psk) != null) then {name: "default", used: 0} else empty end) |
+        select(.account_id == null) | "\($c)|\($p)|\($row.port)|\(.name)|\(.used // 0)"' "$DB_FILE")"
+}
+
+_account_claim_interactive() {
+    local id="$1" items=() core proto port name used choice i=1 count
+    echo ""
+    _line
+    echo -e "  ${W}归入现有协议用户${NC} ${D}(保留原凭据，客户端无需更换)${NC}"
+    _line
+    while IFS='|' read -r core proto port name used; do
+        [[ -z "$core" ]] && continue
+        _item "$i" "$(get_protocol_name "$proto") 端口 $port 用户 $name ${D}(累计 $(format_bytes "$used"))${NC}"
+        items+=("$core|$proto|$port|$name")
+        ((i++))
+    done <<< "$(_account_claimable_users)"
+    [[ ${#items[@]} -gt 0 ]] || { _err "没有可归入的协议用户"; return 1; }
+    _item "0" "返回"
+    _line
+    read -rp "  选择用户 [0-$((i-1))]: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice < i )) || return 0
+    IFS='|' read -r core proto port name <<< "${items[$((choice-1))]}"
+    _warn "归入后该用户原有的配额与到期设置由统一用户取代"
+    read -rp "  将其已用流量计入本周期? [Y/n]: " count
+    [[ "$count" =~ ^[nN]$ ]] && count=false || count=true
+    db_account_member_add "$id" "$core" "$proto" "$port" "$name" "$count" && _ok "已归入"
+}
+
+_account_pick_member() {
+    local id="$1" items=() core proto port name choice i=1
+    while IFS='|' read -r core proto port name; do
+        [[ -z "$core" ]] && continue
+        _item "$i" "$(get_protocol_name "$proto") 端口 $port 用户 $name"
+        items+=("$core|$proto|$port|$name")
+        ((i++))
+    done <<< "$(db_account_members "$id")"
+    [[ ${#items[@]} -gt 0 ]] || { _err "该用户暂无成员协议"; return 1; }
+    _item "0" "返回"
+    read -rp "  选择成员 [0-$((i-1))]: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice < i )) || return 1
+    SELECTED_MEMBER="${items[$((choice-1))]}"
+}
+
+_account_remove_member_interactive() {
+    local id="$1" core proto port name mode
+    _account_pick_member "$id" || return 0
+    IFS='|' read -r core proto port name <<< "$SELECTED_MEMBER"
+    echo -e "  1) 保留为普通协议用户（凭据不变，保持当前启停状态）"
+    echo -e "  2) 同时删除该协议用户（旧连接失效）"
+    read -rp "  请选择 [1]: " mode
+    [[ "$mode" == 2 ]] && mode=delete || mode=release
+    if [[ "$mode" == delete ]]; then
+        read -rp "  确认删除 $(get_protocol_name "$proto") 用户 $name? [y/N]: " confirm
+        [[ "$confirm" =~ ^[yY]$ ]] || return 0
+    fi
+    db_account_member_remove "$id" "$core" "$proto" "$port" "$name" "$mode" && _ok "成员已移除"
+}
+
+_account_member_share() {
+    local core="$1" proto="$2" port="$3" name="$4" credential
+    credential=$(jq -r --arg c "$core" --arg p "$proto" --argjson port "$port" --arg n "$name" "$(_account_jq_defs)"'
+        member_user({core: $c, protocol: $p, port: $port, name: $n}).uuid // ""' "$DB_FILE")
+    [[ -n "$credential" ]] || return 1
+    echo ""
+    echo -e "  ${C}$(get_protocol_name "$proto") · 端口 $port · $name${NC}"
+    _gen_user_share_link "$core" "$proto" "$credential" "$name" "$port"
+}
+
+_account_share_interactive() {
+    local id="$1" core proto port name
+    while IFS='|' read -r core proto port name; do
+        [[ -z "$core" ]] && continue
+        _account_member_share "$core" "$proto" "$port" "$name" || _warn "$proto 端口 $port 无法生成分享链接"
+    done <<< "$(db_account_members "$id")"
+}
+
+_account_merge_interactive() {
+    local list name expire count members id target
+    list=$(_account_merge_candidates)
+    echo ""
+    _line
+    echo -e "  ${W}按用户名批量归并${NC}"
+    _line
+    if [[ -z "$list" ]]; then
+        echo -e "  ${D}没有出现在多个协议中的同名用户${NC}"
+        return 0
+    fi
+    echo -e "  ${D}以下同名用户将归入同名统一用户（已存在则加入）；凭据不变，${NC}"
+    echo -e "  ${D}原配额不再单独生效（新建的统一用户配额为不限，可稍后设置），到期取最晚者${NC}"
+    while IFS='|' read -r name expire count members; do
+        [[ -z "$name" ]] && continue
+        target=$(db_account_find "$name")
+        echo -e "  • ${G}$name${NC} ${D}$count 个: ${members//,/ }${NC}  到期: ${expire:-永不过期}$([[ -n "$target" ]] && echo " ${Y}(加入已有统一用户，沿用其设置)${NC}")"
+    done <<< "$list"
+    _line
+    read -rp "  确认执行归并? [y/N]: " confirm
+    [[ "$confirm" =~ ^[yY]$ ]] || return 0
+    local failed=0 core proto port member
+    while IFS='|' read -r name expire count members; do
+        [[ -z "$name" ]] && continue
+        id=$(db_account_find "$name")
+        [[ -n "$id" ]] || id=$(db_account_create "$name" 0 "$expire" 0 "") || { failed=1; continue; }
+        for member in ${members//,/ }; do
+            IFS=':' read -r core proto port <<< "$member"
+            db_account_member_add "$id" "$core" "$proto" "$port" "$name" true || failed=1
+        done
+    done <<< "$list"
+    [[ "$failed" == 0 ]] && _ok "归并完成" || _warn "部分用户未能归并，请查看上方提示"
+}
+
+manage_accounts() {
+    local choice id confirm
+    while true; do
+        _header
+        _account_show_list
+        _item "1" "新建统一用户"
+        _item "2" "查看/修改用户（到期、配额、重置日、启停）"
+        _item "3" "添加协议（新建协议账号）"
+        _item "4" "归入现有协议用户"
+        _item "5" "移除协议"
+        _item "6" "查看分享链接"
+        _item "7" "重置凭据"
+        _item "8" "重置本周期用量"
+        _item "9" "删除统一用户"
+        _item "m" "按用户名批量归并"
+        _item "u" "解除 Vaio 平台关联"
+        _item "0" "返回"
+        _line
+        read -rp "  请选择: " choice
+        case "$choice" in
+            1) _account_create_interactive ;;
+            2) _account_select && _account_edit_interactive "$SELECTED_ACCOUNT"; continue ;;
+            3) _account_select && _account_add_protocol_interactive "$SELECTED_ACCOUNT" ;;
+            4) _account_select && _account_claim_interactive "$SELECTED_ACCOUNT" ;;
+            5) _account_select && _account_remove_member_interactive "$SELECTED_ACCOUNT" ;;
+            6) _account_select && _account_share_interactive "$SELECTED_ACCOUNT" ;;
+            7) if _account_select; then
+                   id="$SELECTED_ACCOUNT"
+                   echo -e "  1) 重置全部成员凭据   2) 只重置一个成员"
+                   read -rp "  请选择 [1]: " choice
+                   if [[ "$choice" == 2 ]]; then
+                       _account_pick_member "$id" && db_account_reset_credentials "$id" ${SELECTED_MEMBER//|/ } && _ok "凭据已重置，请重新导出分享链接"
+                   else
+                       read -rp "  旧连接将全部失效，确认? [y/N]: " choice
+                       [[ "$choice" =~ ^[yY]$ ]] && db_account_reset_credentials "$id" && _ok "凭据已重置，请重新导出分享链接"
+                   fi
+               fi ;;
+            8) _account_select && read -rp "  确认清零本周期用量? [y/N]: " choice && [[ "$choice" =~ ^[yY]$ ]] &&
+                   db_account_reset_usage "$SELECTED_ACCOUNT" && _ok "已清零，超额停用的协议已恢复" ;;
+            9) if _account_select; then
+                   id="$SELECTED_ACCOUNT"
+                   echo -e "  1) 保留成员为普通协议用户   2) 同时删除全部成员协议用户"
+                   read -rp "  请选择 [1]: " choice
+                   [[ "$choice" == 2 ]] && choice=delete || choice=release
+                   read -rp "  确认删除统一用户? [y/N]: " confirm
+                   [[ "$confirm" =~ ^[yY]$ ]] && db_account_delete "$id" "$choice" && _ok "已删除"
+               fi ;;
+            m|M) _account_merge_interactive ;;
+            u|U) _account_select && read -rp "  解除后该用户只在本机管理，平台不再同步，确认? [y/N]: " choice &&
+                     [[ "$choice" =~ ^[yY]$ ]] && db_account_unlink_platform "$SELECTED_ACCOUNT" && _ok "已解除平台关联" ;;
+            0|"") return 0 ;;
+            *) _err "无效选择" ;;
+        esac
+        _pause
+    done
+}
+
 manage_users() {
     while true; do
         _header
@@ -30088,6 +30480,8 @@ manage_users() {
             done <<< "$protocols"
         fi
         
+        _line
+        _item "a" "统一用户（一人多协议，统一到期与流量）"
         _line
         _item "1" "查看用户列表"
         _item "2" "添加用户"
@@ -30179,6 +30573,9 @@ manage_users() {
                     _snell_edit_user "$SELECTED_PROTO"
                     _pause
                 fi
+                ;;
+            a|A)
+                manage_accounts
                 ;;
             t|T)
                 _configure_tg_notify

@@ -20,6 +20,10 @@ for fn in _account_jq_defs _account_valid_id _account_valid_name _account_valid_
     _accounts_user_states _accounts_reload _accounts_reload_or_queue accounts_apply db_account_create db_account_set _account_materialize_default \
     db_account_member_add db_account_member_new db_get_user_port db_account_member_remove db_account_delete \
     db_account_reset_usage db_account_unlink_platform db_account_reset_credentials _account_merge_candidates \
+    _account_member_guard _account_ask_expire _account_instances _account_claimable_users _account_reason_text \
+    _account_show_list _account_select _account_show_detail _account_create_interactive _account_edit_interactive \
+    _account_add_protocol_interactive _account_claim_interactive _account_pick_member _account_remove_member_interactive \
+    _account_member_share _account_share_interactive _account_merge_interactive manage_accounts format_bytes \
     _db_apply db_get_user_field db_list_users is_standalone_protocol _is_snell_users_protocol reset_monthly_user_traffic; do
     load "$fn"
 done
@@ -213,3 +217,40 @@ reset_monthly_user_traffic >/dev/null
 grep -qx erin "$fixture/reset" || fail $LINENO
 ! grep -qx carol "$fixture/reset" || fail $LINENO
 echo 'PASS delete keeps members as plain users, global monthly reset skips account members'
+
+# 14. 菜单辅助：成员保护、到期输入、可选实例与可归入用户
+id3=$(db_account_create frank 0 "" 0)
+db_account_member_add "$id3" xray trojan 2 erin true
+if _account_member_guard xray trojan 2>/dev/null erin; then fail $LINENO; fi
+_account_member_guard singbox hy2 erin || fail $LINENO
+[[ "$(_account_ask_expire 2027-01-01 <<< '')" == 2027-01-01 ]] || fail $LINENO
+[[ "$(_account_ask_expire 2027-01-01 <<< 0)" == "" ]] || fail $LINENO
+[[ "$(_account_ask_expire '' <<< 2028-02-03)" == 2028-02-03 ]] || fail $LINENO
+if _account_ask_expire '' <<< 'tomorrow' >/dev/null; then fail $LINENO; fi
+inst=$(_account_instances)
+grep -qx 'xray|vless|443' <<< "$inst" || fail $LINENO
+grep -qx 'singbox|hy2|8443' <<< "$inst" || fail $LINENO
+claim=$(_account_claimable_users)
+grep -q '^singbox|hy2|8443|erin|' <<< "$claim" || fail $LINENO
+! grep -q '|trojan|2|erin|' <<< "$claim" || fail $LINENO
+[[ "$(_account_reason_text platform_quota)" == 平台总流量已用尽 ]] || fail $LINENO
+echo 'PASS menu helpers: member guard, expiry input, instance and claimable listings'
+
+# 15. 菜单流程冒烟：新建→添加协议→修改配额→查看分享→批量归并→删除
+_header() { :; }; _line() { :; }; _dline() { :; }; _item() { :; }; _pause() { read -r _ || true; }
+traffic_cron_entry_exists() { return 0; }
+_gen_user_share_link() { echo "LINK $2 $5 $4" >> "$fixture/links"; }
+D=; C=; W=; G=; R=; Y=; NC=
+# 现有统一用户按名称排序为 dave、frank，新建的 grace 排第 3。
+printf '%s\n' 1 grace 5 30 1 "" y 1 "" "" 2 3 2 50 "" 0 6 3 "" 0 | manage_accounts >/dev/null 2>&1 || true
+gid=$(db_account_find grace)
+[[ -n "$gid" ]] || fail $LINENO
+[[ "$(q --arg id "$gid" '.accounts[$id] | "\(.quota)|\(.reset_day)|\(.members | length)"')" == "53687091200|1|1" ]] || fail $LINENO
+grep -q '^LINK ' "$fixture/links" || fail $LINENO
+printf '%s\n' m y "" 0 | manage_accounts >/dev/null 2>&1 || true
+[[ "$(q --arg id "$(db_account_find alice)" '.accounts[$id].members | length')" == 2 ]] || fail $LINENO
+gidx=$(db_account_list | awk -F'|' '$2 == "grace" {print NR}')
+printf '%s\n' 9 "$gidx" 2 y "" 0 | manage_accounts >/dev/null 2>&1 || true
+[[ -z "$(db_account_find grace)" ]] || fail $LINENO
+[[ "$(q '[.xray.vless.users[].name] | index("grace")')" == null ]] || fail $LINENO
+echo 'PASS interactive menu smoke: create, add protocol, edit quota, share, merge, delete'
