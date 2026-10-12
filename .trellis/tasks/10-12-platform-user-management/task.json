@@ -1,0 +1,30 @@
+{
+  "id": "platform-user-management",
+  "name": "platform-user-management",
+  "title": "平台统一用户管理",
+  "description": "面板端全局用户统一管理时限和流量，一个用户可绑定多个节点的多个协议，脚本、Agent、面板同步更新",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "moqinzhao",
+  "assignee": "moqinzhao",
+  "createdAt": "2026-10-12",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "10-12-script-user-api",
+    "10-12-agent-platform-users",
+    "10-12-panel-platform-users"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

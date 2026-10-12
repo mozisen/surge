@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/10-12-platform-user-management/design.md", "reason": "跨层技术设计"}
+{"file": ".trellis/tasks/10-12-platform-user-management/research/current-state.md", "reason": "现状调研"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "黑白组件与测试接口约定"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "数据库约定"}

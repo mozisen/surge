@@ -1,0 +1,17 @@
+# 面板平台用户管理（0.3.0-preview.11）
+
+父任务：`10-12-platform-user-management`。技术设计见父任务 `design.md` §2–4、§7、§8。依赖子任务 `10-12-agent-platform-users`。
+
+## Requirements
+- SQLite 迁移到 user_version 2：`platform_users`、`platform_bindings`；备份校验接受 v2，旧的 v1 备份恢复后自动补表。
+- poll 时累计各绑定的周期用量；按用户的重置日（面板时区）切换周期；派生到期、超额、手动停用状态。
+- 调度：计算期望状态，按节点合并下发 `platform_apply`，相同差异不重复入队；离线节点显示待同步；unknown 任务阻塞，等人工核对。
+- 管理员接口：用户增删改查、添加绑定（新建用户、认领现有用户、为 Snell/SS 新建实例）、解除绑定、删除节点用户、重置用量、重置凭据（单个或全部）。
+- 告警改为按平台用户：80%、超额、3 天内到期、同步失败。
+- 界面：「用户管理」列表和详情、添加绑定弹窗、实例弹窗联动（平台标记、认领）、流量页平台用户汇总。中文文案、黑白简约，遵守组件规范，保持现有元素 id。
+
+## Acceptance Criteria
+- [ ] `tests/test_platform_users_panel.py`：跨节点累计、超额全停和周期恢复、到期与延长、认领保留用量、离线待同步、旧 Agent 拒绝绑定、入队去重、unknown 阻塞、备份 v1/v2 恢复、接口鉴权和 CSRF
+- [ ] `tests/platform-users.cjs` 加入 CI；现有 cjs 测试不变（本机无 Node，以 Actions 为准）
+- [ ] 本地预览截图检查列表、详情、绑定弹窗
+- [ ] `platform/docs/platform-users.md`；版本号 0.3.0-preview.11
