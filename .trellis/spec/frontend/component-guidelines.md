@@ -78,6 +78,16 @@ meter(label, percent)           // 10 segments; known -> role="meter" + aria-val
 `<td class="num">${trafficValue(total.value)}</td>`
 ```
 
+### Convention: user management lives after the test slices
+
+**What**: the user management section (`usersPage`, `userDetail`, `userForm`, `linkDialog`, `membersDialog`, `userAction`, `userTraffic`) is appended at the end of `app.js` behind the marker comment `// ---------------------------------------------------------------- 用户管理（平台用户）`. `tests/platform-users.cjs` slices from that marker to the end of the file and stubs `esc/bytes/names/icon/meter/stat/shell/modal/api/post/$/nodes/location/submitTask`.
+
+**Why**: `trafficPage()` may not call outside helpers, so the per-user traffic table is a separate `userTraffic()` that inserts `#user-traffic` before `.footer-note` after `trafficPage()` renders (also after `traffic-node`). Keep new user-management code after the marker; keep the `pu-` prefix for its `data-action` values (dispatched by `userAction`).
+
+**Gotcha**: objects created inside the vm realm fail `assert.deepStrictEqual` against objects from the test realm; compare `JSON.parse(JSON.stringify(value))`.
+
+Statuses that are not task states (`userStates`, `syncStates`) render through `stateBadge(map, key)` with an existing badge class, never a new colour.
+
 ### Pattern: whole-row link in the node list
 
 `.node-row` is a grid row; the name `<a href="#nodes/ID">` gets `::after { position:absolute; inset:0 }` so the row is clickable. Keep every other interactive element out of `.node-row` (the overlay would cover it) and keep the inset focus outline on the link.
