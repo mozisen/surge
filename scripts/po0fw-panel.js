@@ -2,8 +2,9 @@
 (function () {
   'use strict';
   var finished = false;
+  var panelTitle = 'Po0槽位面板';
   function done(result) { if (!finished) { finished = true; $done(result); } }
-  function error(message) { done({title: 'po0fw · 查询失败', content: message + '\n未展示历史数据，请稍后刷新。', style: 'error'}); }
+  function error(message) { done({title: panelTitle, content: message + '\n未展示历史数据，请稍后刷新。', style: 'error'}); }
   function args(text) {
     var result = {};
     String(text || '').split('&').forEach(function (part) {
@@ -13,6 +14,7 @@
     return result;
   }
   function clean(text) { return String(text).replace(/[\r\n\t]/g, ' '); }
+  function names(text) { return String(text || '').split('|').map(function (name) { return clean(name).trim(); }); }
   function integer(value) { return typeof value === 'number' && isFinite(value) && Math.floor(value) === value; }
   function render(data) {
     if (!data || !Array.isArray(data.whitelist)) throw new Error('schema');
@@ -30,22 +32,23 @@
     });
     fixed.sort(function (a, b) { return Number(a.slot) - Number(b.slot); });
     var lines = ['占用 ' + list.length + '/' + (knownLimit ? limit : '?') + ' · 剩余 ' + (knownLimit ? Math.max(0, limit-list.length) : '?')];
-    lines.push('本机出口：' + (current ? clean(current) : '接口未返回'));
-    lines.push(current ? (hit ? '✓ 当前出口已在白名单' : '⚠ 当前出口未在白名单') : '当前出口命中状态未知');
-    function row(label, entry) { lines.push((entry.ip === current ? '● ' : '○ ') + label + '  ' + clean(entry.ip)); }
-    fixed.forEach(function (entry) { row('固定槽 ' + entry.slot, entry); });
-    fifo.forEach(function (entry, index) { row('FIFO ' + (index + 1), entry); });
+    if (!current) lines.push('当前出口命中状态未知');
+    else if (!hit) lines.push('⚠ 当前出口未在白名单');
+    var fixedNames = names(config.fixed_names), fifoNames = names(config.fifo_names);
+    function row(label, entry) { lines.push((entry.ip === current ? '🟢 ' : '○ ') + label + '  ' + clean(entry.ip)); }
+    fixed.forEach(function (entry) { row(fixedNames[Number(entry.slot)] || '固定槽 ' + entry.slot, entry); });
+    fifo.forEach(function (entry, index) { row(fifoNames[index] || 'FIFO ' + (index + 1), entry); });
     other.forEach(function (entry, index) { row('未标注槽位 ' + (index + 1), entry); });
     if (!list.length) lines.push('白名单为空');
     lines.push('更新 ' + new Date().toLocaleTimeString());
-    done({title: 'po0fw · 全部槽位', content: lines.join('\n'), style: current ? (hit ? 'good' : 'alert') : 'info'});
+    done({title: panelTitle, content: lines.join('\n'), style: current ? (hit ? 'good' : 'alert') : 'info'});
   }
   var config;
   try { config = args(typeof $argument === 'undefined' ? '' : $argument); }
   catch (_) { error('模块参数格式错误。'); return; }
   var token = String(config.token || '').trim().replace(/@\d+$/, '');
   if (!/^pgnfw_[A-Za-z0-9_-]+$/.test(token) || token === 'pgnfw_REPLACE_ME') {
-    done({title: 'po0fw · 待配置', content: '请在模块 TOKEN 参数填写一个有效 token。\n显示此 token 对应的全部白名单记录。', style: 'info'}); return;
+    done({title: panelTitle, content: '请在模块 TOKEN 参数填写一个有效 token。\n显示此 token 对应的全部白名单记录。', style: 'info'}); return;
   }
   setTimeout(function () { error('查询超时，请检查网络或 API 可用性。'); }, 13000);
   try {
