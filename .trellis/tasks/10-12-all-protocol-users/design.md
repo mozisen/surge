@@ -13,7 +13,7 @@
 | Xray socks | single | inbound（Xray 入站统计） |
 | snell、snell-v5、snell-v6 | single | port（nft，现状） |
 | snell-shadowtls、snell-v5-shadowtls、ss2022-shadowtls | single | port（nft） |
-| naive | single | port（nft） |
+| naive（D2b，不纳入） | none | — |
 | SOCKS 免认证（`auth_mode=noauth`） | none | — |
 
 `capabilities` 增加 `user_modes`（协议 → 模式与统计），`inventory` 的每个实例增加 `user_mode`、`user_stats`。`accounts_api.version` 升为 3。
@@ -35,18 +35,17 @@
 - `account_apply` 之外新增 `--api account_share {target, name}`，按协议调用现有的 `_gen_user_share_link`，返回链接文本。只读，不写结果记录；Agent 把它作为 `share` 任务的结果（现有的 10 分钟清理逻辑）。
 
 ### 2.4 安装提示
-- 安装菜单在选择协议后，按能力表提示：`single` 显示「一用户一实例，流量按端口/入站统计」；`none`（SOCKS 选择免认证时）显示「该协议不支持用户管理」。
+- 安装菜单在选择协议后，按能力表提示：`single` 显示「一用户一实例，流量按端口/入站统计」；`none`（Naive，以及 SOCKS 选择免认证时）显示「该协议不支持用户管理」。
 - 平台模式下脚本安装不生成 default 用户（空实例）。
 
 ## 3. 阶段 B：一用户一实例适配（子任务 2，脚本 3.7.4-preview.7）
 
-对 SOCKS、Naive、Snell+ShadowTLS、Snell v5+ShadowTLS、SS2022+ShadowTLS：
+对 SOCKS、Snell+ShadowTLS、Snell v5+ShadowTLS、SS2022+ShadowTLS：
 
 - **多实例**：数据库行改为数组（每个实例独立端口、`instance_id`），沿用 Snell 用户实例的显式迁移思路：现有单实例原样保留为第一个实例，迁移只在管理员分配或新增实例时发生。
   - SOCKS：Xray 每个实例一个入站（已支持多端口数组），入站标签固定，统计按入站标签计入该实例的唯一用户。
-  - Naive：同一个 Caddy，每个实例一个站点块（独立端口、独立 `basic_auth`）；停用一个实例就移除它的站点块并重载 Caddy。nft 按端口计数。
   - ShadowTLS 组合：每个实例一套独立的前端 shadow-tls 服务和后端服务（`vless-<proto>-<instance_id>`、`...-backend-<instance_id>`），后端端口自动分配。停用就停这两个服务。nft 按前端端口计数。
-- **用户记录**：每个实例 `users=[{name, uuid, ...}]`（最多一个）。凭据映射：SOCKS 用户名=name、密码=uuid；Naive basic_auth 同上；Snell PSK=uuid；SS2022 密钥=uuid；ShadowTLS 密码随实例生成，分配时一并更换。
+- **用户记录**：每个实例 `users=[{name, uuid, ...}]`（最多一个）。凭据映射：SOCKS 用户名=name、密码=uuid；Snell PSK=uuid；SS2022 密钥=uuid；ShadowTLS 密码随实例生成，分配时一并更换。
 - **启停门控**：沿用 `_snell_prepare_user` 的模式：服务启动前检查用户启用、未到期、未超额；统一用户结算后状态变化时重写配置并启停。
 - **计数**：nft 计数器复用 Snell 的 `vless_snell_users` 表结构（改名为通用的端口计数表并兼容旧表），流量同步写入用户 `used`；SOCKS 用 Xray 入站统计。
 
@@ -65,5 +64,5 @@
 - **提示**：安装表单对 `none` 显示「该协议不支持用户管理」。
 
 ## 6. 兼容
-- SS2022 单密码实例、现有 SOCKS/Naive/ShadowTLS 单实例在未分配或迁移前行为不变。
+- SS2022 单密码实例、现有 SOCKS/ShadowTLS 单实例在未分配或迁移前行为不变。
 - 旧 Agent / 旧脚本不上报 `user_mode`：面板按现状处理（只允许 managed 多用户实例）。

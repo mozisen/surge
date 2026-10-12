@@ -18,7 +18,12 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "10-12-script-protocol-users",
+    "10-12-script-single-instances",
+    "10-12-agent-protocol-users",
+    "10-12-panel-protocol-users"
+  ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
