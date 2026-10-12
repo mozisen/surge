@@ -18,7 +18,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
 from . import platform_users
-from .common import MUTATIONS, LEGACY_COMBINATIONS, digest, require_text, validate_task
+from .common import MUTATIONS, LEGACY_COMBINATIONS, digest, require_text, validate_platform_task, validate_task, validate_upgrade_task
 from .install_options import ADVANCED_INSTALL_FIELDS, REALITY_INSTALL_FIELDS
 from .store import Store
 
@@ -568,6 +568,11 @@ def create_app(config=None):
                 return jsonify(error="节点不支持凭据重置，请先升级 Agent"), 409
             if (task["core"], task["protocol"]) not in LEGACY_COMBINATIONS and {"core": task["core"], "protocol": task["protocol"]} not in capabilities:
                 return jsonify(error="节点尚未声明此协议写入能力，请先升级 Agent"), 409
+            snapshot = json.loads(node["snapshot"])
+            if task["action"].startswith("user_") and snapshot.get("authority_version") == 1:
+                # Users are managed by exactly one side; nodes that report it never take panel user edits here.
+                return jsonify(error="该节点的用户由平台「用户管理」管理" if snapshot.get("user_authority") == "platform"
+                               else "该节点的用户由节点脚本管理，面板只读；可在节点详情中切换为平台管理"), 409
             if task["action"] in MUTATIONS:
                 if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status='unknown'", (node_id,)).fetchone():
                     return jsonify(error="该节点有结果未知的任务，请先核对并处理，再提交写入"), 409
@@ -656,8 +661,7 @@ def create_app(config=None):
         with store.connect() as db:
             nodes = platform_nodes(db)
             users = [platform_users.describe(db, u, nodes) for u in db.execute("SELECT * FROM platform_users ORDER BY name").fetchall()]
-            unlinked = platform_users.unlinked_accounts(db, {k: v for k, v in nodes.items() if v["deleted"] is None})
-        return jsonify(users=users, unlinked=unlinked)
+        return jsonify(users=users)
 
     @app.post("/api/users")
     @admin
@@ -703,10 +707,10 @@ def create_app(config=None):
     @admin
     def platform_link_add(user_id):
         data = body()
-        if set(data) - {"node_id", "members", "account_id", "prefer"} or not isinstance(data.get("node_id"), str):
+        if set(data) - {"node_id", "members"} or not isinstance(data.get("node_id"), str):
             raise ValueError("关联参数无效")
         return platform_change(user_id, "platform.link_added", lambda db: {"link_id": platform_users.add_link(
-            db, user_id, data["node_id"], data.get("members"), data.get("account_id"), data.get("prefer", "panel"))})
+            db, user_id, data["node_id"], data.get("members"))})
 
     @app.post("/api/users/<user_id>/reset-usage")
     @admin
@@ -741,6 +745,57 @@ def create_app(config=None):
     def platform_link_member(link_id):
         data = body()
         return link_change(link_id, "platform.member_changed", lambda db, link: platform_users.member_op(db, link, data))
+
+    def node_task(node_id, action, request, check):
+        """System-built task for one node (authority switch, upgrade); no parameters cross the wire."""
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            node = db.execute("SELECT * FROM nodes WHERE id=? AND deleted IS NULL AND revoked=0", (node_id,)).fetchone()
+            if not node or not node["last_seen"] or time.time() - node["last_seen"] > 45:
+                return jsonify(error="节点离线或身份已撤销"), 409
+            if node["maintenance"]:
+                return jsonify(error="节点正在维护，请稍后再试"), 409
+            if not node["adopted"]:
+                return jsonify(error="请先确认接管节点"), 409
+            error = check(node, json.loads(node["snapshot"]))
+            if error:
+                return jsonify(error=error), 409
+            if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status IN ('queued','running','unknown')", (node_id,)).fetchone():
+                return jsonify(error="该节点有未完成或待核对的任务，请先处理"), 409
+            task_id = str(uuid.uuid4())
+            db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
+                       (task_id, node_id, action, json.dumps(request), "queued", time.time(), "system:" + task_id))
+            audit(db, "task.queued", node_id, task_id + " " + action)
+        return jsonify(id=task_id, status="queued"), 201
+
+    @app.post("/api/nodes/<node_id>/authority")
+    @admin
+    def node_authority(node_id):
+        data = body()
+        mode = data.get("mode")
+        if set(data) - {"mode", "confirm"} or mode not in ("script", "platform"):
+            raise ValueError("用户管理方式无效")
+        def check(node, snapshot):
+            if snapshot.get("authority_version") != 1 or snapshot.get("accounts_version") != 1:
+                return "该节点程序或脚本版本过旧，请先升级节点"
+            if snapshot.get("user_authority") == mode:
+                return "该节点已是此管理方式"
+            if mode == "platform" and data.get("confirm") != node["name"]:
+                return "请输入节点名称确认：切换后节点上的全部用户和凭据都会删除"
+        return node_task(node_id, "platform_apply", validate_platform_task(
+            {"action": "platform_apply", "params": {"ops": [{"op": "set_authority", "mode": mode}]}}), check)
+
+    @app.post("/api/nodes/<node_id>/upgrade")
+    @admin
+    def node_upgrade(node_id):
+        if body():
+            raise ValueError("升级不接受参数")
+        def check(node, snapshot):
+            if snapshot.get("upgrade_version") != 1:
+                return "该节点程序不支持一键升级，请先用命令完成一次升级"
+            if snapshot.get("agent_version") == __version__:
+                return "节点程序已是面板版本"
+        return node_task(node_id, "agent_upgrade", validate_upgrade_task({"action": "agent_upgrade", "params": {}}), check)
 
     @app.get("/api/audit")
     @admin

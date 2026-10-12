@@ -152,7 +152,7 @@ def scan(store, now=None):
             transition(db, 'puser-sync:' + user['id'], label + ' · 节点同步失败或结果未知', bool(failing), now, enabled)
         platform_users.schedule(db, now)
         for task in db.execute("SELECT tasks.*, nodes.name FROM tasks JOIN nodes ON nodes.id=tasks.node_id WHERE tasks.status IN ('failed','unknown') AND finished>?", (now - 3600,)).fetchall():
-            transition(db, 'task:' + task['id'], task['name'] + ' · 任务失败或结果未知：' + {'install':'安装协议','update':'修改实例','delete':'删除实例','user_add':'新增用户','user_update':'修改用户','user_delete':'删除用户','start':'启动服务','stop':'停止服务','restart':'重启服务','share':'导出连接','inspect':'检查配置','platform_apply':'平台用户同步'}.get(task['action'], '节点操作') + '（' + task['id'][:8] + '）', True, now, enabled)
+            transition(db, 'task:' + task['id'], task['name'] + ' · 任务失败或结果未知：' + {'install':'安装协议','update':'修改实例','delete':'删除实例','user_add':'新增用户','user_update':'修改用户','user_delete':'删除用户','start':'启动服务','stop':'停止服务','restart':'重启服务','share':'导出连接','inspect':'检查配置','platform_apply':'平台用户同步','agent_upgrade':'一键升级'}.get(task['action'], '节点操作') + '（' + task['id'][:8] + '）', True, now, enabled)
         db.execute('DELETE FROM samples WHERE bucket<?', (int(now//60)-7*1440,))
         db.execute('DELETE FROM notifications WHERE at<?', (now-30*86400,))
         db.execute("DELETE FROM incidents WHERE key LIKE 'task:%' AND at<?", (now-2*86400,))

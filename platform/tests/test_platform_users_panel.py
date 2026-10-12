@@ -17,8 +17,8 @@ GIB = 1073741824
 class SimNode:
     """A node that executes platform_apply like the script's account_apply."""
 
-    def __init__(self, test, name, version=1):
-        self.test, self.version, self.accounts, self.clock = test, version, {}, 1760000000
+    def __init__(self, test, name, version=1, authority='platform'):
+        self.test, self.version, self.accounts, self.clock, self.authority = test, version, {}, 1760000000, authority
         self.protocol_users = {('xray', 'vless', 443): {}, ('singbox', 'hy2', 8443): {}}
         result = test.client.post('/api/nodes', json={"name": name}, headers=test.headers)
         self.id = result.json['node_id']
@@ -43,7 +43,8 @@ class SimNode:
             accounts[identity] = {**{k: a[k] for k in ("name", "note", "enabled", "expire_date", "quota", "reset_day", "rev", "mtime")},
                                   "cycle": "", "cycle_used": 0, "platform_user_id": a.get("platform_user_id"),
                                   "platform_block": a.get("platform_block", ""), "state": "", "members": members}
-        return {"revision": "a" * 64, "instances": instances, "metrics": {}, "accounts_version": self.version, "accounts": accounts}
+        return {"revision": "a" * 64, "instances": instances, "metrics": {}, "accounts_version": self.version, "accounts": accounts,
+                "authority_version": self.version, "user_authority": self.authority, "upgrade_version": self.version, "agent_version": "0.3.0-preview.11"}
 
     def poll(self, run=True):
         reply = self.test.client.post('/api/agent/' + self.id + '/poll', json={"snapshot": self.snapshot(), "ready": True}, headers=self.auth).json
@@ -68,6 +69,15 @@ class SimNode:
         if getattr(self, 'outcome', None):
             outcome, self.outcome = self.outcome, None
             return outcome
+        if task["action"] == "agent_upgrade":
+            return "succeeded", "已启动升级"
+        if task["params"]["ops"][0]["op"] == "set_authority":
+            self.authority = task["params"]["ops"][0]["mode"]
+            if self.authority == "platform":
+                self.accounts = {}
+                for users in self.protocol_users.values():
+                    users.clear()
+            return "succeeded", "操作完成"
         for op in task["params"]["ops"]:
             account = self.accounts.get(op["account_id"])
             if op["op"] == "update" and account["rev"] != op["base_rev"]:
@@ -154,24 +164,14 @@ class PlatformUsersPanel(unittest.TestCase):
             self.assertEqual((self.account(node)[1]["expire_date"], self.account(node)[1]["note"]), ("2099-06-30", "vip"))
         self.assertEqual([op["op"] for op in a.tasks[-1]["params"]["ops"]], ["update"])
 
-    def test_node_change_propagates_and_later_change_wins(self):
+    def test_panel_is_the_only_writer_on_platform_nodes(self):
         user, a, b = self.linked_pair()
         identity, account = self.account(a)
-        account["expire_date"] = "2099-03-01"; a.touch(account, "expire_date")
+        account["expire_date"] = "2000-01-01"; a.touch(account, "expire_date")
         a.settle(); b.settle()
-        self.assertEqual(self.user(user)["expire_date"], "2099-03-01")
-        self.assertEqual(self.account(b)[1]["expire_date"], "2099-03-01")
-        # Both changed: the node's change is older than the panel's, so the panel wins.
-        account["note"] = "node"; a.clock = 1000; a.touch(account, "note")
-        self.post('/users/' + user, {"note": "panel"})
-        a.settle(); b.settle()
-        self.assertEqual((self.user(user)["note"], account["note"], self.account(b)[1]["note"]), ("panel", "panel", "panel"))
-        self.assertIn("已按后改的一方合并", [l for l in self.user(user)["links"] if l["node_id"] == a.id][0]["notice"])
-        # Both changed again, the node later this time: the node wins everywhere.
-        self.post('/users/' + user, {"note": "panel2"})
-        account["note"] = "node2"; a.clock = int(time.time()) + 1000; a.touch(account, "note")
-        a.settle(); b.settle()
-        self.assertEqual((self.user(user)["note"], self.account(b)[1]["note"]), ("node2", "node2"))
+        self.assertEqual((self.user(user)["expire_date"], account["expire_date"], self.account(b)[1]["expire_date"]),
+                         ("2099-01-01", "2099-01-01", "2099-01-01"))
+        self.assertEqual(a.tasks[-1]["params"]["ops"][0]["fields"], {"expire_date": "2099-01-01"})
 
     def test_cross_node_quota_blocks_everywhere_and_cycle_restores(self):
         user, a, b = self.linked_pair(quota_gb=1)
@@ -190,27 +190,52 @@ class PlatformUsersPanel(unittest.TestCase):
         a.settle()
         self.assertEqual(self.user(user)["used"], 10)
 
-    def test_claim_existing_account_keeps_usage_and_preferred_side(self):
-        node = SimNode(self, 'N')
-        identity = str(uuid.uuid4())
-        node.protocol_users[('xray', 'vless', 443)]['bob'] = {"used": 5 * GIB, "account_id": identity}
-        node.accounts[identity] = {"name": "bob", "note": "", "enabled": True, "expire_date": "2098-01-01", "quota": 0, "reset_day": 0,
-                                   "rev": 3, "mtime": {}, "members": [{"core": "xray", "protocol": "vless", "port": 443, "name": "bob"}]}
-        node.poll()
-        listing = self.client.get('/api/users').json
-        self.assertEqual([u["account_id"] for u in listing["unlinked"]], [identity])
-        user = self.post('/users', {"name": "bob", "expire_date": "2099-01-01"}, 201)['id']
-        self.post('/users/' + user + '/links', {"node_id": node.id, "account_id": identity, "prefer": "node"})
+    def test_authority_switch_requires_confirmation_and_releases_links(self):
+        node = SimNode(self, 'N', authority='script')
+        node.protocol_users[('xray', 'vless', 443)]['old'] = {"used": 1}
+        user = self.post('/users', {"name": "alice"}, 201)['id']
+        self.post('/users/' + user + '/links', {"node_id": node.id, "members": []}, 400)
+        self.post('/nodes/' + node.id + '/authority', {"mode": "platform", "confirm": "wrong"}, 409)
+        self.post('/nodes/' + node.id + '/authority', {"mode": "platform", "confirm": "N"}, 201)
+        self.post('/nodes/' + node.id + '/authority', {"mode": "platform", "confirm": "N"}, 409)
         node.settle()
-        detail = self.user(user)
-        self.assertEqual((detail["expire_date"], detail["used"]), ("2098-01-01", 5 * GIB))
-        self.assertEqual(node.accounts[identity]["platform_user_id"], user)
-        self.assertEqual(self.client.get('/api/users').json["unlinked"], [])
+        self.assertEqual((node.authority, node.protocol_users[('xray', 'vless', 443)]), ('platform', {}))
+        self.post('/users/' + user + '/links', {"node_id": node.id, "members": [{"core": "xray", "protocol": "vless", "port": 443}]})
+        node.settle()
+        self.assertEqual(len(node.accounts), 1)
+        # Switching back from the panel removes the links; the platform user stays.
+        self.post('/nodes/' + node.id + '/authority', {"mode": "script"}, 201)
+        node.settle()
+        self.assertEqual((node.authority, self.user(user)["links"]), ('script', []))
+        # Switching back from the node's own menu is noticed from the snapshot.
+        self.post('/nodes/' + node.id + '/authority', {"mode": "platform", "confirm": "N"}, 201)
+        node.settle()
+        self.post('/users/' + user + '/links', {"node_id": node.id, "members": []})
+        node.authority = 'script'
+        node.poll()
+        self.assertEqual(self.user(user)["links"], [])
+
+    def test_user_tasks_follow_authority_and_upgrade_task(self):
+        node = SimNode(self, 'N', authority='script')
+        task = {"action": "user_update", "protocol": "vless", "core": "xray", "port": 443, "params": {"name": "x", "enabled": False}, "revision": "a" * 64}
+        response = self.client.post('/api/nodes/' + node.id + '/tasks', json=task, headers={**self.headers, "Idempotency-Key": "k1"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("节点脚本管理", response.json["error"])
+        old = SimNode(self, 'old', version=0)
+        self.post('/nodes/' + old.id + '/upgrade', {}, 409)
+        self.post('/nodes/' + old.id + '/authority', {"mode": "platform", "confirm": "old"}, 409)
+        queued = self.post('/nodes/' + node.id + '/upgrade', {}, 201)
+        self.post('/nodes/' + node.id + '/upgrade', {}, 409)
+        self.assertEqual(node.poll()["action"], "agent_upgrade")
+        tasks = {t["id"]: t for t in self.client.get('/api/tasks').json["tasks"]}
+        self.assertEqual((tasks[queued["id"]]["status"], tasks[queued["id"]]["request"]), ("succeeded", {"action": "agent_upgrade", "params": {}}))
+        self.post('/nodes/' + node.id + '/upgrade', {"url": "https://evil"}, 400)
 
     def test_offline_and_old_nodes(self):
         old = SimNode(self, 'old', version=0)
         user = self.post('/users', {"name": "carol"}, 201)['id']
         self.post('/users/' + user + '/links', {"node_id": old.id, "members": []}, 400)
+        self.post('/users/' + user + '/links', {"node_id": SimNode(self, 'S', authority='script').id, "members": []}, 400)
         node = SimNode(self, 'N')
         with self.store.connect() as db:
             db.execute("UPDATE nodes SET last_seen=? WHERE id=?", (time.time() - 600, node.id))
@@ -264,7 +289,7 @@ class PlatformUsersPanel(unittest.TestCase):
         a.poll()   # executes the stale update -> rev_conflict, retried on the next poll
         self.assertIn("节点版本", [t for t in self.client.get('/api/tasks').json['tasks'] if t['id'] == a.tasks[-1]['id']][0]['message'])
         a.settle(); b.settle()
-        self.assertEqual((account["note"], self.user(user)["expire_date"], self.account(b)[1]["expire_date"]), ("panel", "2099-09-09", "2099-09-09"))
+        self.assertEqual((account["note"], account["expire_date"], self.user(user)["expire_date"]), ("panel", "2099-01-01", "2099-01-01"))
 
     def test_remove_links_then_delete_user(self):
         user, a, b = self.linked_pair()
