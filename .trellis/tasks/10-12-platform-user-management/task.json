@@ -19,9 +19,10 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "10-12-script-user-api",
+    "10-12-script-accounts",
     "10-12-agent-platform-users",
-    "10-12-panel-platform-users"
+    "10-12-panel-platform-users",
+    "10-12-script-account-api"
   ],
   "parent": null,
   "relatedFiles": [],
