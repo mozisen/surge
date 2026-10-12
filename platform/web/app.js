@@ -36,7 +36,7 @@ const states = {
     cancelled: '已取消',
     resolved: '已核对'
 };
-const badge = status => `<span class="badge ${esc(status)}">${status === 'online' ? '<span class="dot"></span>' : ''}${esc(states[status] || status)}</span>`;
+const badge = status => `<span class="badge ${esc(status)}">${esc(states[status] || status)}</span>`;
 const names = {
     'ss-legacy': 'SS',
     ss2022: 'SS2022',
@@ -176,7 +176,9 @@ function login() {
 }
 
 function shell(content, section) {
-    $('#app').innerHTML = `<div class="shell"><aside class="sidebar"><nav class="nav" aria-label="主导航"><a href="#overview" class="${section==='overview'?'active':''}">${icon('grid')}总览</a><a href="#nodes" class="${section==='nodes'?'active':''}">${icon('server')}服务器节点</a><a href="#tasks" class="${section==='tasks'?'active':''}">${icon('tasks')}任务记录</a><a href="#traffic" class="${section==='traffic'?'active':''}">${icon('pulse')}流量统计</a><a href="#monitor" class="${section==='monitor'?'active':''}">${icon('pulse')}监控与通知</a><a href="#backups" class="${section==='backups'?'active':''}">${icon('server')}备份恢复</a><a href="#audit" class="${section==='audit'?'active':''}">${icon('shield')}操作审计</a></nav></aside><div class="workspace"><header class="topbar">${brand}<div class="breadcrumbs"><strong>${({traffic:'流量统计',overview:'运行总览',nodes:'服务器节点',tasks:'任务记录',audit:'操作审计',monitor:'监控与通知',backups:'备份恢复'})[section]}</strong></div><div class="top-actions"><span class="live"><span class="dot"></span>更新于 ${esc(lastRefresh)}</span><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></header><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div></div>`;
+    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器节点'], ['tasks', 'tasks', '任务记录'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '监控与通知'], ['backups', 'server', '备份恢复'], ['audit', 'shield', '操作审计']];
+    const nav = links.map(([id, ico, text]) => `<a href="#${id}" class="${section===id?'active':''}"${section===id?' aria-current="page"':''}>${icon(ico)}${text}</a>`).join('');
+    $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
 }
 
 function stat(title, value, foot, ico, positive = false) {
