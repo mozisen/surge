@@ -103,6 +103,7 @@ ACCOUNT_OPS = {
     "reset_credentials": {"op", "account_id", "member"},
     "reset_usage": {"op", "account_id"},
     "delete": {"op", "account_id", "mode"},
+    "set_authority": {"op", "mode"},
 }
 
 
@@ -143,9 +144,15 @@ def validate_platform_task(data):
     params = data["params"]
     if not isinstance(params, dict) or set(params) != {"ops"} or not isinstance(params["ops"], list) or not 1 <= len(params["ops"]) <= 200:
         raise ValueError("统一用户操作列表无效")
+    if any(isinstance(op, dict) and op.get("op") == "set_authority" for op in params["ops"]) and len(params["ops"]) != 1:
+        raise ValueError("切换用户管理方式必须单独提交")
     for op in params["ops"]:
         if not isinstance(op, dict) or op.get("op") not in ACCOUNT_OPS or set(op) - ACCOUNT_OPS[op["op"]]:
             raise ValueError("统一用户操作无效")
+        if op["op"] == "set_authority":
+            if op.get("mode") not in ("script", "platform"):
+                raise ValueError("用户管理方式无效")
+            continue
         if not isinstance(op.get("account_id"), str) or not re.fullmatch(UUID_PATTERN, op["account_id"]):
             raise ValueError("统一用户 ID 无效")
         kind = op["op"]
@@ -184,6 +191,13 @@ def validate_platform_task(data):
             _account_target({k: member[k] for k in ("core", "protocol", "port")})
             require_text(member["name"], "用户名", 32, r"[A-Za-z0-9_-]+")
     return {"action": "platform_apply", "params": params}
+
+
+def validate_upgrade_task(data):
+    """One-click node upgrade: the agent and the node's main script, no parameters."""
+    if not isinstance(data, dict) or data != {"action": "agent_upgrade", "params": {}}:
+        raise ValueError("升级任务字段无效")
+    return {"action": "agent_upgrade", "params": {}}
 
 
 def config_revision(db):

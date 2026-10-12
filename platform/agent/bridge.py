@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from vaio.install_options import SS_METHODS
-from vaio.common import MUTATIONS, config_revision, validate_platform_task, validate_task
+from vaio.common import MUTATIONS, config_revision, validate_platform_task, validate_task, validate_upgrade_task
 from .addresses import discover
 from .config_details import config_details
 from .inventory import mutable, read_db, rows, service_for, users_for
@@ -109,8 +109,11 @@ class Bridge:
         if not isinstance(identity, str) or str(uuid.UUID(identity)) != identity:
             raise ValueError("任务 ID 无效")
         platform = isinstance(task, dict) and task.get("action") == "platform_apply"
+        upgrade = isinstance(task, dict) and task.get("action") == "agent_upgrade"
         if platform:
             validated = validate_platform_task({k: v for k, v in task.items() if k != "id"})
+        elif upgrade:
+            validated = validate_upgrade_task({k: v for k, v in task.items() if k != "id"})
         else:
             validated = validate_task({k: v for k, v in task.items() if k != "id"})
             if validated["action"] not in MUTATIONS:
@@ -136,7 +139,12 @@ class Bridge:
             intent = {"fingerprint": fingerprint, "status": "running"}
             atomic_write(record, json.dumps(intent))
             try:
-                result = self._platform_apply(validated, identity) if platform else self._execute({**validated, "id": identity})
+                if upgrade:
+                    result = self._upgrade(identity)
+                elif platform:
+                    result = self._platform_apply(validated, identity)
+                else:
+                    result = self._execute({**validated, "id": identity})
             except TransactionUnknown:
                 atomic_write(record, json.dumps({**intent, "status": "unknown"}))
                 raise
@@ -189,6 +197,17 @@ class Bridge:
             message += "（节点版本 " + str(data["rev"]) + "）"
         raise ValueError(message)
 
+    def _upgrade(self, identity):
+        """Hand the upgrade to a detached updater; its outcome is reported in later snapshots."""
+        if (self.state / "enforcement-pending.json").exists():
+            raise TransactionUnknown("自动策略执行结果未知，请先在节点核对")
+        method = self.runtime.launch_upgrade(identity)
+        return {"steps": ["已在独立进程中启动升级（" + method + "）", "下载并校验安装包", "进入维护后替换节点程序与节点脚本",
+                          "等待新版上线，失败自动恢复旧版"]}
+
+    def authority(self):
+        return "platform" if read_db(self.cfg).get("meta", {}).get("user_authority") == "platform" else "script"
+
     def settle_accounts(self):
         """Run the script's account settlement even when the node's installed CLI predates it."""
         db = read_db(self.cfg)
@@ -228,6 +247,10 @@ class Bridge:
                     params['host'] = addresses.get('ipv4') or addresses['ipv6']
                 return {"connection": config_details(core, proto, display_row, params, connection_only=True),
                         "config_details": config_details(core, proto, display_row, params)}
+            if action.startswith("user_") and db.get("meta", {}).get("user_authority") == "platform":
+                # Platform-owned users change only through platform_apply. In script mode the
+                # panel itself keeps users read-only for nodes that report authority_version.
+                raise ValueError("该节点的用户由平台管理，请在「用户管理」中修改")
             if action.startswith("user_") and proto.startswith("snell") and action != "user_update":
                 raise ValueError("Snell 一用户一端口，请通过新增或卸载协议实例管理")
             original = copy.deepcopy(db)

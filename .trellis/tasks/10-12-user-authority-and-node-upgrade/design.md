@@ -11,7 +11,7 @@
 | 脚本菜单用户操作 | 全部可用（现状） | 只能查看、看分享链接、看流量、切回脚本 |
 | 面板「用户管理」 | 不能关联此节点 | 唯一写入入口 |
 | 面板实例弹窗的用户 | 只读 | 只读（链接到用户管理） |
-| Agent 用户写任务（user_add/update/delete） | 拒绝 | 拒绝（走 platform_apply） |
+| Agent 用户写任务（user_add/update/delete） | 面板不发送（面板拦截） | Agent 拒绝（走 platform_apply） |
 | `account_apply` | 只接受 `set_authority` | 全部操作 |
 
 旧版节点程序不上报 `authority_version`，面板对它保持现在的行为（实例弹窗可编辑用户，不能关联平台用户）。
@@ -43,7 +43,7 @@
 
 ### 3.1 模式
 - 快照新增 `user_authority`（来自 db meta）和 `authority_version: 1`；`sanitize_snapshot` 归一化。
-- `Bridge._execute`：新版 Agent 拒绝 `user_add/user_update/user_delete`（提示按模式去脚本或用户管理页修改）；`share`、`inspect` 和实例操作不变。
+- `Bridge._execute`：平台模式下拒绝 `user_add/user_update/user_delete`（提示去用户管理页修改）；脚本模式下的「面板只读」由面板拦截（面板是这些任务的唯一来源，旧测试覆盖的按实例写路径保留给旧面板）。`share`、`inspect` 和实例操作不变。
 - `platform_apply`：校验允许 `set_authority`；Agent 不额外判断模式，由脚本拒绝。
 
 ### 3.2 一键升级

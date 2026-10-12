@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Identity-preserving agent upgrade, executed locally by the server administrator."""
+"""Identity-preserving agent upgrade: run by the administrator, or detached by the agent
+for a panel upgrade task (--task). The node's main script is upgraded with the agent."""
 import argparse
 import ast
 import fcntl
@@ -7,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,9 +50,83 @@ def extract_bundle(payload, destination):
     return version
 
 
+MAIN_SCRIPT = Path("/usr/local/bin/vless-server.sh")
+RESULT = Path("/var/lib/vaio-agent/last-upgrade.json")
+
+
+def bundle_script(stage):
+    """The vendored script of the new bundle, verified against the bundle's own pin."""
+    script = stage / "vendor/vless-server.sh"
+    pin = re.search(r'^UPSTREAM_SHA = "([0-9a-f]{64})"', (stage / "agent/runtime.py").read_text(), re.M)
+    if not pin or hashlib.sha256(script.read_bytes()).hexdigest() != pin[1]:
+        raise RuntimeError("新安装包中的节点脚本校验失败")
+    return script
+
+
+def script_version(path):
+    try:
+        match = re.search(r'^readonly VERSION="([^"]+)"', Path(path).read_text(errors="replace"), re.M)
+    except OSError:
+        return ""
+    return match[1] if match else ""
+
+
+def replace_main_script(stage, target=MAIN_SCRIPT):
+    """Atomically install the bundle's script; returns the backup path (None when unchanged)."""
+    source = bundle_script(stage)
+    target = Path(target)
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise RuntimeError("主脚本路径不是普通文件，未覆盖")
+    content = source.read_bytes()
+    if target.exists() and target.read_bytes() == content:
+        return None
+    backup = target.with_name(target.name + ".vaio-backup-" + str(time.time_ns())) if target.exists() else None
+    if backup:
+        shutil.copy2(target, backup)
+    fd, temp = tempfile.mkstemp(dir=str(target.parent), prefix=".vaio-script-")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+        os.chmod(temp, 0o755)
+        os.replace(temp, target)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+    return backup or "installed"
+
+
+def restore_main_script(backup, target=MAIN_SCRIPT):
+    if backup == "installed":
+        Path(target).unlink(missing_ok=True)
+    elif backup:
+        os.replace(backup, target)
+
+
+def wait_reported(journal_path, task_id, timeout=120, pause=2):
+    """The panel refuses maintenance while the triggering task is unreported."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        journal = json.loads(Path(journal_path).read_text()) if Path(journal_path).exists() else {}
+        item = journal.get(task_id)
+        if item and item.get("status") != "running" and item.get("sent"):
+            return
+        time.sleep(pause)
+    raise RuntimeError("升级任务结果未能上报，已停止升级")
+
+
+def write_result(data, path=RESULT):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=str(path.parent), prefix=".last-upgrade-")
+    with os.fdopen(fd, "w") as handle:
+        json.dump({**data, "message": str(data.get("message", ""))[:300]}, handle)
+    os.replace(temp, path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="升级节点程序，保留身份和代理配置")
     parser.add_argument("--resume", action="store_true", help="核对升级结果后解除维护模式")
+    parser.add_argument("--task", help="由面板升级任务触发时的任务 ID")
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit("请使用 root 运行")
@@ -86,6 +162,15 @@ def main():
             api(endpoint + "/maintenance", {"enabled": False}, True)
             print("维护模式已解除")
             return
+        if args.task:
+            wait_reported("/var/lib/vaio-agent/journal.json", args.task)
+        from_version = ""
+        try:
+            from_version = ast.literal_eval(next(n.value for n in ast.parse(Path("/opt/vaio-agent/vaio/__init__.py").read_text()).body
+                                                 if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "__version__" for t in n.targets)))
+        except Exception:
+            pass
+        report = {"task": args.task or "", "at": time.time(), "from": from_version, "script_from": script_version(MAIN_SCRIPT)}
         print("正在下载并校验节点程序…", flush=True)
         payload = api("/downloads/agent.tar.gz")
         checksum = api("/downloads/agent.sha256").decode().split()[0]
@@ -99,8 +184,11 @@ def main():
         maintenance = False
         moved = False
         stopped = False
+        script_backup = None
+        version = ""
         try:
             version = extract_bundle(payload, stage)
+            bundle_script(stage)
             subprocess.run([sys.executable, "-m", "agent", "--help"], cwd=stage, check=True, stdout=subprocess.DEVNULL)
             api(endpoint + "/maintenance", {"enabled": True}, True)
             maintenance = True
@@ -117,6 +205,7 @@ def main():
             root.rename(backup)
             moved = True
             stage.rename(root)
+            script_backup = replace_main_script(root)
             started = time.time()
             service("start")
             for _ in range(18):
@@ -130,7 +219,16 @@ def main():
                 shutil.copy2(root / "scripts/vaio-agent", "/usr/local/bin/vaio-agent")
                 os.chmod("/usr/local/bin/vaio-agent", 0o755)
             print("升级完成，版本 " + version + "；旧程序保留于 " + str(backup), flush=True)
-        except BaseException:
+            write_result({**report, "to": version, "script_to": script_version(MAIN_SCRIPT), "status": "succeeded",
+                          "message": "节点程序 " + version + "，节点脚本 " + script_version(MAIN_SCRIPT)})
+        except BaseException as error:
+            rolled_back = moved
+            try:
+                restore_main_script(script_backup)
+            except Exception:
+                print("主脚本恢复失败，请检查 " + str(MAIN_SCRIPT), file=sys.stderr)
+            write_result({**report, "to": version, "script_to": script_version(MAIN_SCRIPT),
+                          "status": "rolled_back" if rolled_back else "failed", "message": str(error) or type(error).__name__})
             if moved:
                 service("stop")
                 if root.exists():

@@ -100,6 +100,10 @@ class Agent:
             snapshot = dict(self.snapshot_cache)
         except Exception:
             snapshot = {"error": "读取节点状态失败，请检查 db.json 和 Agent 日志", "instances": []}
+        try:
+            snapshot["last_upgrade"] = json.loads((self.state / "last-upgrade.json").read_text())
+        except (OSError, ValueError):
+            pass
         if (self.state / "enforcement-pending.json").exists():
             snapshot["error"] = "自动计费策略执行结果未确认，已停止自动重试；请在节点核对 enforcement-backup"
         if self.script_api:

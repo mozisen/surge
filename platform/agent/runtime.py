@@ -1,10 +1,12 @@
 """Allowlisted OS operations. Existing routing and unrelated inbounds are preserved."""
 import base64
 import datetime
+import sys
 import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import shlex
 import subprocess
@@ -146,6 +148,20 @@ class Runtime:
         if result.returncode or len(result.stdout) != len(prefix) + 32 or not result.stdout.startswith(prefix):
             raise ValueError("无法从 Reality 私钥生成公钥，未安装协议")
         return private, base64.urlsafe_b64encode(result.stdout[-32:]).decode().rstrip("=")
+
+    def launch_upgrade(self, task_id):
+        """Start the updater outside the agent's service so stopping the agent cannot kill it."""
+        if not isinstance(task_id, str) or str(uuid.UUID(task_id)) != task_id:
+            raise ValueError("任务 ID 无效")
+        argv = [sys.executable or "/usr/bin/python3", str(ROOT / "scripts/update-agent.py"), "--task", task_id]
+        if not Path("/sbin/openrc").exists() and shutil.which("systemd-run"):
+            self.command(["systemd-run", "--unit", "vaio-agent-upgrade-" + task_id[:8], "--collect", "--quiet",
+                          "--property", "KillMode=process", *argv], timeout=30)
+            return "systemd-run"
+        with open(self.state / "upgrade.log", "ab") as log:
+            os.chmod(self.state / "upgrade.log", 0o600)
+            subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd="/", start_new_session=True)
+        return "detached"
 
     def keys(self, core="xray"):
         output = self.command(["/usr/local/bin/sing-box", "generate", "reality-keypair"] if core == "singbox" else ["/usr/local/bin/xray", "x25519"], capture=True)

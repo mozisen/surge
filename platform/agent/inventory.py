@@ -86,7 +86,9 @@ def inventory(cfg, status=service_status):
                               {**{k: u.get(k, default) for k, default in (("name", ""), ("enabled", True), ("expire_date", ""))}, "used": effective_usage(u)[0], "quota": effective_usage(u)[1], "reset_day": u.get("panel_reset_day", 0),
                                "account_id": u.get("account_id") or ""}
                               for u in users_for(row)]})
-    return {"revision": config_revision(db), "instances": instances, "accounts": accounts(db), "write_capabilities": write_capabilities(), "task_api_version": 2,
+    return {"revision": config_revision(db), "instances": instances, "accounts": accounts(db),
+            "user_authority": "platform" if db.get("meta", {}).get("user_authority") == "platform" else "script",
+            "authority_version": 1, "upgrade_version": 1, "write_capabilities": write_capabilities(), "task_api_version": 2,
             "config_details_version": 2, "install_options_version": 2, "billing_version": 1,
             "hostname": platform.node(), "os": platform.system() + " " + platform.release(),
             "arch": platform.machine(), "agent_version": __version__, "metrics": metrics(),
@@ -196,6 +198,15 @@ def sanitize_snapshot(snapshot):
                                         "account_id": owner if isinstance(owner, str) and re.fullmatch(UUID_PATTERN, owner) else ""})
         clean["instances"].append(clean_item)
     clean["accounts_version"] = 1 if snapshot.get("accounts_version") == 1 else 0
+    clean["authority_version"] = 1 if snapshot.get("authority_version") == 1 else 0
+    clean["user_authority"] = "platform" if snapshot.get("user_authority") == "platform" else "script"
+    clean["upgrade_version"] = 1 if snapshot.get("upgrade_version") == 1 else 0
+    upgrade = snapshot.get("last_upgrade")
+    if isinstance(upgrade, dict):
+        clean["last_upgrade"] = {"status": upgrade.get("status") if upgrade.get("status") in ("succeeded", "rolled_back", "failed") else "failed",
+                                 "at": upgrade["at"] if type(upgrade.get("at")) in (int, float) and 0 < upgrade["at"] < 1e11 else 0,
+                                 **{k: text(upgrade.get(k), 40) for k in ("from", "to", "script_from", "script_to", "task")},
+                                 "message": text(upgrade.get("message"), 300)}
     clean["accounts"] = sanitize_accounts(snapshot.get("accounts", {}))
     return clean
 
