@@ -103,7 +103,7 @@ class ScriptAPIAccounts(unittest.TestCase):
 
     def test_accounts_capability_parsed_and_fails_closed(self):
         for accounts, expected in (({'version': 1, 'actions': ['account_apply', 'result']}, 1), (None, 0),
-                                   ({'version': 2, 'actions': ['account_apply']}, 0), ({'version': 1, 'actions': 'x'}, 0)):
+                                   ({'version': 2, 'actions': ['account_apply']}, 1), ({'version': 3, 'actions': ['account_apply']}, 0), ({'version': 1, 'actions': 'x'}, 0)):
             with patch.object(ScriptAPI, 'read', side_effect=self.caps(accounts)):
                 result = ScriptAPI().status()
             self.assertEqual((result['status'], result['accounts_api']), ('ready', expected))
