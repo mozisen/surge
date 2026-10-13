@@ -25,13 +25,15 @@ const context = {
     nodes: [], selected: null,
     submitTask: async () => {},
     $: selector => elements[selector.replace(/^#/, '')] || elements[selector],
-    document: {querySelectorAll: selector => Object.values(elements).filter(e => e.matches && e.matches(selector))},
+    document: {querySelectorAll: selector => (context.openMenus && selector === '.filter-menu.open' ? context.openMenus() : Object.values(elements).filter(e => e.matches && e.matches(selector))),
+               addEventListener: (type, fn) => { context.listeners[type] = fn; }},
+    listeners: {}, window: {innerWidth: 1280},
     console,
 };
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -181,10 +183,59 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     context.instancesPage();
     assert.strictEqual(html.section, 'instances');
     assert(html.shell.includes('节点管理') && html.shell.includes('全部服务器') && !html.shell.includes('已删除'));
+    assert(!html.shell.includes('<select') && html.shell.includes('id="instance-mode"') && html.shell.includes('aria-haspopup="menu"'));
     assert.strictEqual(elements['instance-count'].textContent, '3');
     elements['instance-mode'].onchange({target: {value: 'multi'}});
     assert.strictEqual(elements['instance-count'].textContent, '1 / 3');
     elements['instance-search'].listener({target: {value: 'zzz'}});
     assert(elements['instance-results'].innerHTML.includes('没有符合条件的节点'));
     console.log('PASS instances page: all servers, filters, search, escaping, manage action');
+
+    // 筛选菜单：渲染、打开、选择、Esc 与点击外部关闭
+    const menuHtml = context.filterMenu('m', '筛选<分组>', [['', '全部分组'], ['a', '<b>亚太</b>'], ['b', '欧洲']], 'a');
+    assert(menuHtml.includes('class="filter-menu active"') && menuHtml.includes('data-value="a"') && menuHtml.includes('aria-label="筛选&lt;分组&gt;"'));
+    assert(menuHtml.includes('<span class="filter-text">&lt;b&gt;亚太&lt;/b&gt;</span>') && !menuHtml.includes('<b>亚太'));
+    assert(menuHtml.includes('data-value="a" aria-checked="true"') && menuHtml.includes('data-value="" aria-checked="false"'));
+    assert(context.filterMenu('m', 'x', [['', '全部'], ['a', 'A']], 'missing').includes('class="filter-menu" id="m" data-value=""'));
+    const classes = () => { const set = new Set(); return {add: c => set.add(c), remove: c => set.delete(c), contains: c => set.has(c), toggle: (c, on) => (on ? set.add(c) : set.delete(c))}; };
+    const attrs = () => ({attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, focus() { focused = this; }});
+    let focused = null;
+    const fakeMenu = () => {
+        const menu = {classList: classes(), dataset: {value: ''}, changes: []};
+        const trigger = {...attrs(), cls: 'filter-trigger', closest: s => s === '.filter-trigger' ? trigger : s === '.filter-menu' ? menu : null};
+        const text = {textContent: '全部'};
+        const pop = {hidden: true, getBoundingClientRect: () => ({right: 100}), querySelector: () => options[0]};
+        const options = ['', 'x', 'y'].map(v => ({...attrs(), dataset: {value: v}, textContent: v || '全部',
+            closest: s => s === '.filter-option' ? options.find(o => o.dataset.value === v) : s === '.filter-menu' ? menu : null}));
+        menu.querySelector = s => ({'.filter-pop': pop, '.filter-trigger': trigger, '.filter-text': text})[s];
+        menu.querySelectorAll = () => options;
+        menu.onchange = e => menu.changes.push(e.target.value);
+        return {menu, trigger, text, pop, options};
+    };
+    const one = fakeMenu(), two = fakeMenu();
+    context.openMenus = () => [one, two].map(x => x.menu).filter(m => m.classList.contains('open'));
+    context.listeners.click({target: one.trigger});
+    assert(one.menu.classList.contains('open') && !one.pop.hidden && one.trigger.attrs['aria-expanded'] === 'true' && focused === one.options[0]);
+    context.listeners.click({target: two.trigger});
+    assert(!one.menu.classList.contains('open') && one.pop.hidden && two.menu.classList.contains('open'), 'opening another closes the first');
+    context.listeners.click({target: two.options[2]});
+    assert(!two.menu.classList.contains('open') && two.menu.dataset.value === 'y' && two.text.textContent === 'y' && two.menu.classList.contains('active'));
+    assert(two.options[2].attrs['aria-checked'] === 'true' && two.options[0].attrs['aria-checked'] === 'false' && focused === two.trigger);
+    assert.deepStrictEqual(two.menu.changes.slice(), ['y']);
+    context.listeners.click({target: two.trigger});
+    let prevented = false;
+    context.listeners.keydown({key: 'Escape', target: two.options[0], preventDefault: () => { prevented = true; }});
+    assert(prevented && !two.menu.classList.contains('open') && focused === two.trigger, 'Escape closes');
+    context.listeners.keydown({key: 'ArrowDown', target: two.trigger, preventDefault() {}});
+    assert(two.menu.classList.contains('open'), 'ArrowDown opens');
+    context.listeners.keydown({key: 'ArrowDown', target: two.options[0], preventDefault() {}});
+    assert(focused === two.options[1], 'ArrowDown moves focus');
+    context.listeners.keydown({key: 'ArrowUp', target: two.options[0], preventDefault() {}});
+    assert(focused === two.options[2], 'ArrowUp wraps');
+    context.listeners.click({target: {closest: () => null}});
+    assert(!two.menu.classList.contains('open') && two.menu.changes.length === 1, 'outside click closes without change');
+    one.pop.getBoundingClientRect = () => ({right: 1300});
+    context.listeners.click({target: one.trigger});
+    assert(one.menu.classList.contains('align-end'), 'flips to the right edge when it overflows');
+    console.log('PASS filter menu: render, open, pick, keyboard, outside close');
 })().catch(error => { console.error(error); process.exit(1); });

@@ -246,7 +246,7 @@ function taskTable(list) {
 }
 
 function overview(section) {
-    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器管理'}</h1><p class="subtext">${section==='overview'?'服务器、协议与任务，尽在一个工作空间。':'连接、分组并管理你的所有服务器。'}</p></div><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="trash">回收站</button><select id="group-filter" aria-label="筛选分组"><option value="">全部分组</option>${[...new Set(nodes.map(n=>n.group_name))].map(g=>`<option value="${esc(g)}" ${g===groupFilter?'selected':''}>${esc(g)}</option>`).join('')}</select><div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>最近任务</h2><a href="#tasks">查看全部 →</a></div><div class="panel">${taskTable(tasks.slice(0,5))}</div>`:''}`, section);
+    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器管理'}</h1><p class="subtext">${section==='overview'?'服务器、协议与任务，尽在一个工作空间。':'连接、分组并管理你的所有服务器。'}</p></div><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="trash">回收站</button>${filterMenu('group-filter', '筛选分组', [['', '全部分组'], ...[...new Set(nodes.map(n=>n.group_name).filter(Boolean))].map(g=>[g, g])], groupFilter)}<div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>最近任务</h2><a href="#tasks">查看全部 →</a></div><div class="panel">${taskTable(tasks.slice(0,5))}</div>`:''}`, section);
     $('#group-filter').onchange = e => { groupFilter = e.target.value; $('#node-results').innerHTML = nodeCards(); };
     $('#search').addEventListener('input', e => {
         search = e.target.value;
@@ -341,7 +341,7 @@ async function refresh() {
         lastRefresh = new Date().toLocaleTimeString('zh-CN', {
             hour12: false
         });
-        if (!['search', 'instance-search'].includes(document.activeElement?.id)) await render();
+        if (!['search', 'instance-search'].includes(document.activeElement?.id) && !document.querySelector('.filter-menu.open')) await render();
         if (activeTaskId && $('#modal').open) showTask(activeTaskId);
     } catch (err) {
         toast(err.message);
@@ -1135,6 +1135,65 @@ async function installPlaceUsers(users) {
 }
 
 // ---------------------------------------------------------------- 节点管理（所有服务器的协议实例）
+// 筛选菜单：紧凑按钮 + 弹出菜单面板，替代原生下拉框。选择后更新按钮并调用容器的 onchange({target: {value}})。
+const filterChevron = '<svg class="filter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>';
+const filterCheck = '<svg class="filter-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
+function filterMenu(id, label, options, value) {
+    const current = options.find(([v]) => v === value) || options[0];
+    return `<div class="filter-menu${current[0] ? ' active' : ''}" id="${esc(id)}" data-value="${esc(current[0])}">`
+        + `<button type="button" class="filter-trigger" aria-haspopup="menu" aria-expanded="false" title="${esc(label)}"><span class="filter-text">${esc(current[1])}</span>${filterChevron}</button>`
+        + `<div class="filter-pop" role="menu" aria-label="${esc(label)}" hidden>${options.map(([v, text]) =>
+            `<button type="button" role="menuitemradio" class="filter-option" data-value="${esc(v)}" aria-checked="${v === current[0]}"><span>${esc(text)}</span>${filterCheck}</button>`).join('')}</div></div>`;
+}
+function filterMenuOpen(menu, open) {
+    menu.classList.toggle('open', open);
+    menu.querySelector('.filter-pop').hidden = !open;
+    menu.querySelector('.filter-trigger').setAttribute('aria-expanded', String(open));
+    if (!open) return;
+    const pop = menu.querySelector('.filter-pop');
+    menu.classList.remove('align-end');
+    if (pop.getBoundingClientRect?.().right > (window.innerWidth || Infinity) - 8) menu.classList.add('align-end');
+    (pop.querySelector('[aria-checked="true"]') || pop.querySelector('.filter-option'))?.focus?.();
+}
+function closeFilterMenus(except) {
+    document.querySelectorAll('.filter-menu.open').forEach(m => m !== except && filterMenuOpen(m, false));
+}
+function filterMenuPick(menu, option) {
+    const value = option.dataset.value;
+    menu.dataset.value = value;
+    menu.classList.toggle('active', value !== '');
+    menu.querySelector('.filter-text').textContent = option.textContent;
+    menu.querySelectorAll('.filter-option').forEach(o => o.setAttribute('aria-checked', String(o === option)));
+    filterMenuOpen(menu, false);
+    menu.querySelector('.filter-trigger').focus?.();
+    menu.onchange?.({target: {value}});
+}
+function filterMenuClick(e) {
+    const menu = e.target.closest?.('.filter-menu');
+    closeFilterMenus(menu);
+    if (!menu) return;
+    const option = e.target.closest('.filter-option');
+    if (option) filterMenuPick(menu, option);
+    else if (e.target.closest('.filter-trigger')) filterMenuOpen(menu, !menu.classList.contains('open'));
+}
+function filterMenuKey(e) {
+    const menu = e.target.closest?.('.filter-menu');
+    if (!menu) return;
+    const open = menu.classList.contains('open');
+    if (e.key === 'Escape' && open) {
+        e.preventDefault();
+        filterMenuOpen(menu, false);
+        menu.querySelector('.filter-trigger').focus?.();
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (!open) return filterMenuOpen(menu, true);
+        const items = [...menu.querySelectorAll('.filter-option')], at = items.indexOf(e.target);
+        items[(at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus?.();
+    } else if (e.key === 'Tab' && open) filterMenuOpen(menu, false);
+}
+document.addEventListener('click', filterMenuClick);
+document.addEventListener('keydown', filterMenuKey);
+
 let instanceFilter = {node: '', protocol: '', status: '', mode: '', q: ''};
 const instanceModes = {multi: '多用户', single: '一用户一实例', none: '不支持用户管理'};
 function instanceRows() {
@@ -1155,15 +1214,14 @@ function instanceTable(rows) {
 }
 function instancesPage() {
     const rows = instanceRows(), f = instanceFilter;
-    const option = (value, label, current) => `<option value="${esc(value)}" ${value === current ? 'selected' : ''}>${esc(label)}</option>`;
     const servers = nodes.filter(n => !n.deleted);
     const protocols = [...new Set(rows.map(r => r.p.protocol))].sort();
     shell(`<div class="heading"><div><h1>节点管理</h1><p class="subtext">所有服务器上的协议实例，按服务器、协议、状态和用户模式筛选。</p></div><button data-action="refresh">${icon('refresh')}刷新</button></div>
     <div class="section-label"><h2>节点 <span class="count" id="instance-count"></span></h2><div class="tools instance-filters">
-    <select id="instance-node" aria-label="筛选服务器">${option('', '全部服务器', f.node)}${servers.map(n => option(n.id, n.name, f.node)).join('')}</select>
-    <select id="instance-protocol" aria-label="筛选协议">${option('', '全部协议', f.protocol)}${protocols.map(p => option(p, names[p] || p, f.protocol)).join('')}</select>
-    <select id="instance-status" aria-label="筛选服务状态">${option('', '全部状态', f.status)}${option('running', '运行中', f.status)}${option('stopped', '已停止', f.status)}${option('unknown', '未知', f.status)}</select>
-    <select id="instance-mode" aria-label="筛选用户模式">${option('', '全部用户模式', f.mode)}${Object.entries(instanceModes).map(([k, v]) => option(k, v, f.mode)).join('')}</select>
+    ${filterMenu('instance-node', '筛选服务器', [['', '全部服务器'], ...servers.map(n => [n.id, n.name])], f.node)}
+    ${filterMenu('instance-protocol', '筛选协议', [['', '全部协议'], ...protocols.map(p => [p, names[p] || p])], f.protocol)}
+    ${filterMenu('instance-status', '筛选服务状态', [['', '全部状态'], ['running', '运行中'], ['stopped', '已停止'], ['unknown', '未知']], f.status)}
+    ${filterMenu('instance-mode', '筛选用户模式', [['', '全部用户模式'], ...Object.entries(instanceModes)], f.mode)}
     <div class="search">${icon('search')}<input id="instance-search" type="search" aria-label="搜索节点" placeholder="搜索服务器、协议或端口" value="${esc(f.q)}"></div></div></div>
     <div class="panel" id="instance-results"></div>
     <p class="helper">节点即服务器上的一个协议实例（协议 + 端口）。共享核心的协议启停或修改会影响同一服务器上的其他实例；离线服务器显示最后一次快照。</p>`, 'instances');

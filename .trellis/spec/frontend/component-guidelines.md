@@ -34,7 +34,7 @@ $('#install-advanced').hidden = groups.every(id => $('#' + id).hidden);
 ## Styling Patterns
 
 - Greys only. Tokens on `:root` in `style.css`: `--ink #000`, `--ink-2 #333`, `--muted #6b6b6b`, `--line #d9d9d9`, `--line-soft #ececec`, `--canvas #f5f5f5`, `--surface #fff`. Legacy names (`--accent`, `--accent-soft`, `--danger`, `--bg`, `--nav`, …) are aliases kept so old rules resolve; do not add new colours (`#8c8c8c`/`#b3b3b3` exist only for placeholder/hover/chart baseline).
-- Radius by hierarchy: `--r-badge` 3px, `--r-control` 6px, `--r-panel` 8px, `--r-dialog` 12px. Panels have no shadow; only `dialog` and `#toast` do.
+- Radius by hierarchy: `--r-badge` 3px, `--r-control` 6px, `--r-panel` 8px, `--r-dialog` 12px. Panels have no shadow; only `dialog`, `#toast` and the filter menu popover (`.filter-pop`, a floating layer) do.
 - System font stack only (no webfonts: the panel is self-hosted and must not call third parties). Numbers use the global `tabular-nums`; `.mono` is for machine strings (ports, service names, commands, filenames, event keys), not for metrics or timestamps.
 - Numeric table columns get `class="num"` on both `th` and `td` (right-aligned).
 - Groups are a 13px/600 heading over a 1px `--line` top divider. Use `fieldset` for semantics with `border: 0; padding: 0`, not boxed sets.
@@ -109,3 +109,9 @@ Statuses that are not task states (`userStates`, `syncStates`) render through `s
 **Cause**: fields are moved or regrouped and a conditional that built `params` is edited along with them.
 
 **Fix / Prevention**: leave the submit handler and `update…()` rules alone in a visual change. Compare old and new `submitTask` arguments across every `core:protocol` × `install_options_version` combination before committing; `install-form.cjs` keeps the per-protocol param assertions.
+
+## Filter menus
+
+- List filters use `filterMenu(id, label, options, value)` from `app.js`, never a native `<select>`: a 32px button with the chevron right after the text, and a popover menu (`role="menu"`, options `role="menuitemradio"` with `aria-checked` and a check mark).
+- The page binds `$('#id').onchange = e => ...`; the component calls it with `{target: {value}}` after a pick. Outside click, Escape, Tab, or opening another menu closes it; arrow keys move between options. The periodic refresh skips re-rendering while a menu is open.
+- A non-default value gives the button a black border and bold text. Under `(pointer: coarse)` the button and options are at least 44px. Native `<select>` remains for form fields inside dialogs.
