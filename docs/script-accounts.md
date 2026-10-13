@@ -129,3 +129,11 @@
 其余脚本测试和面板 unittest 151 项通过（跳过 2 项）。没有在真实的 shadow-tls、snell-server、Xray 和 nftables 环境中运行；systemd/OpenRC 服务启停只验证了调用顺序。
 
 **真实验收**：未执行。
+
+## 以平台为准时 TG 通知交由平台管理（3.7.4-preview.8）
+
+- 节点切到「以平台为准」后，管理员 TG 通知、每日报告、用户查询机器人和绑定码都由 Vaio 面板「通知配置」统一管理，本机不再使用自己的 TG 配置。
+- 清理（`_tg_platform_cleanup`，幂等）：`telegram.json` 写回默认值（不含 Token、Chat ID，开关关闭，权限 600）、删除 `db.json` 中旧版的 `.telegram`、移除 `tg-user-bot` 轮询 cron。触发点：`set_authority` 切到平台时；已是平台模式的节点在每次流量同步、`--tg-bot-poll` 和打开 TG 菜单时。
+- 平台模式下 `tg_send_message`、`send_tg_message`、`tg_send_bound_user_message`、`check_daily_report` 直接返回，即使配置文件被手动写回也不发送；「TG 通知配置」菜单只显示「TG 通知由 Vaio 平台管理」。
+- 以脚本为准的节点行为不变，脚本仍可独立使用 TG 通知。切回脚本不会恢复已清除的 TG 配置，需要重新设置。
+- 测试：新增 `tests/tg-platform.sh`（脚本模式保留配置与发送、平台模式清除配置/旧数据库配置/cron 且权限 600、幂等、平台模式不发送任何消息、机器人轮询清理后退出、菜单只读、切换与流量同步调用清理）；其余脚本测试通过（`singbox-stats-live.sh` 需要真实统计核心，`accounts-cli.sh` 仅在 CI 以 root 运行）。

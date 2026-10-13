@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.7"
+readonly VERSION="3.7.4-preview.8"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -1628,6 +1628,7 @@ db_set_tg_config() {
 # 发送 Telegram 消息
 send_tg_message() {
     local message="$1"
+    _tg_platform_mode && return 0
     # 当前管理界面使用 telegram.json；优先复用现有管理员通知配置。
     # 数据库中的 .telegram 仅作为旧版本兼容回退。
     if [[ -n "${TG_CONFIG_FILE:-}" && -f "$TG_CONFIG_FILE" && -n "$(tg_get_config "bot_token")" ]]; then
@@ -2443,6 +2444,7 @@ _authority_apply() {
             if $r.i < 0 then .[$r.c][$r.p].users = [] else .[$r.c][$r.p][$r.i].users = [] end) |
         del(.accounts, .meta.accounts_reload_pending) |
         .meta.user_authority = "platform" | .meta.user_authority_at = ($at | tonumber)' || return 1
+    _tg_platform_cleanup || _warn "本机 TG 配置清理失败，将在下次流量同步时重试"
     for proto in $snell; do reloads+="xray|$proto"$'\n'; done
     _accounts_reload_or_queue "$reloads"
 }
@@ -2621,9 +2623,11 @@ _tg_config_lock_release() {
     rmdir "$TG_CONFIG_LOCK_DIR" 2>/dev/null || true
 }
 
+readonly TG_CONFIG_DEFAULTS='{"enabled":false,"bot_token":"","chat_id":"","notify_quota_percent":80,"notify_daily":false,"server_name":"","user_bot_enabled":false,"user_bot_update_offset":0}'
+
 # 初始化 TG 配置
 init_tg_config() {
-    local defaults='{"enabled":false,"bot_token":"","chat_id":"","notify_quota_percent":80,"notify_daily":false,"server_name":"","user_bot_enabled":false,"user_bot_update_offset":0}'
+    local defaults="$TG_CONFIG_DEFAULTS"
     mkdir -p "$CFG" 2>/dev/null || return 1
     _tg_config_lock_acquire || return 1
     if [[ ! -f "$TG_CONFIG_FILE" ]]; then
@@ -2650,6 +2654,36 @@ init_tg_config() {
         _tg_config_lock_release
         return 1
     fi
+}
+
+# 以平台为准的节点：TG 通知、每日报告和用户查询机器人统一由 Vaio 平台管理。
+_tg_platform_mode() {
+    [[ "$(db_authority_get 2>/dev/null)" == platform ]]
+}
+
+# 清空本机 TG 配置（Token、Chat ID、开关、机器人状态）并停止机器人轮询；幂等，非平台模式不做任何事。
+_tg_platform_cleanup() {
+    _tg_platform_mode || return 0
+    local tmp
+    if [[ -f "$TG_CONFIG_FILE" ]] && ! jq -e --argjson d "$TG_CONFIG_DEFAULTS" '. == $d' "$TG_CONFIG_FILE" >/dev/null 2>&1; then
+        _tg_config_lock_acquire || return 1
+        tmp=$(mktemp "${TG_CONFIG_FILE}.tmp.XXXXXX") || { _tg_config_lock_release; return 1; }
+        if printf '%s\n' "$TG_CONFIG_DEFAULTS" > "$tmp" && chmod 600 "$tmp" 2>/dev/null && mv "$tmp" "$TG_CONFIG_FILE"; then
+            _tg_config_lock_release
+        else
+            rm -f "$tmp"
+            _tg_config_lock_release
+            return 1
+        fi
+    fi
+    # 旧版本把管理员配置存在数据库 .telegram，一并清除，避免回退发送。
+    if [[ -f "$DB_FILE" ]] && jq -e 'has("telegram")' "$DB_FILE" >/dev/null 2>&1; then
+        _db_apply 'del(.telegram)' || return 1
+    fi
+    if tg_user_bot_cron_entry_exists; then
+        remove_tg_user_bot_cron >/dev/null 2>&1 || return 1
+    fi
+    return 0
 }
 
 # 获取 TG 模板里的服务器显示文本
@@ -2699,6 +2733,7 @@ tg_set_config() {
 # 发送 TG 消息
 tg_send_message() {
     local message="$1"
+    _tg_platform_mode && return 0
     local bot_token=$(tg_get_config "bot_token")
     local chat_id=$(tg_get_config "chat_id")
     local enabled=$(tg_get_config "enabled")
@@ -2737,6 +2772,7 @@ tg_send_chat_message() {
 
 tg_send_bound_user_message() {
     local core="$1" proto="$2" user="$3" message="$4" chat_id
+    _tg_platform_mode && return 0
     [[ "$(tg_get_config "user_bot_enabled")" == "true" ]] || return 0
     chat_id=$(db_get_user_field "$core" "$proto" "$user" "telegram_chat_id")
     [[ -n "$chat_id" ]] || return 0
@@ -2927,6 +2963,10 @@ tg_user_bot_handle_update() {
 }
 
 tg_poll_user_bot() {
+    if _tg_platform_mode; then
+        _tg_platform_cleanup
+        return 0
+    fi
     init_tg_config || return 1
     [[ "$(tg_get_config "user_bot_enabled")" == "true" ]] || return 0
 
@@ -3103,6 +3143,7 @@ ${status_icon} *${name}* (${proto})
 
 # 检查是否需要发送每日报告
 check_daily_report() {
+    _tg_platform_mode && return 0
     local enabled=$(tg_get_config "enabled")
     local daily_enabled=$(tg_get_config "notify_daily")
     
@@ -3936,6 +3977,7 @@ _sync_all_user_traffic_unlocked() {
 # 用法: sync_all_user_traffic [reset]
 sync_all_user_traffic() {
     local reset="${1:-true}" owner attempt rc
+    _tg_platform_cleanup >/dev/null 2>&1 || true
 
     for attempt in {1..10}; do
         if mkdir "$TRAFFIC_SYNC_LOCK_DIR" 2>/dev/null; then
@@ -29965,6 +30007,18 @@ _configure_tg_user_bot() {
 
 # 配置 TG 通知
 _configure_tg_notify() {
+    if _tg_platform_mode; then
+        _tg_platform_cleanup || _warn "本机 TG 配置清理失败，请检查 $TG_CONFIG_FILE 权限"
+        _header
+        echo -e "  ${W}TG 通知配置${NC}"
+        _dline
+        echo -e "  TG 通知由 Vaio 平台管理"
+        echo -e "  ${D}本节点用户以平台为准：管理员通知、每日报告、用户查询机器人和绑定码${NC}"
+        echo -e "  ${D}请在面板「通知配置」中设置；本机 TG 配置已清除。${NC}"
+        _line
+        _pause
+        return
+    fi
     init_tg_config
     
     while true; do
