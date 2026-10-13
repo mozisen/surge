@@ -27,13 +27,13 @@ const context = {
     $: selector => elements[selector.replace(/^#/, '')] || elements[selector],
     document: {querySelectorAll: selector => (context.openMenus && selector === '.filter-menu.open' ? context.openMenus() : Object.values(elements).filter(e => e.matches && e.matches(selector))),
                addEventListener: (type, fn) => { context.listeners[type] = fn; }},
-    listeners: {}, window: {innerWidth: 1280},
+    listeners: {}, window: {innerWidth: 1280, addEventListener() {}},
     console,
 };
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -238,6 +238,25 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     one.pop.getBoundingClientRect = () => ({right: 1300});
     context.listeners.click({target: one.trigger});
     assert(one.menu.classList.contains('align-end'), 'flips to the right edge when it overflows');
+    // 弹窗下拉框复用同一组件：不加选中高亮，禁用项不可选、键盘跳过
+    const formMenu = context.filterMenu('', '服务器', [['a', 'A'], ['b', 'B（不支持此协议）', true]], 'a', 'select-menu');
+    assert(formMenu.startsWith('<div class="filter-menu select-menu" data-value="a">') && !formMenu.includes('active') && !formMenu.includes(' id='));
+    assert(formMenu.includes('data-value="b" aria-checked="false" disabled'));
+    const native = {options: [{value: 'x', textContent: 'X', disabled: false}, {value: 'y', textContent: '<Y>', disabled: true}]};
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(context.selectMenuOptions(native))), [['x', 'X', false], ['y', '<Y>', true]]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(context.selectMenuOptions({options: []}))), [['', '—', true]]);
+    const three = fakeMenu();
+    three.menu.classList.add('select-menu');
+    three.options[1].matches = () => true;
+    three.menu.querySelectorAll = sel => sel.includes(':not(:disabled)') ? [three.options[0], three.options[2]] : three.options;
+    context.selectMenuPlace = () => {};
+    vm.runInContext('selectMenuPlace = this.selectMenuPlace;', context);
+    context.openMenus = () => [three.menu].filter(m => m.classList.contains('open'));
+    context.listeners.click({target: three.trigger});
+    context.listeners.keydown({key: 'ArrowDown', target: three.options[0], preventDefault() {}});
+    assert(focused === three.options[2], 'ArrowDown skips disabled options');
+    context.listeners.click({target: three.options[2]});
+    assert(!three.menu.classList.contains('active'), 'form selects never show the filter highlight');
     console.log('PASS filter menu: render, open, pick, keyboard, outside close');
 
     // 通知配置：状态、机器人、用户绑定表、绑定码与解绑

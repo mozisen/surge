@@ -158,6 +158,7 @@ function modal(title, body, wide = false, extraClass = '') {
     if (dialog.contains($('#toast'))) document.body.append($('#toast'));
     dialog.className = [wide ? 'wide' : '', extraClass].filter(Boolean).join(' ');
     dialog.innerHTML = `<div class="modal-head"><h2 id="dialog-title">${esc(title)}</h2><button class="quiet" data-action="close" aria-label="关闭">${icon('close')}</button></div><div class="modal-body">${body}</div>`;
+    dialog.querySelectorAll('select').forEach(enhanceSelect);
     if (!dialog.open) dialog.showModal();
 }
 
@@ -1201,12 +1202,12 @@ async function notifyAction(action, b) {
 // 筛选菜单：紧凑按钮 + 弹出菜单面板，替代原生下拉框。选择后更新按钮并调用容器的 onchange({target: {value}})。
 const filterChevron = '<svg class="filter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>';
 const filterCheck = '<svg class="filter-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>';
-function filterMenu(id, label, options, value) {
+function filterMenu(id, label, options, value, kind = '') {
     const current = options.find(([v]) => v === value) || options[0];
-    return `<div class="filter-menu${current[0] ? ' active' : ''}" id="${esc(id)}" data-value="${esc(current[0])}">`
+    return `<div class="filter-menu${kind ? ' ' + kind : ''}${current[0] && !kind ? ' active' : ''}"${id ? ` id="${esc(id)}"` : ''} data-value="${esc(current[0])}">`
         + `<button type="button" class="filter-trigger" aria-haspopup="menu" aria-expanded="false" title="${esc(label)}"><span class="filter-text">${esc(current[1])}</span>${filterChevron}</button>`
-        + `<div class="filter-pop" role="menu" aria-label="${esc(label)}" hidden>${options.map(([v, text]) =>
-            `<button type="button" role="menuitemradio" class="filter-option" data-value="${esc(v)}" aria-checked="${v === current[0]}"><span>${esc(text)}</span>${filterCheck}</button>`).join('')}</div></div>`;
+        + `<div class="filter-pop" role="menu" aria-label="${esc(label)}" hidden>${options.map(([v, text, disabled]) =>
+            `<button type="button" role="menuitemradio" class="filter-option" data-value="${esc(v)}" aria-checked="${v === current[0]}"${disabled ? ' disabled' : ''}><span>${esc(text)}</span>${filterCheck}</button>`).join('')}</div></div>`;
 }
 function filterMenuOpen(menu, open) {
     menu.classList.toggle('open', open);
@@ -1215,8 +1216,11 @@ function filterMenuOpen(menu, open) {
     if (!open) return;
     const pop = menu.querySelector('.filter-pop');
     menu.classList.remove('align-end');
-    if (pop.getBoundingClientRect?.().right > (window.innerWidth || Infinity) - 8) menu.classList.add('align-end');
-    (pop.querySelector('[aria-checked="true"]') || pop.querySelector('.filter-option'))?.focus?.();
+    if (menu.classList.contains('select-menu')) {
+        selectMenuPlace(menu, pop);
+        menu.dataset.opened = String(Date.now());
+    } else if (pop.getBoundingClientRect?.().right > (window.innerWidth || Infinity) - 8) menu.classList.add('align-end');
+    (pop.querySelector('[aria-checked="true"]:not(:disabled)') || pop.querySelector('.filter-option:not(:disabled)'))?.focus?.({preventScroll: true});
 }
 function closeFilterMenus(except) {
     document.querySelectorAll('.filter-menu.open').forEach(m => m !== except && filterMenuOpen(m, false));
@@ -1224,7 +1228,7 @@ function closeFilterMenus(except) {
 function filterMenuPick(menu, option) {
     const value = option.dataset.value;
     menu.dataset.value = value;
-    menu.classList.toggle('active', value !== '');
+    menu.classList.toggle('active', value !== '' && !menu.classList.contains('select-menu'));
     menu.querySelector('.filter-text').textContent = option.textContent;
     menu.querySelectorAll('.filter-option').forEach(o => o.setAttribute('aria-checked', String(o === option)));
     filterMenuOpen(menu, false);
@@ -1250,12 +1254,82 @@ function filterMenuKey(e) {
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
         if (!open) return filterMenuOpen(menu, true);
-        const items = [...menu.querySelectorAll('.filter-option')], at = items.indexOf(e.target);
+        const items = [...menu.querySelectorAll('.filter-option:not(:disabled)')], at = items.indexOf(e.target);
         items[(at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus?.();
     } else if (e.key === 'Tab' && open) filterMenuOpen(menu, false);
 }
 document.addEventListener('click', filterMenuClick);
 document.addEventListener('keydown', filterMenuKey);
+
+// 弹窗里的下拉框：原生 select 保留为数据源（取值、change 事件、表单校验），隐藏在同样的按钮 + 弹出菜单下面。
+// 弹窗内容区会滚动，菜单用 fixed 定位以免被裁切；滚动或改变窗口大小时关闭。
+function selectMenuOptions(select) {
+    const options = [...select.options].map(o => [o.value, o.textContent, o.disabled]);
+    return options.length ? options : [['', '—', true]];
+}
+function selectMenuPlace(menu, pop) {
+    const rect = menu.querySelector('.filter-trigger').getBoundingClientRect(), gap = 6, edge = 8;
+    const below = window.innerHeight - rect.bottom - gap - edge, above = rect.top - gap - edge;
+    Object.assign(pop.style, {left: rect.left + 'px', minWidth: rect.width + 'px', maxHeight: '', top: rect.bottom + gap + 'px'});
+    const height = pop.offsetHeight;
+    if (height > below && above > below) {
+        pop.style.maxHeight = Math.min(300, above) + 'px';
+        pop.style.top = rect.top - gap - pop.offsetHeight + 'px';
+    } else pop.style.maxHeight = Math.min(300, below) + 'px';
+    const right = pop.getBoundingClientRect().right;
+    if (right > window.innerWidth - edge) pop.style.left = Math.max(edge, rect.left - (right - window.innerWidth + edge)) + 'px';
+}
+function enhanceSelect(select) {
+    if (select.dataset.menu) return;
+    select.dataset.menu = '1';
+    const field = document.createElement('div');
+    field.className = 'select-field';
+    select.before(field);
+    field.append(select);
+    select.classList.add('select-native');
+    select.tabIndex = -1;
+    select.setAttribute('aria-hidden', 'true');
+    const label = select.id ? document.querySelector('label[for="' + select.id + '"]') : null;
+    let signature = '';
+    const render = () => {
+        const options = selectMenuOptions(select);
+        signature = JSON.stringify(options);
+        field.querySelector('.filter-menu')?.remove();
+        field.insertAdjacentHTML('afterbegin', filterMenu('', label?.textContent || '选择', options, select.value, 'select-menu'));
+        const menu = field.querySelector('.filter-menu'), trigger = menu.querySelector('.filter-trigger');
+        if (select.id) {
+            trigger.id = select.id + '-menu';
+            if (label) label.htmlFor = trigger.id;
+        }
+        trigger.disabled = select.disabled;
+        menu.onchange = e => {
+            select.value = e.target.value;
+            select.dispatchEvent(new Event('change', {bubbles: true}));
+        };
+    };
+    const sync = () => {
+        if (JSON.stringify(selectMenuOptions(select)) !== signature) return render();
+        const menu = field.querySelector('.filter-menu'), value = select.value;
+        const option = [...menu.querySelectorAll('.filter-option')].find(o => o.dataset.value === value);
+        menu.dataset.value = value;
+        menu.querySelector('.filter-text').textContent = option ? option.textContent : '—';
+        menu.querySelectorAll('.filter-option').forEach(o => o.setAttribute('aria-checked', String(o === option)));
+        menu.querySelector('.filter-trigger').disabled = select.disabled;
+    };
+    // Code sets select.value directly (no change event): mirror it.
+    const property = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+    Object.defineProperty(select, 'value', {configurable: true, get() { return property.get.call(this); }, set(v) { property.set.call(this, v); sync(); }});
+    select.addEventListener('change', sync);
+    new MutationObserver(sync).observe(select, {childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['disabled']});
+    render();
+}
+function closeSelectMenus(e) {
+    if (e?.target?.closest?.('.filter-pop')) return;
+    // A scroll that brings the trigger into view arrives a frame after opening: keep the menu.
+    document.querySelectorAll('.select-menu.open').forEach(m => (!e || Date.now() - Number(m.dataset.opened) > 200) && filterMenuOpen(m, false));
+}
+document.addEventListener('scroll', closeSelectMenus, true);
+window.addEventListener('resize', () => closeSelectMenus());
 
 let instanceFilter = {node: '', protocol: '', status: '', mode: '', q: ''};
 const instanceModes = {multi: '多用户', single: '一用户一实例', none: '不支持用户管理'};

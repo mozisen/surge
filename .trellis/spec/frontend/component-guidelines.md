@@ -114,7 +114,7 @@ Statuses that are not task states (`userStates`, `syncStates`) render through `s
 
 - List filters use `filterMenu(id, label, options, value)` from `app.js`, never a native `<select>`: a 32px button with the chevron right after the text, and a popover menu (`role="menu"`, options `role="menuitemradio"` with `aria-checked` and a check mark).
 - The page binds `$('#id').onchange = e => ...`; the component calls it with `{target: {value}}` after a pick. Outside click, Escape, Tab, or opening another menu closes it; arrow keys move between options. The periodic refresh skips re-rendering while a menu is open.
-- A non-default value gives the button a black border and bold text. Under `(pointer: coarse)` the button and options are at least 44px. Native `<select>` remains for form fields inside dialogs.
+- A non-default value gives the button a black border and bold text. Under `(pointer: coarse)` the button and options are at least 44px. Dialog form fields keep a native `<select>` in the markup: `modal()` calls `enhanceSelect()` on every select, which hides it (still the value source, `change` events and `required` validation) under a full-width 40px `.select-menu` built with `filterMenu(..., 'select-menu')`. Code keeps reading and writing `select.value`, `.disabled` and `.innerHTML`; a value setter override and a MutationObserver mirror those changes. The popover is `position: fixed` (placed by `selectMenuPlace`, flipping upward when needed) so the scrolling dialog body cannot clip it, and closes on scroll (after a 200ms grace period) or resize. Disabled `<option>`s become disabled menu items that keyboard navigation skips.
 
 ## Install flow target server
 
