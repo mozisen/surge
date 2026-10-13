@@ -184,6 +184,7 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     assert.strictEqual(html.section, 'instances');
     assert(html.shell.includes('节点管理') && html.shell.includes('全部服务器') && !html.shell.includes('已删除'));
     assert(!html.shell.includes('<select') && html.shell.includes('id="instance-mode"') && html.shell.includes('aria-haspopup="menu"'));
+    assert(html.shell.includes('data-action="instance-create"') && html.shell.includes('新建协议'));
     assert.strictEqual(elements['instance-count'].textContent, '3');
     elements['instance-mode'].onchange({target: {value: 'multi'}});
     assert.strictEqual(elements['instance-count'].textContent, '1 / 3');

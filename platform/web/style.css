@@ -2428,3 +2428,13 @@ dialog.install .install-warning {
         min-height: 44px;
     }
 }
+
+/* 安装协议：目标服务器选择，位于两步表单顶部。 */
+.install-server {
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--line-soft);
+}
+.install-server label {
+    margin-top: 0;
+}

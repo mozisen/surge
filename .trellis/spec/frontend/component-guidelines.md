@@ -115,3 +115,8 @@ Statuses that are not task states (`userStates`, `syncStates`) render through `s
 - List filters use `filterMenu(id, label, options, value)` from `app.js`, never a native `<select>`: a 32px button with the chevron right after the text, and a popover menu (`role="menu"`, options `role="menuitemradio"` with `aria-checked` and a check mark).
 - The page binds `$('#id').onchange = e => ...`; the component calls it with `{target: {value}}` after a pick. Outside click, Escape, Tab, or opening another menu closes it; arrow keys move between options. The periodic refresh skips re-rendering while a menu is open.
 - A non-default value gives the button a black border and bold text. Under `(pointer: coarse)` the button and options are at least 44px. Native `<select>` remains for form fields inside dialogs.
+
+## Install flow target server
+
+- Enter the install flow with `startInstall(nodeId)` (server detail: the current server; 节点管理「新建协议」: the 服务器 filter, else the first installable server). Both steps show a `#install-server` picker listing only adopted, online, non-maintenance, non-deleted servers; in the parameter step servers lacking the protocol are disabled.
+- The install code reads the target through `installNode()` (`installTargetId`), never `selected`: the 10-second refresh re-renders a detail page and resets `selected`. `submitTask(..., node)` and `installPlaceUsers(users, nodeId)` take the target explicitly.

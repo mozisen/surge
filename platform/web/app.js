@@ -445,14 +445,14 @@ function showInstance(index) {
     const shareable = (p.managed || (selected.snapshot.share_version === 2 && p.user_available)) && selected.status === 'online';
     modal(`${names[p.protocol]||p.protocol} · ${p.port}`, `<p class="instance-service">服务：<code>${esc(p.service)}</code> ${badge(p.status)}</p>${p.user_mode?`<p class="helper">用户：${esc(userModeText(p))}</p>`:''}${!p.managed?'<div class="notice warn">此实例尚未适配安全写入，当前仅可查看；安装列表按节点已声明的协议与内核能力展示。</div>':''}<div class="action-row"><button data-action="edit-port" data-index="${index}" ${writable?'':'disabled'}>修改端口</button><button data-action="${p.status==='running'?'stop':'start'}" data-index="${index}" ${writable?'':'disabled'}>${p.status==='running'?'停止服务':'启动服务'}</button><button data-action="restart" data-index="${index}" ${writable?'':'disabled'}>重启服务</button><button class="danger" data-action="delete" data-index="${index}" ${writable?'':'disabled'}>卸载此实例</button></div><label>实例用户</label><div class="table-wrap"><table><thead><tr><th>用户</th><th>已用 / 配额</th><th>状态</th><th>操作</th></tr></thead><tbody>${(p.users||[]).map((u,i)=>`<tr><td><strong>${esc(u.name)}</strong><br><span class="muted">${esc(u.expire_date||'永不过期')}</span>${u.account_id?`<br><span class="muted">统一用户 ${esc(selected.snapshot.accounts?.[u.account_id]?.name||'')}</span>`:''}</td><td>${p.traffic_state==='ready'?bytes(u.used):'统计不可用'} / ${u.quota?bytes(u.quota):'不限'}${u.reset_day?`<br><span class="muted">每月 ${u.reset_day} 日重置</span>`:''}</td><td>${badge(u.enabled?'running':'stopped')}${u.quota&&u.used>=u.quota?'<br>已超额':u.expire_date&&u.expire_date<new Date().toLocaleDateString('sv')?'<br>已到期':''}</td><td>${locked?(platform?`<a class="small-link" href="#users">在用户管理中修改</a>`:'<span class="small-link muted">由节点脚本管理</span>'):u.account_id?`<a class="small-link" href="#users">在用户管理中修改</a>`:`<button class="small" data-action="edit-user" data-index="${index}" data-user="${i}" ${writable?'':'disabled'}>编辑</button>`}<button class="small" data-action="share" data-index="${index}" data-user="${i}" ${shareable?'':'disabled'}>配置信息</button></td></tr>`).join('')}</tbody></table></div><p class="helper">${locked?(platform?'该节点的用户由平台「用户管理」管理。':'该节点的用户由节点脚本管理，面板只读；可在节点详情中切换为平台管理。'):''}用户流量来自节点数据库，依赖原脚本统计任务；无统计接口时不代表真实用量为零。</p><div class="modal-foot"><button data-action="add-user" data-index="${index}" ${writable&&!locked&&!p.protocol.startsWith('snell')&&!['ss-legacy','ss2022'].includes(p.protocol)?'':'disabled'}>新增用户</button><button data-action="close">关闭</button></div>`, true);
 }
-async function submitTask(action, p, params = {}) {
-    const data = await post('/nodes/' + selected.id + '/tasks', {
+async function submitTask(action, p, params = {}, node = selected) {
+    const data = await post('/nodes/' + node.id + '/tasks', {
         action,
         protocol: p.protocol,
         core: p.core,
         port: p.port,
         params,
-        revision: selected.snapshot.revision
+        revision: node.snapshot.revision
     }, {
         'Idempotency-Key': crypto.randomUUID()
     });
@@ -516,10 +516,35 @@ function installProtocolGuidance(protocol) {
     }[protocol];
 }
 
-function installCombinations() {
+// Install target: kept apart from `selected` so a periodic re-render of a detail page cannot switch it mid-form.
+let installTargetId = null;
+function installServers() {
+    return nodes.filter(n => !n.deleted && n.adopted && n.status === 'online' && !n.maintenance);
+}
+function installNode() {
+    return nodes.find(n => n.id === installTargetId) || selected;
+}
+function startInstall(nodeId) {
+    const servers = installServers();
+    installTargetId = servers.some(n => n.id === nodeId) ? nodeId : servers[0]?.id || null;
+    if (!installTargetId) return modal('暂无可安装的服务器', '<p>需要已接管、在线且未在维护中的服务器。请先添加服务器，或等待服务器上线、结束维护。</p>');
+    install();
+}
+function installServerField(protocol) {
+    const current = installNode();
+    return `<div class="install-server"><label for="install-server">服务器</label><select id="install-server">${installServers().map(n => {
+        const ok = !protocol || installCombinations(n).some(k => k.split(':')[1] === protocol);
+        return `<option value="${esc(n.id)}"${n.id === current.id ? ' selected' : ''}${ok ? '' : ' disabled'}>${esc(n.name)}${ok ? '' : '（不支持此协议）'}</option>`;
+    }).join('')}</select></div>`;
+}
+function bindInstallServer(next) {
+    $('#install-server').addEventListener('change', e => { installTargetId = e.target.value; next(); });
+}
+
+function installCombinations(node = installNode()) {
     const legacy = ['xray:vless','singbox:hy2','xray:snell','xray:snell-v5','xray:snell-v6'];
-    const combinations = selected.snapshot.task_api_version === 2
-        ? (selected.snapshot.write_capabilities || []).map(c=>`${c.core}:${c.protocol}`)
+    const combinations = node.snapshot.task_api_version === 2
+        ? (node.snapshot.write_capabilities || []).map(c=>`${c.core}:${c.protocol}`)
         : legacy;
     // Only render combinations with an implemented installation form.
     const supported = ['singbox:ss-legacy', 'singbox:ss2022', 'xray:vless', 'singbox:vless', 'singbox:hy2', 'xray:trojan',
@@ -537,15 +562,15 @@ function installCoreLabel(core, protocol) {
 
 function install() {
     const combinations = installCombinations();
-    if (!combinations.length) return modal('暂不可安装', '<p>节点未声明可用写入能力，请先升级节点程序。</p>');
+    const instances = installNode().snapshot.instances || [];
     const protocols = [...new Set(combinations.map(k=>k.split(':')[1]))];
-    const instances = selected.snapshot.instances || [];
     const cards = protocols.map(p=>{
         const cores = [...new Set(combinations.filter(k=>k.split(':')[1]===p).map(k=>installCoreLabel(k.split(':')[0], p)))].join(' / ');
         const count = instances.filter(i=>i.protocol===p).length;
         return `<button type="submit" class="protocol-card" value="${esc(p)}"><strong>${esc(names[p]||p)}</strong><span class="protocol-card-cores">${esc(cores)}</span><span class="protocol-card-meta">${esc(INSTALL_CARD_META[p]||'')}</span>${count?`<span class="protocol-card-count">已安装 ${count} 个</span>`:''}</button>`;
     }).join('');
-    modal('选择要安装的协议', `<form id="protocol-choice-form"><div class="install-scroll"><p>选择协议后填写端口等参数；新实例使用独立端口，不影响已有配置。</p><div class="protocol-grid">${cards}</div></div><div class="modal-foot"><button type="button" data-action="close">取消</button></div></form>`, false, 'install');
+    modal('选择要安装的协议', `<form id="protocol-choice-form"><div class="install-scroll">${installServerField()}<p>选择协议后填写端口等参数；新实例使用独立端口，不影响已有配置。</p>${combinations.length ? `<div class="protocol-grid">${cards}</div>` : '<p class="notice">此服务器的节点程序未声明可用写入能力，请先升级节点程序，或选择其他服务器。</p>'}</div><div class="modal-foot"><button type="button" data-action="close">取消</button></div></form>`, false, 'install');
+    bindInstallServer(install);
     $('#protocol-choice-form .protocol-card')?.focus();
     $('#protocol-choice-form').addEventListener('submit', e=>{
         e.preventDefault();
@@ -555,10 +580,12 @@ function install() {
 }
 
 function installForm(protocol) {
-    const combinations = installCombinations().filter(k=>k.split(':')[1]===protocol);
+    const node = installNode();
+    const combinations = installCombinations(node).filter(k=>k.split(':')[1]===protocol);
     if (!combinations.length) return install();
-    modal(`安装 ${names[protocol]||protocol}`, `<form id="install-form"><div class="install-scroll"><div class="install-intro"><div class="install-intro-head"><p id="protocol-guidance"></p><button type="button" id="install-back" class="small">返回选择协议</button></div><p class="helper">新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><div id="install-core-field"><label for="protocol">运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${installCoreLabel(core, p)}</option>`;}).join('')}</select></div></div><section class="install-section"><h3>基础设置</h3><div class="form-grid"><div><label for="port">监听端口</label><div class="input-action"><input id="port" name="port" type="number" min="1" max="65535" required><button type="button" id="generate-port" class="install-generate">生成</button></div><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div id="sni-field"><label for="sni" id="sni-label">SNI 域名</label><div class="input-action"><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="generate-sni" class="install-generate">生成</button></div></div></div><div id="ss-method-field"><label for="ss-method">SS 加密方式</label><select id="ss-method" disabled></select><p class="helper">决定密钥格式与长度。</p></div></section><fieldset id="certificate-fields" class="install-section"><legend>证书设置</legend><label for="certificate-mode">证书方式</label><select id="certificate-mode"><option value="self">生成自签证书</option><option value="acme">自有域名 · 申请 Let’s Encrypt 证书（HTTP）</option><option value="existing">使用节点已有证书</option></select><p id="certificate-help" class="helper"></p><div id="acme-email-field"><label for="acme-email">证书联系邮箱</label><input id="acme-email" type="email" maxlength="254"></div></fieldset><details id="install-advanced" class="install-section"><summary>高级设置</summary><p id="generated-credentials" class="helper"></p><fieldset id="credential-fields" class="install-options"><legend>访问凭据</legend><label id="credential-label" for="credential">访问凭据（留空自动生成）</label><div class="input-action"><input id="credential" type="password" autocomplete="new-password" maxlength="128"><button type="button" id="generate-credential" class="install-generate">生成</button></div></fieldset><fieldset id="reality-fields" class="install-options"><legend>Reality 参数</legend><label for="reality-private">Reality 私钥（留空自动生成）</label><input id="reality-private" type="password" autocomplete="new-password" maxlength="43"><p class="helper">公钥由节点从私钥推导，无需另填。</p><label for="reality-short-id">Short ID（留空自动生成）</label><div class="input-action"><input id="reality-short-id" maxlength="16" pattern="([0-9a-fA-F]{2}){1,8}"><button type="button" id="generate-short-id" class="install-generate">生成</button></div></fieldset><fieldset id="snell-fields" class="install-options"><legend>连接设置</legend><div class="form-grid"><div><label for="snell-mode">混淆模式</label><select id="snell-mode"><option value="default">default</option><option value="unshaped">unshaped</option><option value="unsafe-raw">unsafe-raw</option></select></div><div><label for="tfo">客户端 TCP Fast Open</label><select id="tfo"><option value="true">启用</option><option value="false">关闭</option></select></div></div><label for="dns">DNS 服务器（逗号分隔；留空使用系统 DNS）</label><input id="dns" maxlength="512" placeholder="1.1.1.1,8.8.8.8"><label for="dns-preference">DNS IP 偏好</label><select id="dns-preference"><option value="default">default</option><option value="prefer-ipv4">prefer-ipv4</option><option value="prefer-ipv6">prefer-ipv6</option><option value="ipv4-only">ipv4-only</option><option value="ipv6-only">ipv6-only</option></select></fieldset></details></div><div class="install-status"><p id="install-options-status" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><div class="error" role="alert"></div></div><div class="modal-foot"><p class="install-warning">${protocol.startsWith('snell')?'安装可能需要数分钟，请等待任务完成。':'安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。'}</p><button type="submit" class="primary">安装实例</button></div></form>`, false, 'install');
+    modal(`安装 ${names[protocol]||protocol}`, `<form id="install-form"><div class="install-scroll">${installServerField(protocol)}<div class="install-intro"><div class="install-intro-head"><p id="protocol-guidance"></p><button type="button" id="install-back" class="small">返回选择协议</button></div><p class="helper">新实例使用独立端口，保留已有协议配置。请自行在云安全组和防火墙放行对应端口。</p><div id="install-core-field"><label for="protocol">运行内核</label><select id="protocol" name="protocol">${combinations.map(k=>{const [core,p]=k.split(':');return `<option value="${esc(k)}">${esc(names[p]||p)} · ${installCoreLabel(core, p)}</option>`;}).join('')}</select></div></div><section class="install-section"><h3>基础设置</h3><div class="form-grid"><div><label for="port">监听端口</label><div class="input-action"><input id="port" name="port" type="number" min="1" max="65535" required><button type="button" id="generate-port" class="install-generate">生成</button></div><p class="helper">避开快照中的已用端口；安装时仍由节点检查实际占用。</p></div><div id="sni-field"><label for="sni" id="sni-label">SNI 域名</label><div class="input-action"><input id="sni" name="sni" value="www.cloudflare.com" required><button type="button" id="generate-sni" class="install-generate">生成</button></div></div></div><div id="ss-method-field"><label for="ss-method">SS 加密方式</label><select id="ss-method" disabled></select><p class="helper">决定密钥格式与长度。</p></div></section><fieldset id="certificate-fields" class="install-section"><legend>证书设置</legend><label for="certificate-mode">证书方式</label><select id="certificate-mode"><option value="self">生成自签证书</option><option value="acme">自有域名 · 申请 Let’s Encrypt 证书（HTTP）</option><option value="existing">使用节点已有证书</option></select><p id="certificate-help" class="helper"></p><div id="acme-email-field"><label for="acme-email">证书联系邮箱</label><input id="acme-email" type="email" maxlength="254"></div></fieldset><details id="install-advanced" class="install-section"><summary>高级设置</summary><p id="generated-credentials" class="helper"></p><fieldset id="credential-fields" class="install-options"><legend>访问凭据</legend><label id="credential-label" for="credential">访问凭据（留空自动生成）</label><div class="input-action"><input id="credential" type="password" autocomplete="new-password" maxlength="128"><button type="button" id="generate-credential" class="install-generate">生成</button></div></fieldset><fieldset id="reality-fields" class="install-options"><legend>Reality 参数</legend><label for="reality-private">Reality 私钥（留空自动生成）</label><input id="reality-private" type="password" autocomplete="new-password" maxlength="43"><p class="helper">公钥由节点从私钥推导，无需另填。</p><label for="reality-short-id">Short ID（留空自动生成）</label><div class="input-action"><input id="reality-short-id" maxlength="16" pattern="([0-9a-fA-F]{2}){1,8}"><button type="button" id="generate-short-id" class="install-generate">生成</button></div></fieldset><fieldset id="snell-fields" class="install-options"><legend>连接设置</legend><div class="form-grid"><div><label for="snell-mode">混淆模式</label><select id="snell-mode"><option value="default">default</option><option value="unshaped">unshaped</option><option value="unsafe-raw">unsafe-raw</option></select></div><div><label for="tfo">客户端 TCP Fast Open</label><select id="tfo"><option value="true">启用</option><option value="false">关闭</option></select></div></div><label for="dns">DNS 服务器（逗号分隔；留空使用系统 DNS）</label><input id="dns" maxlength="512" placeholder="1.1.1.1,8.8.8.8"><label for="dns-preference">DNS IP 偏好</label><select id="dns-preference"><option value="default">default</option><option value="prefer-ipv4">prefer-ipv4</option><option value="prefer-ipv6">prefer-ipv6</option><option value="ipv4-only">ipv4-only</option><option value="ipv6-only">ipv6-only</option></select></fieldset></details></div><div class="install-status"><p id="install-options-status" class="helper"></p><p id="generation-feedback" class="helper" role="status" aria-live="polite"></p><div class="error" role="alert"></div></div><div class="modal-foot"><p class="install-warning">${protocol.startsWith('snell')?'安装可能需要数分钟，请等待任务完成。':'安装可能需要数分钟。共享核心会重启，相关协议可能短暂中断。'}</p><button type="submit" class="primary">安装实例</button></div></form>`, false, 'install');
     $('#install-back').onclick = install;
+    bindInstallServer(() => installForm(protocol));
     $('#install-core-field').hidden = combinations.length === 1;
     const updateFields = () => {
         const p = $('#protocol').value.split(':')[1], snell = p.startsWith('snell'), ss = ['ss-legacy','ss2022'].includes(p), noSni = snell || ss;
@@ -566,9 +593,9 @@ function installForm(protocol) {
         const method = methods.includes($('#ss-method').value) ? $('#ss-method').value : methods[0];
         $('#ss-method').innerHTML = methods.map(m=>`<option value="${m}">${m}</option>`).join('');
         $('#ss-method').value = method; $('#ss-method').disabled = !ss;
-        const advanced = [1, 2].includes(selected.snapshot.install_options_version);
+        const advanced = [1, 2].includes(node.snapshot.install_options_version);
         for (const id of ['reality-private', 'reality-short-id', 'generate-short-id'])
-            $('#'+id).disabled = !(p === 'vless' && selected.snapshot.install_options_version === 2);
+            $('#'+id).disabled = !(p === 'vless' && node.snapshot.install_options_version === 2);
         const tls = ['hy2', 'trojan', 'anytls'].includes(p);
         $('#sni').disabled = noSni;
         $('#sni').required = !noSni;
@@ -582,7 +609,7 @@ function installForm(protocol) {
         $('#ss-method-field').hidden = !ss;
         $('#credential-fields').hidden = !advanced;
         $('#certificate-fields').hidden = !(advanced && tls);
-        $('#reality-fields').hidden = !(p === 'vless' && selected.snapshot.install_options_version === 2);
+        $('#reality-fields').hidden = !(p === 'vless' && node.snapshot.install_options_version === 2);
         $('#snell-fields').hidden = !(advanced && p === 'snell-v6');
         $('#install-advanced').hidden = ['credential-fields', 'reality-fields', 'snell-fields'].every(id => $('#'+id).hidden);
         $('#credential-label').textContent = (p === 'vless' ? 'UUID' : snell ? 'PSK' : p === 'ss2022' ? 'Base64 密钥' : '密码') + '（留空自动生成）';
@@ -622,11 +649,11 @@ function installForm(protocol) {
     };
     updateFields();
     // Open on a free random high port rather than a fixed default.
-    try { $('#port').value = installPortCandidate(selected.snapshot.instances || [], $('#port').value); } catch (err) { /* keep the field for manual input */ }
+    try { $('#port').value = installPortCandidate(node.snapshot.instances || [], $('#port').value); } catch (err) { /* keep the field for manual input */ }
     $('#port').focus();
     $('#generate-port').onclick = () => {
         try {
-            $('#port').value = installPortCandidate(selected.snapshot.instances || [], $('#port').value);
+            $('#port').value = installPortCandidate(node.snapshot.instances || [], $('#port').value);
             $('#generation-feedback').textContent = '已生成推荐端口；尚未安装，请核对后提交。';
         } catch (err) { formError(err); }
     };
@@ -638,7 +665,7 @@ function installForm(protocol) {
     $('#install-form').addEventListener('invalid', e => {
         if ($('#install-advanced').contains(e.target)) $('#install-advanced').open = true;
     }, true);
-    if (typeof installUserPicker === 'function') installUserPicker();
+    if (typeof installUserPicker === 'function') installUserPicker(node);
     $('#install-form').addEventListener('submit', async e => {
         e.preventDefault();
         const b = $('[type=submit]', e.target);
@@ -647,13 +674,13 @@ function installForm(protocol) {
         try {
             // The account name is generated, never typed: platform nodes ignore it (empty instance),
             // script-mode and older nodes get a name unused by this protocol.
-            const name = installNameCandidate(selected.snapshot.instances || [], p, Number($('#port').value));
+            const name = installNameCandidate(node.snapshot.instances || [], p, Number($('#port').value));
             const params = (p.startsWith('snell') || ['ss-legacy','ss2022'].includes(p)) ? {name} : {sni: $('#sni').value};
-            if (selected.snapshot.install_options_version === 2 && p === 'vless') {
+            if (node.snapshot.install_options_version === 2 && p === 'vless') {
                 if ($('#reality-private').value) params.private_key = $('#reality-private').value;
                 if ($('#reality-short-id').value) params.short_id = $('#reality-short-id').value;
             }
-            if ([1, 2].includes(selected.snapshot.install_options_version)) {
+            if ([1, 2].includes(node.snapshot.install_options_version)) {
                 params.name = name;
                 if ($('#credential').value) params.credential = $('#credential').value;
                 if (['hy2', 'trojan', 'anytls'].includes(p)) {
@@ -671,8 +698,8 @@ function installForm(protocol) {
                 protocol: p,
                 core,
                 port: Number($('#port').value)
-            }, params);
-            if (placeUsers.length) await installPlaceUsers(placeUsers);
+            }, params, node);
+            if (placeUsers.length) await installPlaceUsers(placeUsers, node.id);
         } catch (err) {
             formError(err);
             b.disabled = false;
@@ -771,7 +798,8 @@ document.addEventListener('click', async e => {
             detailTab = b.dataset.tab;
             detail(selected);
         } else if (action === 'instance') showInstance(index);
-        else if (action === 'install') install();
+        else if (action === 'install') startInstall(selected?.id);
+        else if (action === 'instance-create') startInstall(instanceFilter.node);
         else if (action === 'renew') {
             enrollment(await post('/nodes/' + selected.id + '/enrollment'));
             await refresh();
@@ -1114,8 +1142,8 @@ function memberAddable(i) {
 }
 
 // 安装协议时选择平台用户（仅以平台为准的节点）
-async function installUserPicker() {
-    if (!selected || !usersReady(selected) || $('#install-users')) return;
+async function installUserPicker(node = selected) {
+    if (!node || !usersReady(node) || $('#install-users')) return;
     const data = await api('/users').catch(() => ({users: []}));
     const box = $('#install-form .install-scroll');
     if (!box || $('#install-users')) return;
@@ -1125,9 +1153,9 @@ async function installUserPicker() {
 function installPickedUsers() {
     return [...document.querySelectorAll('#install-users input:checked')].map(c => c.value);
 }
-async function installPlaceUsers(users) {
+async function installPlaceUsers(users, nodeId = selected.id) {
     try {
-        await post('/nodes/' + selected.id + '/install-users', {task_id: activeTaskId, user_ids: users});
+        await post('/nodes/' + nodeId + '/install-users', {task_id: activeTaskId, user_ids: users});
         toast('安装完成后将为 ' + users.length + ' 个用户新建协议账号');
     } catch (err) {
         toast('实例已提交安装，但未能登记用户：' + err.message);
@@ -1216,7 +1244,7 @@ function instancesPage() {
     const rows = instanceRows(), f = instanceFilter;
     const servers = nodes.filter(n => !n.deleted);
     const protocols = [...new Set(rows.map(r => r.p.protocol))].sort();
-    shell(`<div class="heading"><div><h1>节点管理</h1><p class="subtext">所有服务器上的协议实例，按服务器、协议、状态和用户模式筛选。</p></div><button data-action="refresh">${icon('refresh')}刷新</button></div>
+    shell(`<div class="heading"><div><h1>节点管理</h1><p class="subtext">所有服务器上的协议实例，按服务器、协议、状态和用户模式筛选。</p></div><div class="action-row"><button data-action="refresh">${icon('refresh')}刷新</button><button class="primary" data-action="instance-create">${icon('plus')}新建协议</button></div></div>
     <div class="section-label"><h2>节点 <span class="count" id="instance-count"></span></h2><div class="tools instance-filters">
     ${filterMenu('instance-node', '筛选服务器', [['', '全部服务器'], ...servers.map(n => [n.id, n.name])], f.node)}
     ${filterMenu('instance-protocol', '筛选协议', [['', '全部协议'], ...protocols.map(p => [p, names[p] || p])], f.protocol)}

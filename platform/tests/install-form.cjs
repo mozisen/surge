@@ -6,7 +6,7 @@ const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 const chunk = source.slice(source.indexOf('function installPortCandidate('), source.indexOf('function editUser('));
 const elements = {};
 for (const id of ['protocol-choice-form', 'install-back', 'install-advanced', 'install-core-field', 'ss-method-field', 'credential-fields', 'certificate-fields', 'reality-fields', 'snell-fields', 'credential-label', 'acme-email-field', 'ss-method', 'reality-private', 'reality-short-id', 'generate-short-id', 'credential', 'generate-credential', 'certificate-mode', 'acme-email', 'snell-mode', 'dns', 'dns-preference', 'tfo', 'install-options-status', 'certificate-help', 'protocol', 'port', 'sni', 'generate-sni',
-    'sni-field', 'sni-label', 'protocol-guidance', 'generated-credentials', 'generation-feedback', 'generate-port', 'install-form', 'submit']) {
+    'sni-field', 'sni-label', 'protocol-guidance', 'generated-credentials', 'generation-feedback', 'generate-port', 'install-form', 'submit', 'install-server']) {
     elements[id] = {value: '', events: {}, focus() {}, addEventListener(event, handler) { this.events[event] = handler; }, reportValidity() { return true; }};
 }
 elements.protocol.value = 'xray:vless';
@@ -17,7 +17,7 @@ let markup = '';
 const context = vm.createContext({
     Uint32Array, Uint8Array, Set, Number, Error, btoa: text=>Buffer.from(text, "binary").toString("base64"),
     crypto: {getRandomValues(array) { array[0] = 0; return array; }},
-    selected: {snapshot: {task_api_version: 2,
+    selected: {id: 'a', name: '香港', adopted: true, status: 'online', maintenance: false, deleted: null, snapshot: {task_api_version: 2,
         write_capabilities: [{core: 'xray', protocol: 'vless'}, {core: 'xray', protocol: 'snell-v6'}],
         instances: [{port: 20000, protocol: 'snell-v6', users: [{name: 'u20001'}, {name: 'u20001_1'}]}]}},
     names: {vless: 'VLESS Reality', 'snell-v6': 'Snell v6'},
@@ -27,6 +27,10 @@ const context = vm.createContext({
     submitTask: async (...args) => calls.push(args),
     formError: error => { throw error; }
 });
+const server = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
+    snapshot: {task_api_version: 2, write_capabilities: [{core: 'singbox', protocol: 'vless'}], instances: [{port: 30000, protocol: 'vless', users: []}]}, ...extra});
+context.nodes = [context.selected, server('b', {name: '<b>东京</b>'}), server('c', {status: 'offline'}), server('d', {deleted: 1}),
+    server('e', {maintenance: true}), server('f', {adopted: false}), server('g', {snapshot: {task_api_version: 2, write_capabilities: [], instances: []}})];
 vm.runInContext(chunk, context);
 async function main() {
     context.install();
@@ -38,7 +42,9 @@ async function main() {
     assert(markup.includes('Reality · TCP'));
     assert(markup.includes('已安装 1 个')); // snell-v6 has one instance; vless has none
     assert.equal((markup.match(/已安装/g) || []).length, 1);
-    assert(!markup.includes('<select'));
+    assert.equal((markup.match(/<select/g) || []).length, 1); // only the server picker
+    assert(markup.includes('<option value="a" selected>香港</option>') && markup.includes('<option value="b"><b>东京</b></option>'));
+    for (const id of ['c', 'd', 'e', 'f']) assert(!markup.includes(`<option value="${id}"`)); // offline, deleted, maintenance, unadopted
     elements['protocol-choice-form'].events.submit({preventDefault(){}, submitter: {value: 'unknown'}});
     elements['protocol-choice-form'].events.submit({preventDefault(){}});
     assert(!markup.includes('install-form')); // unknown or missing card value does not open the form
@@ -162,6 +168,31 @@ async function main() {
     }
     elements['install-back'].onclick();
     assert(markup.includes('protocol-choice-form'));
+
+    // Server selection: defaults, switching, submission target, nothing installable.
+    context.esc = value => String(value).replace(/</g, '&lt;');
+    context.startInstall('b');
+    assert(markup.includes('<option value="b" selected>&lt;b>东京&lt;/b></option>'));
+    assert(markup.includes('value="vless"') && !markup.includes('value="snell-v6"') && markup.includes('已安装 1 个')); // node b: one vless instance
+    context.startInstall('c'); // offline: falls back to the first installable server
+    assert(markup.includes('<option value="a" selected>'));
+    elements['install-server'].events.change({target: {value: 'g'}});
+    assert(markup.includes('<option value="g" selected>') && markup.includes('未声明可用写入能力') && !markup.includes('protocol-card'));
+    elements['install-server'].events.change({target: {value: 'a'}});
+    elements['protocol-choice-form'].events.submit({preventDefault(){}, submitter: {value: 'snell-v6'}});
+    assert(markup.includes('<option value="b" disabled>&lt;b>东京&lt;/b>（不支持此协议）</option>') && markup.includes('<option value="g" disabled>'));
+    elements['protocol-choice-form'].events.submit({preventDefault(){}, submitter: {value: 'vless'}});
+    elements['install-server'].events.change({target: {value: 'b'}});
+    assert(markup.includes('<option value="b" selected>') && markup.includes('value="singbox:vless"') && !markup.includes('value="xray:vless"'));
+    context.selected = context.nodes[0]; // a periodic re-render of the detail page resets `selected`
+    elements.protocol.value = 'singbox:vless';
+    elements.protocol.events.change();
+    await elements['install-form'].events.submit({preventDefault() {}, target: elements['install-form']});
+    assert.equal(calls.at(-1)[3].id, 'b'); // submitted to the chosen server
+    context.nodes = [server('c', {status: 'offline'})];
+    context.startInstall('c');
+    assert(markup.includes('需要已接管、在线') && !markup.includes('protocol-choice-form'));
+    console.log('PASS install server picker: eligible servers, defaults, switching, submission target, none available');
     console.log('PASS installation generators, defaults, protocol fields, collisions, no implicit submission');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
