@@ -110,6 +110,8 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     const block = context.authorityBlock(node('d', {snapshot: {authority_version: 1, user_authority: 'script', instances: [], last_upgrade: {status: 'rolled_back', at: 1, to: '0.3.0-preview.12', message: '新版未按时上线'}}}));
     assert(block.includes('以节点脚本为准') && block.includes('切换为平台管理') && block.includes('已回滚') && block.includes('新版未按时上线'));
     assert(context.authorityBlock(node('c', {snapshot: {instances: []}})).includes('旧版节点'));
+    const managed = context.authorityBlock(node('e', {snapshot: {authority_version: 1, user_authority: 'platform', instances: []}}));
+    assert(managed.includes('以平台为准') && !managed.includes('data-action="authority"') && !managed.includes('切回脚本管理'), 'platform-managed servers have no switch button');
     element('authority-form'); element('authority-confirm', {value: 'node-a'});
     context.authorityDialog(context.nodes[0]);
     assert(html.title === '切回脚本管理' && !html.modal.includes('authority-confirm'));

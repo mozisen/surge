@@ -17,8 +17,10 @@ GIB = 1073741824
 class SimNode:
     """A node that executes platform_apply like the script's account_apply."""
 
-    def __init__(self, test, name, version=1, authority='platform'):
+    def __init__(self, test, name, version=1, authority='platform', adopt=True):
         self.test, self.version, self.accounts, self.clock, self.authority = test, version, {}, 1760000000, authority
+        # A script-mode node in these tests was adopted by an older panel/agent (no automatic switch), then upgraded.
+        self.authority_version = 0 if authority == 'script' else version
         self.protocol_users = {('xray', 'vless', 443): {}, ('singbox', 'hy2', 8443): {}}
         result = test.client.post('/api/nodes', json={"name": name}, headers=test.headers)
         self.id = result.json['node_id']
@@ -27,8 +29,12 @@ class SimNode:
         token = test.client.post('/api/enroll', json=enrollment).json['token']
         self.auth = {"Authorization": "Bearer " + token}
         self.poll()
-        test.client.post('/api/nodes/' + self.id + '/adopt', json={"revision": "a" * 64}, headers=test.headers)
+        if adopt:
+            test.client.post('/api/nodes/' + self.id + '/adopt', json={"revision": "a" * 64}, headers=test.headers)
+        self.authority_version = version
         self.tasks = []
+        if adopt:
+            self.poll(run=False)
 
     def snapshot(self):
         instances = [{"core": c, "protocol": p, "port": port, "service": "s", "status": "running", "traffic_state": "ready",
@@ -44,7 +50,7 @@ class SimNode:
                                   "cycle": "", "cycle_used": 0, "platform_user_id": a.get("platform_user_id"),
                                   "platform_block": a.get("platform_block", ""), "state": "", "members": members}
         return {"revision": "a" * 64, "instances": instances, "metrics": {}, "accounts_version": self.version, "accounts": accounts,
-                "authority_version": self.version, "user_authority": self.authority, "upgrade_version": self.version, "agent_version": "0.3.0-preview.11"}
+                "authority_version": self.authority_version, "user_authority": self.authority, "upgrade_version": self.version, "agent_version": "0.3.0-preview.11"}
 
     def poll(self, run=True):
         reply = self.test.client.post('/api/agent/' + self.id + '/poll', json={"snapshot": self.snapshot(), "ready": True}, headers=self.auth).json
@@ -197,6 +203,33 @@ class PlatformUsersPanel(unittest.TestCase):
         a.protocol_users[('xray', 'vless', 443)]['alice']['used'] = 10
         a.settle()
         self.assertEqual(self.user(user)["used"], 10)
+
+    def test_adopt_switches_to_platform(self):
+        node = SimNode(self, 'A', authority='script', adopt=False)
+        node.authority_version = 1
+        node.protocol_users[('xray', 'vless', 443)]['old'] = {"used": 1}
+        node.poll()
+        r = self.client.post('/api/nodes/' + node.id + '/adopt', json={"revision": "a" * 64}, headers=self.headers)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn('1 个脚本用户', r.json['error'])
+        self.assertEqual(self.client.get('/api/nodes').json['nodes'][-1]['adopted'], False)
+        r = self.client.post('/api/nodes/' + node.id + '/adopt', json={"revision": "a" * 64, "clear_users": True}, headers=self.headers)
+        self.assertEqual((r.status_code, r.json['authority']), (200, 'switching'))
+        node.settle()
+        self.assertEqual((node.authority, node.protocol_users[('xray', 'vless', 443)]), ('platform', {}))
+        self.assertEqual(node.tasks[0]['params']['ops'], [{"op": "set_authority", "mode": "platform"}])
+        # Already platform: nothing queued. Old agent: adopt only.
+        same = SimNode(self, 'B', adopt=False)
+        r = self.client.post('/api/nodes/' + same.id + '/adopt', json={"revision": "a" * 64}, headers=self.headers)
+        self.assertEqual(r.json['authority'], 'platform')
+        self.assertIsNone(same.poll())
+        old = SimNode(self, 'C', authority='script', adopt=False)
+        old.authority_version = 0
+        old.poll()
+        r = self.client.post('/api/nodes/' + old.id + '/adopt', json={"revision": "a" * 64}, headers=self.headers)
+        self.assertEqual(r.json['authority'], 'unsupported')
+        self.assertIsNone(old.poll())
+        self.assertEqual(self.client.post('/api/nodes/' + old.id + '/adopt', json={"revision": "a" * 64, "x": 1}, headers=self.headers).status_code, 400)
 
     def test_authority_switch_requires_confirmation_and_releases_links(self):
         node = SimNode(self, 'N', authority='script')

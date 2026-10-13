@@ -2495,3 +2495,106 @@ dialog.install .install-warning {
         min-height: 44px;
     }
 }
+
+/* 弹窗返回箭头：位于关闭按钮左侧。 */
+.modal-head .modal-back {
+    margin-left: auto;
+}
+.modal-head .modal-back + button {
+    margin-left: -8px;
+}
+
+/* 安装协议：单页紧凑布局。顶部「服务器 / 内核」标签与下拉框同一行，下拉框随内容变宽；字段两列网格。 */
+.install-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 24px;
+    padding: 6px 0 12px;
+    border-bottom: 1px solid var(--line-soft);
+}
+.install-server {
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+.inline-field {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+.inline-field > label {
+    margin: 0;
+    flex: none;
+    font-size: 13px;
+    color: var(--muted);
+    font-weight: 500;
+}
+.inline-field .select-field {
+    min-width: 0;
+}
+.inline-field .select-menu .filter-trigger {
+    width: auto;
+    max-width: 100%;
+    min-height: 34px;
+    font-weight: 600;
+}
+.install-guidance {
+    margin: 10px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+}
+.install-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 16px;
+    margin-top: 14px;
+}
+.install-grid label,
+#install-users legend {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-2);
+}
+/* 分组容器不占网格格子，子项直接参与两列排列。 */
+.install-grid .install-group {
+    display: contents;
+}
+.install-grid .install-wide {
+    grid-column: 1 / -1;
+    margin: -4px 0 0;
+}
+#install-form .install-group[hidden],
+#install-form .install-grid [hidden] {
+    display: none;
+}
+.install-users {
+    min-width: 0;
+    margin: 16px 0 0;
+    padding: 12px 0 0;
+    border: 0;
+    border-top: 1px solid var(--line-soft);
+}
+.install-user-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+}
+.install-user-list .field-check {
+    margin: 0;
+}
+.install-users .helper {
+    margin: 6px 0 0;
+    font-size: 12px;
+}
+@media (max-width: 760px) {
+    .install-grid {
+        grid-template-columns: 1fr;
+    }
+    .install-top {
+        gap: 8px;
+    }
+}

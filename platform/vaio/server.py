@@ -449,17 +449,35 @@ def create_app(config=None):
     @app.post("/api/nodes/<node_id>/adopt")
     @admin
     def adopt(node_id):
-        revision = body().get("revision")
+        data = body()
+        if set(data) - {"revision", "clear_users"}:
+            raise ValueError("参数无效")
+        revision = data.get("revision")
         with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
             if not row or row["revoked"] or not row["last_seen"] or time.time() - row["last_seen"] > 45:
                 return jsonify(error="请等待节点上线"), 409
             snap = json.loads(row["snapshot"])
             if not revision or revision != snap.get("revision") or snap.get("error"):
                 return jsonify(error="配置状态已变化，请刷新后重试"), 409
+            # Adopted servers are managed by the platform: switch user authority in the same step.
+            switch = snap.get("authority_version") == 1 and snap.get("accounts_version") == 1 and snap.get("user_authority") != "platform"
+            users = sum(len(i.get("users") or []) for i in snap.get("instances", []))
+            if switch and users and data.get("clear_users") is not True:
+                return jsonify(error="接管将切到平台管理并删除节点上的 %d 个脚本用户，请确认" % users), 409
             db.execute("UPDATE nodes SET adopted=1 WHERE id=?", (node_id,))
             audit(db, "node.adopt", node_id)
-        return jsonify(ok=True)
+            if not switch:
+                return jsonify(ok=True, authority="platform" if snap.get("user_authority") == "platform" else "unsupported")
+            if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status IN ('queued','running','unknown')", (node_id,)).fetchone():
+                return jsonify(ok=True, authority="pending", message="节点有未完成的任务，完成后请在节点详情中切换为平台管理")
+            task_id = str(uuid.uuid4())
+            request_body = validate_platform_task({"action": "platform_apply", "params": {"ops": [{"op": "set_authority", "mode": "platform"}]}})
+            db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
+                       (task_id, node_id, "platform_apply", json.dumps(request_body), "queued", time.time(), "system:" + task_id))
+            audit(db, "task.queued", node_id, task_id + " platform_apply（接管时切到平台管理）")
+        return jsonify(ok=True, authority="switching", task_id=task_id)
 
     @app.post("/api/nodes/<node_id>/revoke")
     @admin

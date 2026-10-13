@@ -22,7 +22,7 @@ const context = vm.createContext({
         instances: [{port: 20000, protocol: 'snell-v6', users: [{name: 'u20001'}, {name: 'u20001_1'}]}]}},
     names: {vless: 'VLESS Reality', 'snell-v6': 'Snell v6'},
     esc: value => value,
-    modal: (_, html) => { markup = html; },
+    modal: (_, html, wide, kind, back) => { markup = html; context.back = back; },
     $: selector => elements[selector === '[type=submit]' ? 'submit' : selector.slice(1)],
     submitTask: async (...args) => calls.push(args),
     formError: error => { throw error; }
@@ -50,8 +50,10 @@ async function main() {
     assert(!markup.includes('install-form')); // unknown or missing card value does not open the form
     elements['protocol-choice-form'].events.submit({preventDefault(){}, submitter: {value: 'vless'}});
     assert(markup.includes('install-form'));
-    assert(markup.includes('<details id="install-advanced"'));
-    assert(!markup.includes('<details id="install-advanced" class="install-section" open'));
+    // One page: no collapsed group, no section headings, no in-form back button; the header arrow returns.
+    for (const gone of ['<details', '基础设置', '高级设置', '证书设置', 'install-back', '返回选择协议', 'generated-credentials']) assert(!markup.includes(gone), gone);
+    assert.equal(typeof context.back, 'function');
+    assert(markup.includes('class="install-top"') && markup.includes('class="install-grid"'));
     assert(!markup.includes('value="xray:snell-v6"'));
     for (const id of ['generate-port', 'generate-sni']) {
         assert(markup.includes(`type="button" id="${id}"`));
@@ -60,8 +62,8 @@ async function main() {
     for (const id of ['install-name', 'generate-name', 'snell-name-field']) assert(!markup.includes(`id="${id}"`));
     assert(!markup.includes('24443'));
     assert.equal(elements.port.value, 20001); // opening picks a free random high port
-    assert.match(elements['generated-credentials'].textContent, /UUID/);
-    assert.equal(elements['install-advanced'].hidden, true); // install_options_version 0: nothing advanced to show
+    assert.equal(elements['credential-label'].textContent, 'UUID');
+    assert.equal(elements['credential-fields'].hidden, true); // install_options_version 0: no credential field
     elements['generate-port'].onclick();
     assert.equal(elements.port.value, 20002);
     assert.equal(calls.length, 0); // generation never installs
@@ -69,7 +71,7 @@ async function main() {
     elements.protocol.events.change();
     assert.equal(elements.sni.disabled, true);
     assert.equal(elements['generate-sni'].disabled, true);
-    assert.match(elements['generated-credentials'].textContent, /PSK/);
+    assert.equal(elements['credential-label'].textContent, 'PSK');
     elements.port.value = '20001';
     await elements['install-form'].events.submit({preventDefault() {}, target: elements['install-form']});
     assert.equal(calls[0][2].name, 'u20001_2'); // generated, unused by this protocol
@@ -106,7 +108,8 @@ async function main() {
     elements['certificate-mode'].value = 'acme';
     elements['acme-email'].value = 'admin@example.com';
     elements.protocol.events.change();
-    assert.equal(elements['install-advanced'].hidden, false);
+    assert.equal(elements['credential-fields'].hidden, false);
+    assert.equal(elements['certificate-help'].hidden, false); // ACME explains its requirements
     assert.equal(elements['acme-email'].disabled, false);
     assert.equal(elements['acme-email'].required, true);
     assert.equal(elements['generate-sni'].disabled, true);
@@ -166,7 +169,7 @@ async function main() {
         assert.equal(params.certificate_mode,undefined);
         assert.equal(params.method,elements['ss-method'].value);
     }
-    elements['install-back'].onclick();
+    context.back();
     assert(markup.includes('protocol-choice-form'));
 
     // Server selection: defaults, switching, submission target, nothing installable.

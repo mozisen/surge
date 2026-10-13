@@ -120,3 +120,8 @@ Statuses that are not task states (`userStates`, `syncStates`) render through `s
 
 - Enter the install flow with `startInstall(nodeId)` (server detail: the current server; 节点管理「新建协议」: the 服务器 filter, else the first installable server). Both steps show a `#install-server` picker listing only adopted, online, non-maintenance, non-deleted servers; in the parameter step servers lacking the protocol are disabled.
 - The install code reads the target through `installNode()` (`installTargetId`), never `selected`: the 10-second refresh re-renders a detail page and resets `selected`. `submitTask(..., node)` and `installPlaceUsers(users, nodeId)` take the target explicitly.
+
+## Install dialog layout and dialog back
+
+- `modal(title, body, wide, kind, back)`: pass `back` to show a left arrow next to the close button; there is no in-form back button.
+- The install parameter step is one page: `.install-top` holds inline `服务器` / `内核` fields (label left, auto-width select menu), then a one-line `#protocol-guidance`, then a two-column `.install-grid` (one column under 760px). Group wrappers (`#certificate-fields`, `#reality-fields`, `#snell-fields`) are `.install-group` with `display: contents` so their fields flow into the grid; keep every field id stable because `updateFields()` toggles them. No section headings, no `<details>`; generated credentials use the placeholder 「留空自动生成」.
