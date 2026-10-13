@@ -47,7 +47,20 @@ const names = {
     anytls: 'AnyTLS',
     snell: 'Snell v4',
     'snell-v5': 'Snell v5',
-    'snell-v6': 'Snell v6'
+    'snell-v6': 'Snell v6',
+    'vless-vision': 'VLESS Vision',
+    'vless-ws': 'VLESS-WS',
+    'vless-ws-notls': 'VLESS-WS（无 TLS）',
+    'vless-xhttp': 'VLESS-XHTTP',
+    'vless-xhttp-cdn': 'VLESS-XHTTP CDN',
+    'vmess-ws': 'VMess-WS',
+    'trojan-ws': 'Trojan-WS',
+    tuic: 'TUIC',
+    socks: 'SOCKS5',
+    'snell-shadowtls': 'Snell + ShadowTLS',
+    'snell-v5-shadowtls': 'Snell v5 + ShadowTLS',
+    'ss2022-shadowtls': 'SS2022 + ShadowTLS',
+    naive: 'NaïveProxy'
 };
 const actions = {
     install: '安装协议',
@@ -179,7 +192,7 @@ function login() {
 }
 
 function shell(content, section) {
-    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器节点'], ['users', 'users', '用户管理'], ['tasks', 'tasks', '任务记录'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '监控与通知'], ['backups', 'server', '备份恢复'], ['audit', 'shield', '操作审计']];
+    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器管理'], ['instances', 'globe', '节点管理'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '监控与通知'], ['backups', 'server', '备份恢复'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
     const nav = links.map(([id, ico, text]) => `<a href="#${id}" class="${section===id?'active':''}"${section===id?' aria-current="page"':''}>${icon(ico)}${text}</a>`).join('');
     $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
 }
@@ -196,7 +209,7 @@ function stat(title, value, foot, unit = '', positive = false) {
 function summary() {
     const online = nodes.filter(n => n.status === 'online').length;
     const count = nodes.reduce((s, n) => s + (n.snapshot.instances || []).length, 0);
-    return `<div class="stats">${stat('服务器节点',nodes.length,'集中管理你的基础设施')}${stat('当前在线',online,online ? '心跳连接正常' : '等待节点建立连接','',!!online)}${stat('协议实例',count,'按协议和监听端口独立识别')}${stat('进行中的任务',tasks.filter(t=>['running','queued'].includes(t.status)).length,'执行过程与结果可追溯')}</div>`;
+    return `<div class="stats">${stat('服务器',nodes.length,'集中管理你的基础设施')}${stat('当前在线',online,online ? '心跳连接正常' : '等待节点建立连接','',!!online)}${stat('协议实例',count,'按协议和监听端口独立识别')}${stat('进行中的任务',tasks.filter(t=>['running','queued'].includes(t.status)).length,'执行过程与结果可追溯')}</div>`;
 }
 
 function emptyNodes() {
@@ -233,7 +246,7 @@ function taskTable(list) {
 }
 
 function overview(section) {
-    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器节点'}</h1><p class="subtext">${section==='overview'?'服务器、协议与任务，尽在一个工作空间。':'连接、分组并管理你的所有服务器。'}</p></div><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="trash">回收站</button><select id="group-filter" aria-label="筛选分组"><option value="">全部分组</option>${[...new Set(nodes.map(n=>n.group_name))].map(g=>`<option value="${esc(g)}" ${g===groupFilter?'selected':''}>${esc(g)}</option>`).join('')}</select><div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>最近任务</h2><a href="#tasks">查看全部 →</a></div><div class="panel">${taskTable(tasks.slice(0,5))}</div>`:''}`, section);
+    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器管理'}</h1><p class="subtext">${section==='overview'?'服务器、协议与任务，尽在一个工作空间。':'连接、分组并管理你的所有服务器。'}</p></div><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="trash">回收站</button><select id="group-filter" aria-label="筛选分组"><option value="">全部分组</option>${[...new Set(nodes.map(n=>n.group_name))].map(g=>`<option value="${esc(g)}" ${g===groupFilter?'selected':''}>${esc(g)}</option>`).join('')}</select><div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>最近任务</h2><a href="#tasks">查看全部 →</a></div><div class="panel">${taskTable(tasks.slice(0,5))}</div>`:''}`, section);
     $('#group-filter').onchange = e => { groupFilter = e.target.value; $('#node-results').innerHTML = nodeCards(); };
     $('#search').addEventListener('input', e => {
         search = e.target.value;
@@ -290,7 +303,7 @@ function detail(node) {
     selected = node;
     const s = node.snapshot,
         m = s.metrics || {};
-    shell(`<div class="heading"><div><a class="back-link" href="#nodes">返回服务器节点</a><h1>${esc(node.name)} ${badge(node.status)}</h1><div class="detail-info"><span>${esc(node.group_name)}</span><span>${esc(s.hostname||'等待连接')}</span><span>${esc(s.arch||'—')}</span><span>节点程序 ${esc(s.agent_version||'—')}</span></div></div><div class="action-row"><button data-action="history">资源历史</button><button data-action="node-settings">节点设置</button><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div></div>${node.maintenance || node.status!=='online' || s.error?`<div class="notice warn">${esc(node.connection_hint)}</div>`:''}${node.upgrade_available?`<div class="notice"><span>节点程序 ${esc(s.agent_version)}，当前面板 ${esc(node.panel_version)}</span><button data-action="upgrade-agent">${s.upgrade_version===1&&node.status==='online'?'一键升级':'升级节点'}</button></div>`:''}${node.notes?`<div class="notice node-notes">${esc(node.notes)}</div>`:''}${!node.adopted?`<div class="notice"><div><strong>${node.status==='pending'?'等待节点连接':'配置已识别，尚未接管'}</strong><br>${node.status==='pending'?'在服务器运行安装脚本，节点将自动上线。':'请检查下面的协议与端口。接管后面板可以修改节点配置。'}</div><button data-action="${node.status==='pending'?'renew':'adopt'}" ${node.status==='offline'?'disabled':''}>${node.status==='pending'?'重新生成脚本':'确认接管'}</button></div>`:''}<div class="stats">${stat('系统负载',m.load??'—',`${m.cpu_count||'—'} 个逻辑核心`)}${stat('内存使用',m.memory_total?(m.memory_used/m.memory_total*100).toFixed(0):'—',bytes(m.memory_used)+' / '+bytes(m.memory_total),m.memory_total?'%':'')}${stat('磁盘使用',m.disk_total?(m.disk_used/m.disk_total*100).toFixed(0):'—',bytes(m.disk_used)+' / '+bytes(m.disk_total),m.disk_total?'%':'')}${stat('协议实例',(s.instances||[]).length,'配置以节点实际状态为准')}</div><div class="tabs"><button data-action="tab" data-tab="protocols" class="${detailTab==='protocols'?'active':''}">协议管理</button><button data-action="tab" data-tab="tasks" class="${detailTab==='tasks'?'active':''}">执行记录</button></div><div class="split"><section><div class="panel"><div class="panel-head"><h2>${detailTab==='protocols'?'已安装协议':'节点任务'} <span class="count">${detailTab==='protocols'?(s.instances||[]).length:tasks.filter(t=>t.node_id===node.id).length}</span></h2><button class="quiet small" data-action="refresh">${icon('refresh')}刷新</button></div>${detailTab==='protocols'?protocolTable(node):taskTable(tasks.filter(t=>t.node_id===node.id))}</div></section><aside class="detail-aside">${authorityBlock(node)}<section class="info-block"><h3>节点信息</h3>${s.script_api?`<div class="kv"><span>脚本接口</span><span>${s.script_api.status==='ready'?'只读预览':'暂不可用'}</span></div><p class="helper">${s.script_api.status==='ready'?`${esc(s.script_api.version)} · ${Number(s.script_api.protocol_count)||0} 种协议与内核组合。新增协议写接口尚未开放。`:'接口检查失败，请查看节点依赖及脚本校验。'}现有管理功能使用已验收的独立适配器。</p>`:''}<div class="kv"><span>系统</span><span>${esc(s.os||'—')}</span></div><div class="kv"><span>运行时间</span><span>${m.uptime?Math.floor(m.uptime/86400)+' 天':'—'}</span></div><div class="kv"><span>网卡累计接收</span><span>${bytes(m.network_rx)}</span></div><div class="kv"><span>网卡累计发送</span><span>${bytes(m.network_tx)}</span></div><div class="kv"><span>最后心跳</span><span>${date(node.last_seen)}</span></div><div class="kv"><span>流量同步</span><span>${esc(({ok:'正常',unavailable:'暂不可用',stale:'等待同步',error:'同步异常',unknown:'未知',no_core:'未找到内核',no_stats:'暂无统计',snell_error:'Snell 同步失败',singbox_error:'Sing-box 同步失败',partial_singbox_error:'部分统计失败',temp_error:'临时文件错误'})[s.traffic_status]||'暂不可用')}</span></div></section><section class="info-block"><h3>${icon('shield')} 操作说明</h3><p>共享核心的配置修改会重启对应核心，可能短暂影响同服务的其他协议。</p><p>不支持写入的协议仅展示状态。配置备份保留在节点本地。</p></section></aside></div>`, 'nodes');
+    shell(`<div class="heading"><div><a class="back-link" href="#nodes">返回服务器管理</a><h1>${esc(node.name)} ${badge(node.status)}</h1><div class="detail-info"><span>${esc(node.group_name)}</span><span>${esc(s.hostname||'等待连接')}</span><span>${esc(s.arch||'—')}</span><span>节点程序 ${esc(s.agent_version||'—')}</span></div></div><div class="action-row"><button data-action="history">资源历史</button><button data-action="node-settings">节点设置</button><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div></div>${node.maintenance || node.status!=='online' || s.error?`<div class="notice warn">${esc(node.connection_hint)}</div>`:''}${node.upgrade_available?`<div class="notice"><span>节点程序 ${esc(s.agent_version)}，当前面板 ${esc(node.panel_version)}</span><button data-action="upgrade-agent">${s.upgrade_version===1&&node.status==='online'?'一键升级':'升级节点'}</button></div>`:''}${node.notes?`<div class="notice node-notes">${esc(node.notes)}</div>`:''}${!node.adopted?`<div class="notice"><div><strong>${node.status==='pending'?'等待节点连接':'配置已识别，尚未接管'}</strong><br>${node.status==='pending'?'在服务器运行安装脚本，节点将自动上线。':'请检查下面的协议与端口。接管后面板可以修改节点配置。'}</div><button data-action="${node.status==='pending'?'renew':'adopt'}" ${node.status==='offline'?'disabled':''}>${node.status==='pending'?'重新生成脚本':'确认接管'}</button></div>`:''}<div class="stats">${stat('系统负载',m.load??'—',`${m.cpu_count||'—'} 个逻辑核心`)}${stat('内存使用',m.memory_total?(m.memory_used/m.memory_total*100).toFixed(0):'—',bytes(m.memory_used)+' / '+bytes(m.memory_total),m.memory_total?'%':'')}${stat('磁盘使用',m.disk_total?(m.disk_used/m.disk_total*100).toFixed(0):'—',bytes(m.disk_used)+' / '+bytes(m.disk_total),m.disk_total?'%':'')}${stat('协议实例',(s.instances||[]).length,'配置以节点实际状态为准')}</div><div class="tabs"><button data-action="tab" data-tab="protocols" class="${detailTab==='protocols'?'active':''}">协议管理</button><button data-action="tab" data-tab="tasks" class="${detailTab==='tasks'?'active':''}">执行记录</button></div><div class="split"><section><div class="panel"><div class="panel-head"><h2>${detailTab==='protocols'?'已安装协议':'节点任务'} <span class="count">${detailTab==='protocols'?(s.instances||[]).length:tasks.filter(t=>t.node_id===node.id).length}</span></h2><button class="quiet small" data-action="refresh">${icon('refresh')}刷新</button></div>${detailTab==='protocols'?protocolTable(node):taskTable(tasks.filter(t=>t.node_id===node.id))}</div></section><aside class="detail-aside">${authorityBlock(node)}<section class="info-block"><h3>节点信息</h3>${s.script_api?`<div class="kv"><span>脚本接口</span><span>${s.script_api.status==='ready'?'只读预览':'暂不可用'}</span></div><p class="helper">${s.script_api.status==='ready'?`${esc(s.script_api.version)} · ${Number(s.script_api.protocol_count)||0} 种协议与内核组合。新增协议写接口尚未开放。`:'接口检查失败，请查看节点依赖及脚本校验。'}现有管理功能使用已验收的独立适配器。</p>`:''}<div class="kv"><span>系统</span><span>${esc(s.os||'—')}</span></div><div class="kv"><span>运行时间</span><span>${m.uptime?Math.floor(m.uptime/86400)+' 天':'—'}</span></div><div class="kv"><span>网卡累计接收</span><span>${bytes(m.network_rx)}</span></div><div class="kv"><span>网卡累计发送</span><span>${bytes(m.network_tx)}</span></div><div class="kv"><span>最后心跳</span><span>${date(node.last_seen)}</span></div><div class="kv"><span>流量同步</span><span>${esc(({ok:'正常',unavailable:'暂不可用',stale:'等待同步',error:'同步异常',unknown:'未知',no_core:'未找到内核',no_stats:'暂无统计',snell_error:'Snell 同步失败',singbox_error:'Sing-box 同步失败',partial_singbox_error:'部分统计失败',temp_error:'临时文件错误'})[s.traffic_status]||'暂不可用')}</span></div></section><section class="info-block"><h3>${icon('shield')} 操作说明</h3><p>共享核心的配置修改会重启对应核心，可能短暂影响同服务的其他协议。</p><p>不支持写入的协议仅展示状态。配置备份保留在节点本地。</p></section></aside></div>`, 'nodes');
 }
 async function render() {
     const route = location.hash.slice(1) || 'overview';
@@ -304,6 +317,8 @@ async function render() {
         await usersPage();
     } else if (route.startsWith('users/')) {
         await userDetail(route.split('/')[1]);
+    } else if (route === 'instances') {
+        instancesPage();
     } else if (route === 'traffic') {
         trafficPage();
         await userTraffic();
@@ -326,7 +341,7 @@ async function refresh() {
         lastRefresh = new Date().toLocaleTimeString('zh-CN', {
             hour12: false
         });
-        if (document.activeElement?.id !== 'search') await render();
+        if (!['search', 'instance-search'].includes(document.activeElement?.id)) await render();
         if (activeTaskId && $('#modal').open) showTask(activeTaskId);
     } catch (err) {
         toast(err.message);
@@ -722,6 +737,11 @@ document.addEventListener('click', async e => {
             $('#modal').close();
             activeTaskId = null;
         } else if (action.startsWith('pu-')) await userAction(action, b);
+        else if (action === 'node-instance') {
+            // Instance dialogs act on `selected`; point it at the instance's server first.
+            selected = nodes.find(n => n.id === b.dataset.node);
+            if (selected) showInstance(Number(b.dataset.index));
+        }
         else if (action === 'logout') {
             await post('/logout');
             authenticated = false;
@@ -1112,4 +1132,48 @@ async function installPlaceUsers(users) {
     } catch (err) {
         toast('实例已提交安装，但未能登记用户：' + err.message);
     }
+}
+
+// ---------------------------------------------------------------- 节点管理（所有服务器的协议实例）
+let instanceFilter = {node: '', protocol: '', status: '', mode: '', q: ''};
+const instanceModes = {multi: '多用户', single: '一用户一实例', none: '不支持用户管理'};
+function instanceRows() {
+    return nodes.filter(n => !n.deleted).flatMap(n => (n.snapshot.instances || []).map((p, index) => ({node: n, p, index})));
+}
+function instanceMatches(row, f) {
+    const {node, p} = row, q = f.q.trim().toLowerCase();
+    return (!f.node || node.id === f.node) && (!f.protocol || p.protocol === f.protocol) && (!f.status || p.status === f.status)
+        && (!f.mode || (p.user_mode || '') === f.mode)
+        && (!q || [node.name, node.group_name, names[p.protocol] || p.protocol, p.protocol, String(p.port)].some(v => String(v || '').toLowerCase().includes(q)));
+}
+function instanceTable(rows) {
+    if (!rows.length) return '<div class="empty"><p>没有符合条件的节点。</p></div>';
+    return `<div class="table-wrap"><table><thead><tr><th>服务器</th><th>协议 / 内核</th><th class="num">端口</th><th>服务状态</th><th class="num">用户</th><th>用户模式</th><th class="num">用量合计</th><th>管理</th></tr></thead><tbody>${rows.map(({node, p, index}) => {
+        const used = (p.users || []).reduce((sum, u) => sum + (Number.isFinite(u.used) && u.used >= 0 ? u.used : 0), 0);
+        return `<tr><td><a href="#nodes/${esc(node.id)}">${esc(node.name)}</a>${node.status !== 'online' ? `<br><span class="muted">${esc(states[node.status] || node.status)}</span>` : ''}</td><td><strong>${esc(names[p.protocol] || p.protocol)}</strong><br><span class="muted">${esc(p.protocol.startsWith('snell') || ['snell-shadowtls', 'snell-v5-shadowtls', 'ss2022-shadowtls', 'naive'].includes(p.protocol) ? '独立进程' : p.core === 'singbox' ? 'Sing-box' : 'Xray')}</span></td><td class="num mono">${p.port}</td><td>${badge(p.status)}</td><td class="num">${(p.users || []).length}</td><td>${p.user_mode ? esc(userModeText(p)) : '<span class="muted">—</span>'}</td><td class="num">${p.traffic_state === 'unsupported' ? '—' : bytes(used)}</td><td><button class="small" data-action="node-instance" data-node="${esc(node.id)}" data-index="${index}">${p.managed ? '管理实例' : '查看实例'}</button></td></tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+function instancesPage() {
+    const rows = instanceRows(), f = instanceFilter;
+    const option = (value, label, current) => `<option value="${esc(value)}" ${value === current ? 'selected' : ''}>${esc(label)}</option>`;
+    const servers = nodes.filter(n => !n.deleted);
+    const protocols = [...new Set(rows.map(r => r.p.protocol))].sort();
+    shell(`<div class="heading"><div><h1>节点管理</h1><p class="subtext">所有服务器上的协议实例，按服务器、协议、状态和用户模式筛选。</p></div><button data-action="refresh">${icon('refresh')}刷新</button></div>
+    <div class="section-label"><h2>节点 <span class="count" id="instance-count"></span></h2><div class="tools instance-filters">
+    <select id="instance-node" aria-label="筛选服务器">${option('', '全部服务器', f.node)}${servers.map(n => option(n.id, n.name, f.node)).join('')}</select>
+    <select id="instance-protocol" aria-label="筛选协议">${option('', '全部协议', f.protocol)}${protocols.map(p => option(p, names[p] || p, f.protocol)).join('')}</select>
+    <select id="instance-status" aria-label="筛选服务状态">${option('', '全部状态', f.status)}${option('running', '运行中', f.status)}${option('stopped', '已停止', f.status)}${option('unknown', '未知', f.status)}</select>
+    <select id="instance-mode" aria-label="筛选用户模式">${option('', '全部用户模式', f.mode)}${Object.entries(instanceModes).map(([k, v]) => option(k, v, f.mode)).join('')}</select>
+    <div class="search">${icon('search')}<input id="instance-search" type="search" aria-label="搜索节点" placeholder="搜索服务器、协议或端口" value="${esc(f.q)}"></div></div></div>
+    <div class="panel" id="instance-results"></div>
+    <p class="helper">节点即服务器上的一个协议实例（协议 + 端口）。共享核心的协议启停或修改会影响同一服务器上的其他实例；离线服务器显示最后一次快照。</p>`, 'instances');
+    const update = () => {
+        const shown = rows.filter(r => instanceMatches(r, instanceFilter));
+        $('#instance-results').innerHTML = instanceTable(shown);
+        $('#instance-count').textContent = shown.length === rows.length ? String(rows.length) : shown.length + ' / ' + rows.length;
+    };
+    for (const [id, key] of [['instance-node', 'node'], ['instance-protocol', 'protocol'], ['instance-status', 'status'], ['instance-mode', 'mode']])
+        $('#' + id).onchange = e => { instanceFilter[key] = e.target.value; update(); };
+    $('#instance-search').addEventListener('input', e => { instanceFilter.q = e.target.value; update(); });
+    update();
 }

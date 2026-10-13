@@ -2297,3 +2297,25 @@ dialog.install .install-warning {
 .small-link {
     color: var(--ink);
 }
+
+/* 节点管理筛选栏 */
+.instance-filters {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    flex: 1 1 auto;
+}
+.instance-filters select {
+    width: auto;
+    min-width: 132px;
+    margin: 0;
+}
+@media (max-width: 760px) {
+    .instance-filters {
+        justify-content: flex-start;
+        width: 100%;
+    }
+    .instance-filters select,
+    .instance-filters .search {
+        flex: 1 1 140px;
+    }
+}

@@ -13,6 +13,7 @@ const context = {
     esc: v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c])),
     bytes: n => n == null ? '—' : (n / 1073741824).toFixed(1) + ' GiB',
     date: n => n ? 'T' + n : '—',
+    badge: s => `<badge>${s}</badge>`, states: {online: '在线', offline: '离线'},
     names: {vless: 'VLESS Reality', hy2: 'Hysteria2', ss2022: 'SS2022', 'snell-v5': 'Snell v5'},
     icon: () => '<svg></svg>',
     meter: (label, percent) => `<meter>${percent == null ? '—' : percent.toFixed(0)}</meter>`,
@@ -30,7 +31,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -151,4 +152,39 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     await context.installUserPicker();
     assert.strictEqual(scroll.html, '');
     console.log('PASS user mode labels, member targets, install user picker and placement payload');
+
+    // 节点管理：所有服务器的协议实例与筛选
+    context.nodes = [
+        {id: 'a', name: '香港', group_name: '亚太', status: 'online', deleted: null, snapshot: {instances: [
+            {core: 'xray', protocol: 'vless', port: 443, status: 'running', managed: true, user_mode: 'multi', user_available: true, users: [{used: 1073741824}]},
+            {core: 'xray', protocol: 'snell-v5', port: 9001, status: 'stopped', managed: true, user_mode: 'single', user_available: true, user_stats: 'port', users: []}]}},
+        {id: 'b', name: '<i>东京</i>', group_name: '', status: 'offline', deleted: null, snapshot: {instances: [
+            {core: 'singbox', protocol: 'hy2', port: 8443, status: 'running', managed: true, users: []}]}},
+        {id: 'c', name: '已删除', status: 'offline', deleted: 1, snapshot: {instances: [{core: 'xray', protocol: 'vless', port: 1, users: []}]}}];
+    vm.runInContext('nodes = this.nodes;', context);
+    const rows = context.instanceRows();
+    assert.strictEqual(rows.length, 3);
+    const match = f => rows.filter(r => context.instanceMatches(r, {node: '', protocol: '', status: '', mode: '', q: '', ...f})).map(r => r.p.port);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(match({node: 'a'}))), [443, 9001]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(match({protocol: 'hy2'}))), [8443]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(match({status: 'stopped'}))), [9001]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(match({mode: 'single'}))), [9001]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(match({q: '东京'}))), [8443]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(match({q: '9001'}))), [9001]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(match({q: 'snell v5'}))), [9001]);
+    const table = context.instanceTable(rows);
+    assert(table.includes('data-action="node-instance" data-node="b" data-index="0"') && table.includes('&lt;i&gt;东京&lt;/i&gt;') && !table.includes('<i>东京'));
+    assert(table.includes('1.0 GiB') && table.includes('离线') && table.includes('一用户一实例'));
+    assert(context.instanceTable([]).includes('没有符合条件的节点'));
+    for (const id of ['instance-node', 'instance-protocol', 'instance-status', 'instance-mode', 'instance-search', 'instance-results', 'instance-count'])
+        element(id, {addEventListener(type, fn) { this.listener = fn; }});
+    context.instancesPage();
+    assert.strictEqual(html.section, 'instances');
+    assert(html.shell.includes('节点管理') && html.shell.includes('全部服务器') && !html.shell.includes('已删除'));
+    assert.strictEqual(elements['instance-count'].textContent, '3');
+    elements['instance-mode'].onchange({target: {value: 'multi'}});
+    assert.strictEqual(elements['instance-count'].textContent, '1 / 3');
+    elements['instance-search'].listener({target: {value: 'zzz'}});
+    assert(elements['instance-results'].innerHTML.includes('没有符合条件的节点'));
+    console.log('PASS instances page: all servers, filters, search, escaping, manage action');
 })().catch(error => { console.error(error); process.exit(1); });
