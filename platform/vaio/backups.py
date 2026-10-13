@@ -79,7 +79,7 @@ def restore(store, name):
             dst.execute('DELETE FROM sessions')
             dst.execute('UPDATE nodes SET enroll_hash=NULL,enroll_expires=NULL')
             if dst.execute("SELECT 1 FROM sqlite_master WHERE name='notifications'").fetchone():
-                dst.execute("UPDATE notifications SET status='unknown' WHERE status IN ('pending','sending')")
+                dst.execute("DELETE FROM notifications")  # stale queue: never resend after a restore
             dst.execute("UPDATE tasks SET status='cancelled',message='备份恢复后取消排队任务' WHERE status='queued'")
             dst.execute("UPDATE tasks SET status='unknown',message='备份恢复后结果未知，请人工核对' WHERE status='running'")
             dst.commit()

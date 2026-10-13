@@ -120,10 +120,10 @@ def create_app(config=None):
     @app.get("/api/monitor")
     @admin
     def monitor_get():
-        from .monitor import settings
+        from .monitor import settings, bindings
         with store.connect() as db:
-            events = [dict(r) for r in db.execute("SELECT * FROM notifications ORDER BY id DESC LIMIT 100")]
-        return jsonify(config=settings(store), events=events, heartbeat=store.setting("monitor_heartbeat"))
+            users = bindings(db)
+        return jsonify(config=settings(store), users=users, heartbeat=store.setting("monitor_heartbeat"))
 
     @app.post("/api/monitor")
     @admin
@@ -137,14 +137,39 @@ def create_app(config=None):
     @app.post("/api/monitor/test")
     @admin
     def monitor_test():
-        from .monitor import settings
-        if not settings(store, True).get("enabled"):
-            raise ValueError("请先保存并启用通知渠道")
+        from .monitor import test_message
+        test_message(store)
+        return jsonify(ok=True)
+
+    @app.post("/api/monitor/bot")
+    @admin
+    def monitor_bot():
+        from .monitor import enable_bot
+        data = body()
+        if set(data) != {"enabled"} or type(data["enabled"]) is not bool:
+            raise ValueError("机器人开关无效")
+        result = enable_bot(store, data["enabled"])
         with store.connect() as db:
-            recent = db.execute("SELECT 1 FROM notifications WHERE title='通知渠道测试' AND at>?", (time.time()-60,)).fetchone()
-            if recent:
-                raise ValueError("请等待一分钟后再发送测试")
-            db.execute("INSERT INTO notifications(at,title,status) VALUES(?,?,'pending')", (time.time(), "通知渠道测试"))
+            audit(db, "notification.bot", detail="启用" if data["enabled"] else "禁用")
+        return jsonify(ok=True, **result)
+
+    @app.post("/api/users/<user_id>/tg-code")
+    @admin
+    def user_tg_code(user_id):
+        from .monitor import new_code
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            code, expires = new_code(db, user_id)
+            audit(db, "notification.bind_code", detail=user_id)
+        return jsonify(code=code, expires=expires)
+
+    @app.post("/api/users/<user_id>/tg-unbind")
+    @admin
+    def user_tg_unbind(user_id):
+        from .monitor import unbind
+        with store.connect() as db:
+            unbind(db, user_id)
+            audit(db, "notification.unbind", detail=user_id)
         return jsonify(ok=True)
 
     @app.get("/api/nodes/<node_id>/history")

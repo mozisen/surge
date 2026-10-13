@@ -127,8 +127,10 @@ class MonitorTest(unittest.TestCase):
             db.execute("INSERT INTO nodes(id,name,created,last_seen,snapshot) VALUES('one','测试节点',0,?,'{}')",(seen,))
     def events(self):
         with self.store.connect() as db:return [dict(r) for r in db.execute('SELECT * FROM notifications')]
+    def enable(self):
+        monitor.save_settings(self.store,dict(enabled=True,bot_token='123456:'+'a'*30,chat_id='1234'))
     def test_offline_dedup_recovery_and_maintenance(self):
-        self.node()
+        self.enable();self.node()
         monitor.scan(self.store, 1130);monitor.scan(self.store,1140)
         self.assertEqual(len(self.events()),1)
         with self.store.connect() as db:db.execute("UPDATE nodes SET last_seen=1140")
@@ -140,15 +142,18 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(len(self.events()),2)
     def test_credentials_redacted_and_delivery_not_replayed(self):
         token='123456:'+'a'*30
-        monitor.save_settings(self.store,dict(enabled=True,telegram_token=token,telegram_chat='1234',webhook=''))
+        monitor.save_settings(self.store,dict(enabled=True,bot_token=token,chat_id='1234'))
         self.assertNotIn(token,json.dumps(monitor.settings(self.store)))
         self.node();monitor.scan(self.store,1130)
-        with patch('vaio.monitor.deliver',return_value='failed') as deliver:
+        with patch('vaio.monitor.deliver',return_value=False) as deliver:
             monitor.send_pending(self.store);monitor.send_pending(self.store)
             self.assertEqual(deliver.call_count,1)
+        self.assertEqual(self.events(),[])  # a send queue, never a history
         with self.store.connect() as db:db.execute("INSERT INTO notifications(at,title,status) VALUES(0,'test','sending')")
-        monitor.send_pending(self.store)
-        self.assertEqual(self.events()[-1]['status'],'unknown')
+        with patch('vaio.monitor.deliver') as deliver:
+            monitor.send_pending(self.store)
+            deliver.assert_not_called()
+        self.assertEqual(self.events(),[])
     def test_backup_restore_does_not_replay_tasks_or_sessions(self):
         self.node()
         with self.store.connect() as db:
@@ -163,7 +168,7 @@ class MonitorTest(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM sessions').fetchone()[0],0)
             self.assertEqual([r[0] for r in db.execute('SELECT status FROM tasks ORDER BY id')],['unknown','cancelled'])
         with self.assertRaises(ValueError):backups.drill(self.store,'../panel.sqlite')
-        with self.assertRaises(ValueError):monitor.save_settings(self.store,dict(enabled=True,webhook='http://example.com'))
+        with self.assertRaises(ValueError):monitor.save_settings(self.store,dict(enabled=True,webhook='https://example.com'))
 
 class MonitorAPITest(unittest.TestCase):
     def setUp(self):
@@ -186,9 +191,10 @@ class MonitorAPITest(unittest.TestCase):
         r=self.client.post('/api/backups',headers=self.headers,json={})
         self.assertEqual(r.status_code,200)
         self.assertEqual(self.client.post('/api/backups/verify',json={'name':r.json['name']},headers=self.headers).status_code,200)
-        self.assertEqual(self.client.post('/api/monitor',json={'enabled':True,'webhook':'http://bad'},headers=self.headers).status_code,400)
-        config=dict(enabled=True,telegram_token='123456:'+('a'*30),telegram_chat='12345')
+        self.assertEqual(self.client.post('/api/monitor',json={'enabled':True,'webhook':'https://bad'},headers=self.headers).status_code,400)
+        config=dict(enabled=True,bot_token='123456:'+('a'*30),chat_id='12345')
         self.assertEqual(self.client.post('/api/monitor',json=config,headers=self.headers).status_code,200)
-        self.assertNotIn(config['telegram_token'],self.client.get('/api/monitor').get_data(as_text=True))
+        self.assertNotIn(config['bot_token'],self.client.get('/api/monitor').get_data(as_text=True))
+        self.assertNotIn('events',self.client.get('/api/monitor').json)
         self.assertEqual(self.client.post('/api/monitor/test',json={},headers=self.headers).status_code,200)
         self.assertEqual(self.client.post('/api/monitor/test',json={},headers=self.headers).status_code,400)

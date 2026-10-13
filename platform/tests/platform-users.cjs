@@ -33,7 +33,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -239,4 +239,45 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     context.listeners.click({target: one.trigger});
     assert(one.menu.classList.contains('align-end'), 'flips to the right edge when it overflows');
     console.log('PASS filter menu: render, open, pick, keyboard, outside close');
+
+    // 通知配置：状态、机器人、用户绑定表、绑定码与解绑
+    const toasts = [];
+    context.toast = m => toasts.push(m);
+    context.responses['/monitor'] = {heartbeat: '1', config: {enabled: true, token_configured: true, chat_id: '-100<1>', quota_percent: 75, daily_enabled: true, daily_time: '08:30', bot_enabled: false},
+        users: [{id: 'u1', name: '<b>alice</b>', note: '', bound: true, username: 'al', bound_at: 5, code_pending: false},
+                {id: 'u2', name: 'bob', note: 'n', bound: false, username: '', bound_at: null, code_pending: true}]};
+    await context.monitorPage();
+    assert.strictEqual(html.section, 'monitor');
+    for (const text of ['<h1>通知配置</h1>', 'TG 通知已启用', '-100&lt;1&gt;', '每天 08:30', '流量达到 75%', '用户查询机器人未启用', '已绑定用户：1 / 2', '@al', '绑定码待使用', 'data-action="pu-tg-bot" data-enabled="1"', '&lt;b&gt;alice&lt;/b&gt;'])
+        assert(html.shell.includes(text), text);
+    assert(!html.shell.includes('<b>alice') && !html.shell.includes('最近通知') && !html.shell.includes('Webhook'));
+    assert.strictEqual((html.shell.match(/data-action="pu-tg-unbind"/g) || []).length, 1);
+    assert.strictEqual((html.shell.match(/重新生成绑定码/g) || []).length, 2);
+    posts.length = 0;
+    context.post = async (path, data) => { posts.push([path, data]); return path.endsWith('tg-code') ? {code: 'ABCDEF012345', expires: 99} : {username: 'vaio_bot'}; };
+    await context.userAction('pu-tg-bot', {dataset: {enabled: '1'}, disabled: false});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), ['/monitor/bot', {enabled: true}]);
+    assert(toasts.at(-1).includes('@vaio_bot'));
+    element('bind-command', {select() {}});
+    await context.userAction('pu-tg-code', {dataset: {id: 'u2', name: '<i>bob</i>'}});
+    assert.strictEqual(posts[1][0], '/users/u2/tg-code');
+    assert(html.modal.includes('value="/bind ABCDEF012345"') && html.title.includes('<i>bob</i>'));
+    element('pu-choice-form'); element('modal', {close() {}});
+    await context.userAction('pu-tg-unbind', {dataset: {id: 'u1', name: 'alice'}});
+    assert(html.modal.includes('解除后该用户不再收到个人提醒'));
+    await elements['pu-choice-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.strictEqual(posts.at(-1)[0], '/users/u1/tg-unbind');
+    // 设置弹窗：提交字段与类型
+    element('notification-form'); for (const id of ['notify-enabled', 'bot-token', 'clear-token', 'chat-id', 'quota-percent', 'daily-enabled', 'daily-time']) element(id);
+    await context.notificationSettings();
+    assert(html.modal.includes('已设置，留空保留') && html.modal.includes('value="75"') && html.modal.includes('value="08:30"') && !html.modal.includes('Webhook'));
+    Object.assign(elements['notify-enabled'], {checked: true}); elements['bot-token'].value = 'tok'; elements['chat-id'].value = ' 42 ';
+    elements['quota-percent'].value = '90'; elements['daily-enabled'].checked = false; elements['daily-time'].value = '07:00';
+    await elements['notification-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.at(-1))), ['/monitor', {enabled: true, bot_token: 'tok', chat_id: '42', clear_token: false, quota_percent: 90, daily_enabled: false, daily_time: '07:00'}]);
+    elements['clear-token'].checked = true;
+    await elements['notification-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.strictEqual(posts.at(-1)[1].bot_token, '');
+    assert.strictEqual(posts.at(-1)[1].clear_token, true);
+    console.log('PASS notification page: status, bot toggle, bindings, bind code, unbind, settings payload');
 })().catch(error => { console.error(error); process.exit(1); });

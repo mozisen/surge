@@ -29,6 +29,8 @@ class Store:
             from .monitor import SCHEMA as MONITOR_SCHEMA
             from .platform_users import SCHEMA as PLATFORM_SCHEMA
             db.executescript(MONITOR_SCHEMA)
+            from .monitor import migrate as monitor_migrate
+            monitor_migrate(db)
             db.executescript(PLATFORM_SCHEMA)
             from .platform_users import INSTALL_PLAN_SCHEMA
             db.execute(INSTALL_PLAN_SCHEMA)

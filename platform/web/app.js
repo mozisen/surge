@@ -192,7 +192,7 @@ function login() {
 }
 
 function shell(content, section) {
-    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器管理'], ['instances', 'globe', '节点管理'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '监控与通知'], ['backups', 'server', '备份恢复'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
+    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器管理'], ['instances', 'globe', '节点管理'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '通知配置'], ['backups', 'server', '备份恢复'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
     const nav = links.map(([id, ico, text]) => `<a href="#${id}" class="${section===id?'active':''}"${section===id?' aria-current="page"':''}>${icon(ico)}${text}</a>`).join('');
     $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
 }
@@ -778,7 +778,7 @@ document.addEventListener('click', async e => {
         } else if (action === 'refresh') await refresh();
         else if (action === 'history') await historyDialog();
         else if (action === 'monitor-settings') await notificationSettings();
-        else if (action === 'notification-test') { await post('/monitor/test'); toast('测试通知已排队，稍后查看发送记录'); }
+        else if (action === 'notification-test') { await post('/monitor/test'); toast('测试消息已排队，稍后在 Telegram 查收'); }
         else if (action === 'backup-create') { b.disabled=true; try { await post('/backups'); await backupPage(); } finally { b.disabled=false; } }
         else if (action === 'backup-verify') { b.disabled=true; try { const r=await post('/backups/verify', {name:b.dataset.name}); toast(`恢复副本校验通过：${r.nodes} 个节点，${r.tasks} 条任务`); } finally { b.disabled=false; } }
         else if (action === 'trash') await showTrash();
@@ -915,22 +915,6 @@ setInterval(() => {
 }, 1000);
 boot();
 
-
-async function monitorPage() {
-    const data = await api('/monitor'), c = data.config;
-    const statuses = {pending:'等待发送',sending:'发送中',sent:'已发送',failed:'发送失败',unknown:'结果未知',disabled:'未启用通知',unconfigured:'未配置渠道'};
-    shell(`<div class="heading"><div><h1>监控与通知</h1><p class="subtext">离线超过 2 分钟、任务异常、到期前 3 天与流量达到 80% 时提醒，恢复后发送一次通知。</p></div><button data-action="monitor-settings" class="primary">通知设置</button></div><div class="panel status-panel"><div class="status-main"><h2 class="status-title ${c.enabled?'on':'off'}">${c.enabled?'通知已启用':'通知未启用'}</h2><p>Telegram：${c.telegram_configured?'已配置':'未配置'} · Webhook：${c.webhook?'已配置':'未配置'}</p><p class="helper">监控检查：${date(Number(data.heartbeat)||0)}。维护中的节点暂停告警；发送失败或结果未知的通知不会自动重发。</p></div><button data-action="notification-test" ${c.enabled?'':'disabled'}>发送测试</button></div><div class="section-label"><h2>最近通知</h2></div><div class="panel table-wrap"><table><thead><tr><th>时间</th><th>内容</th><th>状态</th></tr></thead><tbody>${data.events.map(e=>`<tr><td class="muted">${date(e.at)}</td><td>${esc(e.title)}</td><td>${statuses[e.status]||'未知'}</td></tr>`).join('')||'<tr><td colspan="3">暂无通知记录</td></tr>'}</tbody></table></div>`, 'monitor');
-}
-
-async function notificationSettings() {
-    const {config:c} = await api('/monitor');
-    modal('通知设置', `<form id="notification-form"><label class="field-check"><input id="notify-enabled" type="checkbox" ${c.enabled?'checked':''}>启用通知</label><label for="telegram-token">Telegram 机器人令牌</label><input id="telegram-token" type="password" autocomplete="new-password" placeholder="${c.telegram_configured?'已设置，留空保留':'未设置'}"><label for="telegram-chat">Telegram 接收地址</label><input id="telegram-chat" value="${esc(c.telegram_chat||'')}"><label class="field-check"><input id="clear-telegram" type="checkbox">清除 Telegram 配置</label><label for="webhook">Webhook 地址</label><input id="webhook" type="url" value="${esc(c.webhook||'')}" placeholder="https://"><p class="helper">可以同时启用两个渠道。Webhook 接收包含 title 和 source 字段的 JSON。保存后可发送测试。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="submit" class="primary">保存设置</button></div></form>`);
-    $('#notification-form').onsubmit = async e => {
-        e.preventDefault(); const button=$('[type=submit]',e.target); button.disabled=true;
-        try { await post('/monitor', {enabled:$('#notify-enabled').checked,telegram_token:$('#telegram-token').value,telegram_chat:$('#clear-telegram').checked?'':$('#telegram-chat').value,clear_telegram:$('#clear-telegram').checked,webhook:$('#webhook').value}); $('#modal').close(); await monitorPage(); }
-        catch (err) { formError(err); } finally { button.disabled=false; }
-    };
-}
 
 async function backupPage() {
     const data = await api('/backups');
@@ -1104,6 +1088,7 @@ function choiceDialog(title, text, choices, submit) {
 }
 
 async function userAction(action, b) {
+    if (action.startsWith('pu-tg-')) return notifyAction(action, b);
     if (action === 'pu-create') userForm(null);
     else if (action === 'pu-edit') userForm(currentUser);
     else if (action === 'pu-link') linkDialog();
@@ -1159,6 +1144,56 @@ async function installPlaceUsers(users, nodeId = selected.id) {
         toast('安装完成后将为 ' + users.length + ' 个用户新建协议账号');
     } catch (err) {
         toast('实例已提交安装，但未能登记用户：' + err.message);
+    }
+}
+
+// ---------------------------------------------------------------- 通知配置（TG 通知、用户查询机器人与绑定码）
+async function monitorPage() {
+    const data = await api('/monitor'), c = data.config, bound = data.users.filter(u => u.bound).length;
+    shell(`<div class="heading"><div><h1>通知配置</h1><p class="subtext">Telegram 管理员通知、每日报告与用户查询机器人。以平台为准的节点不再使用脚本自己的 TG 配置。</p></div><button data-action="monitor-settings" class="primary">通知设置</button></div>
+    <div class="panel status-panel"><div class="status-main"><h2 class="status-title ${c.enabled ? 'on' : 'off'}">${c.enabled ? 'TG 通知已启用' : 'TG 通知未启用'}</h2><p>Bot Token：${c.token_configured ? '已配置' : '未配置'} · Chat ID：${c.chat_id ? esc(c.chat_id) : '未配置'} · 每日报告：${c.daily_enabled ? '每天 ' + esc(c.daily_time) : '关闭'}</p><p class="helper">节点离线超过 2 分钟、任务异常、到期前 3 天、流量达到 ${Number(c.quota_percent)}% 和用尽时提醒，恢复后再通知一次。监控检查：${date(Number(data.heartbeat) || 0)}。发送失败的消息不重发，也不保留发送记录。</p></div><button data-action="notification-test" ${c.enabled ? '' : 'disabled'}>测试发送</button></div>
+    <div class="panel status-panel"><div class="status-main"><h2 class="status-title ${c.bot_enabled ? 'on' : 'off'}">${c.bot_enabled ? '用户查询机器人已启用' : '用户查询机器人未启用'}</h2><p>已绑定用户：${bound} / ${data.users.length}</p><p class="helper">复用上面的 Bot Token，启用时移除该 Bot 的 webhook，由面板轮询消息。已绑定的用户私聊机器人可查询所有节点合计流量与到期，并收到自己的流量和到期提醒。命令：/bind 绑定码、/traffic、/status、/unbind、/help。</p></div><button data-action="pu-tg-bot" data-enabled="${c.bot_enabled ? '' : '1'}" ${c.token_configured ? '' : 'disabled'}>${c.bot_enabled ? '禁用机器人' : '启用机器人'}</button></div>
+    <div class="section-label"><h2>用户绑定 <span class="count">${data.users.length}</span></h2></div>
+    <div class="panel">${data.users.length ? `<div class="table-wrap"><table><thead><tr><th>平台用户</th><th>Telegram</th><th>绑定时间</th><th>操作</th></tr></thead><tbody>${data.users.map(u => `<tr><td><a href="#users/${esc(u.id)}"><strong>${esc(u.name)}</strong></a>${u.note ? `<br><span class="muted">${esc(u.note)}</span>` : ''}</td><td>${u.bound ? (u.username ? '@' + esc(u.username) : '已绑定') : `<span class="muted">${u.code_pending ? '绑定码待使用' : '未绑定'}</span>`}</td><td class="muted">${u.bound ? date(u.bound_at) : '—'}</td><td><div class="action-row"><button class="small" data-action="pu-tg-code" data-id="${esc(u.id)}" data-name="${esc(u.name)}">${u.bound || u.code_pending ? '重新生成绑定码' : '生成绑定码'}</button>${u.bound ? `<button class="small" data-action="pu-tg-unbind" data-id="${esc(u.id)}" data-name="${esc(u.name)}">解除绑定</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无平台用户。先在「用户管理」中创建用户，再为其生成绑定码。</p></div>'}</div>`, 'monitor');
+}
+
+async function notificationSettings() {
+    const {config: c} = await api('/monitor');
+    modal('通知设置', `<form id="notification-form"><label class="field-check"><input id="notify-enabled" type="checkbox" ${c.enabled ? 'checked' : ''}>启用 TG 通知</label><label for="bot-token">Bot Token</label><input id="bot-token" type="password" autocomplete="new-password" placeholder="${c.token_configured ? '已设置，留空保留' : '从 @BotFather 获取'}"><label class="field-check"><input id="clear-token" type="checkbox">清除 Bot Token（同时停用用户机器人）</label><label for="chat-id">Chat ID</label><input id="chat-id" value="${esc(c.chat_id || '')}" placeholder="从 @userinfobot 获取，群组以 - 开头"><label for="quota-percent">流量告警阈值（%）</label><input id="quota-percent" type="number" min="50" max="99" step="1" value="${Number(c.quota_percent) || 80}" required><label class="field-check"><input id="daily-enabled" type="checkbox" ${c.daily_enabled ? 'checked' : ''}>每日流量报告</label><label for="daily-time">报告时间（面板服务器时区）</label><input id="daily-time" type="time" value="${esc(c.daily_time || '09:00')}" required><p class="helper">更换 Bot Token 后需要重新启用用户机器人。报告在设定时间后一小时内发送一次。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">保存设置</button></div></form>`);
+    $('#notification-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target);
+        button.disabled = true;
+        try {
+            await post('/monitor', {enabled: $('#notify-enabled').checked, bot_token: $('#clear-token').checked ? '' : $('#bot-token').value,
+                chat_id: $('#chat-id').value.trim(), clear_token: $('#clear-token').checked, quota_percent: Number($('#quota-percent').value),
+                daily_enabled: $('#daily-enabled').checked, daily_time: $('#daily-time').value});
+            $('#modal').close();
+            await monitorPage();
+        } catch (err) { formError(err); } finally { button.disabled = false; }
+    };
+}
+
+async function notifyAction(action, b) {
+    if (action === 'pu-tg-bot') {
+        const enabled = b.dataset.enabled === '1';
+        b.disabled = true;
+        try {
+            const r = await post('/monitor/bot', {enabled});
+            toast(enabled ? '用户查询机器人已启用' + (r.username ? '：@' + r.username : '') : '用户查询机器人已禁用，绑定关系保留');
+            await monitorPage();
+        } finally { b.disabled = false; }
+    } else if (action === 'pu-tg-code') {
+        const r = await post('/users/' + b.dataset.id + '/tg-code');
+        await monitorPage();
+        modal('绑定码 · ' + b.dataset.name, `<p>请用户私聊用户查询机器人，发送下面的命令完成绑定：</p><label for="bind-command">绑定命令</label><input id="bind-command" class="mono" readonly value="/bind ${esc(r.code)}"><p class="helper">有效期至 ${date(r.expires)}，只能使用一次，此处只显示一次；重新生成会使旧码失效。已绑定的用户用新码绑定后改为新的 Telegram。用户查询机器人未启用时无法绑定。</p><div class="modal-foot"><button type="button" data-action="close">完成</button></div>`);
+        $('#bind-command').select?.();
+    } else if (action === 'pu-tg-unbind') {
+        choiceDialog('解除 Telegram 绑定', '解除后该用户不再收到个人提醒，也不能通过机器人查询；之后可以重新生成绑定码。', [], async () => {
+            await post('/users/' + b.dataset.id + '/tg-unbind');
+            toast('已解除 ' + b.dataset.name + ' 的 Telegram 绑定');
+            await monitorPage();
+        });
     }
 }
 
