@@ -28,3 +28,10 @@
 - 面板地址：面板写 `/var/lib/vaio-panel/address-request.json`，`vaio-panel-address.path` 触发 root 辅助程序绑定或更换域名、关闭旧地址；面板以新地址启动时为已接管节点排队 `agent_set_url`（节点验证新地址 HTTPS 后改写配置）；旧 IP 或旧域名保留到「关闭旧地址」。1.0.0 升级时由 `update-panel.py` 补装辅助服务。
 - 卸载：`vaio-panel uninstall [--yes] [--backup 文件]`、`vaio-agent uninstall [--yes]`。
 - 测试：新增 `tests/test_panel_address.py`、`tests/test_uninstall.py`、`tests/platform-users.cjs` 面板地址一组；unittest 与 cjs 全部通过。**真实验收**：未执行（尚未在 VPS 上实际安装 IP 模式、绑定域名或卸载）。
+
+## 1.2.0（surge 已完成，待发布到 vaio-panel）
+
+- 服务器列表显示节点程序当前 / 最新版本，「一键更新节点程序」（`POST /api/nodes/upgrade-all`，返回已排队与跳过原因）。
+- 面板更新：`vaio/updates.py` 读取 vaio-panel 的 `vX.Y.Z` 标签（缓存 6 小时，失败 30 分钟后重试）；`GET/POST /api/panel-update`，面板写 `/var/lib/vaio-panel/panel-update-request.json`，`vaio-panel-update.path` 触发 root 运行 `update-panel.py --from-request`（与命令更新相同的备份、测试、健康检查与恢复），状态写 `panel-update-status.json`。新装由 `install-panel.sh` 安装辅助服务，升级由 `update-panel.py` 补装；1.1.0 的更新器不认识该服务，因此 1.2.0 面板在打开「面板更新」时通过已有的地址辅助程序（`install_update_helper`）补装。
+- 系统设置：账号与面板地址合并为一个对话框的两个标签。
+- 测试：新增 `tests/test_panel_update.py`，`tests/platform-users.cjs` 增加版本列、一键更新、面板更新与系统设置；卸载测试覆盖新单元。**真实验收**：未执行（未在 VPS 上实际从面板更新或批量升级节点）。
