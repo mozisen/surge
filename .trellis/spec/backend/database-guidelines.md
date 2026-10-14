@@ -56,3 +56,9 @@ Questions to answer:
 - `settings['notifications']` is normalized by `monitor.normalize()` (defaults, legacy `telegram_token`/`telegram_chat` migration). Writes go through `monitor.write()`, which also stores the legacy keys so an older panel keeps administrator alerts after a rollback.
 - Telegram bind codes: store only the SHA-256 (`platform_tg.code_hash`), 24-hour expiry, one-time; never log or audit the code. One chat per platform user (`platform_tg` primary key) and one user per chat (partial unique index); the row cascades with `platform_users`.
 - The user bot runs inside the flock-elected monitor worker; advance `bot_offset` before handling an update so a crash never replays `/bind`.
+
+## Port forwards (panel / agent / script)
+
+- One contract in `vaio/common.py`: `validate_forward_rule` (same constraints as the script's `_fwd_validate`; nftables = TCP+UDP, listen 0.0.0.0, IPv4 target), `validate_forward_task` (exactly one op), `sanitize_forwards` (snapshot rows; malformed rows are dropped, at most 500).
+- The panel never trusts a client-supplied base: `POST /api/nodes/<id>/forwards` takes `{op, id?, rule?}` and builds `base` from the node's last snapshot inside `node_task` (request built after `check`). The script rejects with `rule_changed` when the node's rule differs, so script-menu or nft.sh edits are never overwritten.
+- Agent: `forward_apply` goes through `Bridge` like `platform_apply` (journal, unknown never replayed, result lookup) and calls `ScriptAPI.invalidate()` so the next snapshot carries the new rules; forwards come from the script inventory (cached 60 s), not from db.json.

@@ -2598,3 +2598,8 @@ dialog.install .install-warning {
         gap: 8px;
     }
 }
+
+/* 端口转发表格：操作按钮不换行，窄屏由表格横向滚动。 */
+#forward-results .action-row {
+    flex-wrap: nowrap;
+}

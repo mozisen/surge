@@ -226,6 +226,91 @@ def validate_upgrade_task(data):
     return {"action": "agent_upgrade", "params": {}}
 
 
+FORWARD_FIELDS = ("backend", "remark", "transport", "listen_host", "listen_port", "remote_host", "remote_port", "enabled")
+FORWARD_OPS = {"add": {"op", "rule"}, "update": {"op", "id", "base", "rule"}, "delete": {"op", "id", "base"},
+               "enable": {"op", "id", "base"}, "disable": {"op", "id", "base"}}
+FORWARD_ID = r"(?:[0-9a-f]{12}|nft-[0-9]{1,5})"
+DNS_NAME = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+
+
+def _ip(value, version=None):
+    import ipaddress
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return version is None or address.version == version
+
+
+def validate_forward_rule(rule):
+    """Same constraints as the script's _fwd_validate; returns the rule with exactly FORWARD_FIELDS."""
+    if not isinstance(rule, dict) or set(rule) != set(FORWARD_FIELDS):
+        raise ValueError("转发规则字段无效")
+    if rule["backend"] not in ("realm", "nftables"):
+        raise ValueError("转发类型无效")
+    if rule["transport"] not in ("tcp", "udp", "tcp+udp"):
+        raise ValueError("转发协议无效")
+    for key in ("listen_port", "remote_port"):
+        port(rule[key])
+    if not isinstance(rule["remark"], str) or len(rule["remark"]) > 64 or re.search(r'[\x00-\x1f\x7f"]', rule["remark"]):
+        raise ValueError("备注最多 64 个字符，且不能包含引号或控制字符")
+    if type(rule["enabled"]) is not bool:
+        raise ValueError("启用状态无效")
+    listen, remote = rule["listen_host"], rule["remote_host"]
+    if not isinstance(listen, str) or not isinstance(remote, str) or not 1 <= len(remote) <= 253:
+        raise ValueError("地址无效")
+    if rule["backend"] == "nftables":
+        if rule["transport"] != "tcp+udp" or listen != "0.0.0.0":
+            raise ValueError("nftables 转发固定为 TCP+UDP 并监听所有地址")
+        if not _ip(remote, 4):
+            raise ValueError("nftables 转发的目标必须是 IPv4 地址")
+    else:
+        if listen not in ("0.0.0.0", "::") and not _ip(listen):
+            raise ValueError("监听地址必须是 IP 地址")
+        if not _ip(remote) and not re.fullmatch(DNS_NAME, remote):
+            raise ValueError("目标地址必须是 IP 地址或域名")
+    return {k: rule[k] for k in FORWARD_FIELDS}
+
+
+def validate_forward_task(data):
+    """One forwarding change per task; mirrors the script's forward_apply contract."""
+    if not isinstance(data, dict) or set(data) != {"action", "params"} or data["action"] != "forward_apply":
+        raise ValueError("任务字段无效")
+    params = data["params"]
+    if not isinstance(params, dict) or set(params) != {"ops"} or not isinstance(params["ops"], list) or len(params["ops"]) != 1:
+        raise ValueError("转发操作无效")
+    op = params["ops"][0]
+    if not isinstance(op, dict) or op.get("op") not in FORWARD_OPS or set(op) != FORWARD_OPS[op["op"]]:
+        raise ValueError("转发操作无效")
+    if "id" in op and (not isinstance(op["id"], str) or not re.fullmatch(FORWARD_ID, op["id"])):
+        raise ValueError("转发规则 ID 无效")
+    if "base" in op:
+        base = op["base"]
+        if not isinstance(base, dict) or set(base) - set(FORWARD_FIELDS) - {"id"}:
+            raise ValueError("转发规则快照无效")
+    if "rule" in op:
+        validate_forward_rule(op["rule"])
+    return {"action": "forward_apply", "params": {"ops": [dict(op)]}}
+
+
+def sanitize_forwards(data):
+    """Snapshot rules from the node; drop anything malformed rather than trusting it."""
+    clean = []
+    for item in data if isinstance(data, list) else []:
+        if len(clean) >= 500:
+            break
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not re.fullmatch(FORWARD_ID, item["id"]):
+            continue
+        try:
+            rule = validate_forward_rule({k: item.get(k) for k in FORWARD_FIELDS})
+        except ValueError:
+            continue
+        bytes_value = item.get("bytes")
+        clean.append({"id": item["id"], **rule, "status": item.get("status") if item.get("status") in ("running", "stopped", "disabled") else "stopped",
+                      "bytes": bytes_value if type(bytes_value) is int and 0 <= bytes_value < 10 ** 18 else None})
+    return clean
+
+
 def config_revision(db):
     # Counters and notification metadata change independently of configuration.
     volatile = {"used", "counter_up", "counter_down", "counter_generation", "last_alert_percent",

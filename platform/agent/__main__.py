@@ -110,6 +110,8 @@ class Agent:
             snapshot["script_api"] = self.script_api.status()
             # Unified-account sync needs the script's transactional account API.
             snapshot["accounts_version"] = 1 if snapshot["script_api"].get("accounts_api") == 1 else 0
+            snapshot["forwards"] = snapshot["script_api"].pop("forwards", [])
+            snapshot["forward_version"] = 1 if snapshot["script_api"].get("forward_api") == 1 else 0
         task = self.api("/poll", {"snapshot": snapshot, "ready": future is None}).get("task")
         if task and future is None:
             task_id = task["id"]

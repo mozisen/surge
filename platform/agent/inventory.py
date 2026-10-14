@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .billing import effective_usage, traffic_state
 from vaio import __version__
-from vaio.common import ACCOUNT_FIELDS, PROTOCOLS, PROTOCOL_CORES, UUID_PATTERN, config_revision, user_mode, user_stats, write_capabilities
+from vaio.common import ACCOUNT_FIELDS, PROTOCOLS, PROTOCOL_CORES, UUID_PATTERN, config_revision, sanitize_forwards, user_mode, user_stats, write_capabilities
 
 SNELL_USERS = {"snell", "snell-v5", "snell-v6"}
 STANDALONE = {"snell", "snell-v5", "snell-v6", "snell-shadowtls", "snell-v5-shadowtls", "ss2022-shadowtls", "naive"}
@@ -210,6 +210,8 @@ def sanitize_snapshot(snapshot):
     clean["user_authority"] = "platform" if snapshot.get("user_authority") == "platform" else "script"
     clean["upgrade_version"] = 1 if snapshot.get("upgrade_version") == 1 else 0
     clean["share_version"] = 2 if snapshot.get("share_version") == 2 else 0
+    clean["forward_version"] = 1 if snapshot.get("forward_version") == 1 else 0
+    clean["forwards"] = sanitize_forwards(snapshot.get("forwards")) if clean["forward_version"] else []
     upgrade = snapshot.get("last_upgrade")
     if isinstance(upgrade, dict):
         clean["last_upgrade"] = {"status": upgrade.get("status") if upgrade.get("status") in ("succeeded", "rolled_back", "failed") else "failed",

@@ -15,6 +15,7 @@ const icons = {
     plus: '<path d="M12 5v14M5 12h14"/>',
     arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
     back: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
+    forward: '<path d="M4 7h13M13 3l4 4-4 4M20 17H7M11 13l-4 4 4 4"/>',
     search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
     shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18M12 3c-5 5-5 13 0 18"/>',
@@ -76,7 +77,13 @@ const actions = {
     share: '配置信息',
     inspect: '检查实例',
     platform_apply: '平台用户同步',
-    agent_upgrade: '一键升级'
+    agent_upgrade: '一键升级',
+    forward_apply: '端口转发'
+};
+// 端口转发任务的一行摘要：操作 + 监听端口
+const forwardSummary = t => {
+    const op = t.request.params?.ops?.[0] || {}, rule = op.rule || op.base || {};
+    return ({add: '新增', update: '修改', delete: '删除', enable: '启用', disable: '停用'}[op.op] || '') + ' ' + (rule.listen_port ? '监听 ' + rule.listen_port : '');
 };
 const bytes = n => n == null ? '—' : n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GiB' : n >= 1048576 ? (n / 1048576).toFixed(0) + ' MiB' : (n / 1024).toFixed(0) + ' KiB';
 const date = n => n ? new Date(n * 1000).toLocaleString('zh-CN', {
@@ -195,7 +202,7 @@ function login() {
 }
 
 function shell(content, section) {
-    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器管理'], ['instances', 'globe', '节点管理'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '通知配置'], ['backups', 'server', '备份恢复'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
+    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器管理'], ['instances', 'globe', '节点管理'], ['forwards', 'forward', '端口转发'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '通知配置'], ['backups', 'server', '备份恢复'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
     const nav = links.map(([id, ico, text]) => `<a href="#${id}" class="${section===id?'active':''}"${section===id?' aria-current="page"':''}>${icon(ico)}${text}</a>`).join('');
     $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
 }
@@ -245,7 +252,7 @@ function nodeCards() {
 }
 
 function taskTable(list) {
-    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':t.action==='agent_upgrade'?'节点程序与节点脚本':esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
+    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='forward_apply'?esc(forwardSummary(t)):esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
 }
 
 function overview(section) {
@@ -320,6 +327,8 @@ async function render() {
         await usersPage();
     } else if (route.startsWith('users/')) {
         await userDetail(route.split('/')[1]);
+    } else if (route === 'forwards') {
+        forwardsPage();
     } else if (route === 'instances') {
         instancesPage();
     } else if (route === 'traffic') {
@@ -344,7 +353,7 @@ async function refresh() {
         lastRefresh = new Date().toLocaleTimeString('zh-CN', {
             hour12: false
         });
-        if (!['search', 'instance-search'].includes(document.activeElement?.id) && !document.querySelector('.filter-menu.open')) await render();
+        if (!['search', 'instance-search', 'forward-search'].includes(document.activeElement?.id) && !document.querySelector('.filter-menu.open')) await render();
         if (activeTaskId && $('#modal').open) showTask(activeTaskId);
     } catch (err) {
         toast(err.message);
@@ -472,7 +481,7 @@ function showTask(id) {
         return;
     }
     const r = t.result || {};
-    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):t.action==='agent_upgrade'?'节点程序与节点脚本':esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
+    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='forward_apply'?esc(forwardSummary(t)):esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
 }
 
 function installPortCandidate(instances, current) {
@@ -766,6 +775,7 @@ document.addEventListener('click', async e => {
             $('#modal').close();
             activeTaskId = null;
         } else if (action.startsWith('pu-')) await userAction(action, b);
+        else if (action.startsWith('fw-')) await forwardAction(action, b);
         else if (action === 'node-instance') {
             // Instance dialogs act on `selected`; point it at the instance's server first.
             selected = nodes.find(n => n.id === b.dataset.node);
@@ -1197,6 +1207,110 @@ async function notifyAction(action, b) {
             toast('已解除 ' + b.dataset.name + ' 的 Telegram 绑定');
             await monitorPage();
         });
+    }
+}
+
+// ---------------------------------------------------------------- 端口转发（所有服务器的 Realm / nftables 规则）
+let forwardFilter = {node: '', backend: '', q: ''};
+const forwardBackends = {realm: 'Realm', nftables: 'nftables'};
+const forwardStates = {running: '运行中', stopped: '未运行', disabled: '已停用'};
+function forwardRows() {
+    return nodes.filter(n => !n.deleted).flatMap(n => (n.snapshot.forwards || []).map(r => ({node: n, r})));
+}
+function forwardMatches({node, r}, f) {
+    const q = f.q.trim().toLowerCase();
+    return (!f.node || node.id === f.node) && (!f.backend || r.backend === f.backend)
+        && (!q || [r.remark, String(r.listen_port), r.remote_host, String(r.remote_port), node.name].some(v => String(v || '').toLowerCase().includes(q)));
+}
+function forwardWritable(node) {
+    return node.adopted && node.status === 'online' && !node.maintenance && node.snapshot.forward_version === 1;
+}
+function forwardTable(rows) {
+    if (!rows.length) return '<div class="empty"><p>没有符合条件的转发规则。</p></div>';
+    return `<div class="table-wrap"><table><thead><tr><th>服务器</th><th>备注</th><th>类型</th><th>监听</th><th>目标</th><th>状态</th><th class="num">流量</th><th>操作</th></tr></thead><tbody>${rows.map(({node, r}) => {
+        const off = !forwardWritable(node) ? ' disabled' : '', data = `data-node="${esc(node.id)}" data-id="${esc(r.id)}"`;
+        return `<tr><td><a href="#nodes/${esc(node.id)}">${esc(node.name)}</a>${node.status !== 'online' ? `<br><span class="muted">${esc(states[node.status] || node.status)}</span>` : ''}</td><td>${r.remark ? esc(r.remark) : '<span class="muted">未命名</span>'}</td><td><strong>${esc(forwardBackends[r.backend] || r.backend)}</strong><br><span class="muted">${esc(r.transport.toUpperCase())}</span></td><td class="mono">${esc(r.listen_host === '0.0.0.0' ? '' : r.listen_host + ':')}${r.listen_port}</td><td class="mono">${esc(r.remote_host)}:${r.remote_port}</td><td><span class="badge ${r.status === 'running' ? 'running' : 'stopped'}">${esc(forwardStates[r.status] || r.status)}</span></td><td class="num">${r.bytes == null ? '—' : bytes(r.bytes)}</td><td><div class="action-row"><button class="small" data-action="fw-edit" ${data}${off}>修改</button><button class="small" data-action="fw-toggle" ${data}${off}>${r.enabled ? '停用' : '启用'}</button><button class="small" data-action="fw-delete" ${data}${off}>删除</button></div></td></tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+function forwardsPage() {
+    const rows = forwardRows(), f = forwardFilter, servers = nodes.filter(n => !n.deleted);
+    const outdated = servers.filter(n => n.adopted && n.snapshot.forward_version !== 1).length;
+    shell(`<div class="heading"><div><h1>端口转发</h1><p class="subtext">所有服务器上的 Realm 与 nftables 转发规则，与节点脚本的配置双向同步。</p></div><div class="action-row"><button data-action="refresh">${icon('refresh')}刷新</button><button class="primary" data-action="fw-add">${icon('plus')}新建转发</button></div></div>
+    ${outdated ? `<div class="notice">${outdated} 台服务器的节点程序版本较旧，升级后才能查看和管理端口转发。</div>` : ''}
+    <div class="section-label"><h2>规则 <span class="count" id="forward-count"></span></h2><div class="tools instance-filters">
+    ${filterMenu('forward-node', '筛选服务器', [['', '全部服务器'], ...servers.map(n => [n.id, n.name])], f.node)}
+    ${filterMenu('forward-backend', '筛选转发类型', [['', '全部类型'], ...Object.entries(forwardBackends)], f.backend)}
+    <div class="search">${icon('search')}<input id="forward-search" type="search" aria-label="搜索转发规则" placeholder="搜索备注、端口或目标" value="${esc(f.q)}"></div></div></div>
+    <div class="panel" id="forward-results"></div>
+    <p class="helper">Realm 支持 TCP / UDP，目标可为域名；nftables 为内核转发，固定 TCP+UDP，目标须为 IPv4，并会开启服务器的 IPv4 转发。流量为节点上报的累计值，节点重启后清零。</p>`, 'forwards');
+    const update = () => {
+        const shown = rows.filter(row => forwardMatches(row, forwardFilter));
+        $('#forward-results').innerHTML = forwardTable(shown);
+        $('#forward-count').textContent = shown.length === rows.length ? String(rows.length) : shown.length + ' / ' + rows.length;
+    };
+    $('#forward-node').onchange = e => { forwardFilter.node = e.target.value; update(); };
+    $('#forward-backend').onchange = e => { forwardFilter.backend = e.target.value; update(); };
+    $('#forward-search').addEventListener('input', e => { forwardFilter.q = e.target.value; update(); });
+    update();
+}
+function forwardDialog(nodeId, rule) {
+    const editing = !!rule, servers = nodes.filter(n => !n.deleted && forwardWritable(n));
+    if (!servers.length) return modal('暂无可配置的服务器', '<p>需要已接管、在线、未维护，且节点程序支持端口转发的服务器。请先升级节点程序。</p>');
+    const node = nodes.find(n => n.id === nodeId) || servers.find(n => n.id === forwardFilter.node) || servers[0];
+    const r = rule || {backend: 'realm', remark: '', transport: 'tcp', listen_host: '0.0.0.0', listen_port: '', remote_host: '', remote_port: '', enabled: true};
+    const option = (v, label, current) => `<option value="${esc(v)}"${v === current ? ' selected' : ''}>${esc(label)}</option>`;
+    modal(editing ? '修改转发 · ' + node.name : '新建转发', `<form id="fw-form"><div class="install-top">${editing ? '' : `<div class="inline-field"><label for="fw-node">服务器</label><select id="fw-node">${servers.map(n => option(n.id, n.name, node.id)).join('')}</select></div>`}<div class="inline-field"><label for="fw-backend">类型</label><select id="fw-backend">${option('realm', 'Realm', r.backend)}${option('nftables', 'nftables', r.backend)}</select></div></div>
+<div class="install-grid">
+<div><label for="fw-remark">备注</label><input id="fw-remark" maxlength="64" value="${esc(r.remark)}" placeholder="可选"></div>
+<div><label for="fw-transport">协议</label><select id="fw-transport">${option('tcp', 'TCP', r.transport)}${option('udp', 'UDP', r.transport)}${option('tcp+udp', 'TCP + UDP', r.transport)}</select></div>
+<div id="fw-listen-host-field"><label for="fw-listen-host">监听地址</label><input id="fw-listen-host" value="${esc(r.listen_host)}" required></div>
+<div><label for="fw-listen-port">监听端口</label><div class="input-action"><input id="fw-listen-port" type="number" min="1" max="65535" value="${esc(r.listen_port)}" required><button type="button" id="fw-generate-port" class="install-generate">生成</button></div></div>
+<div><label for="fw-remote-host" id="fw-remote-label">目标地址</label><input id="fw-remote-host" maxlength="253" value="${esc(r.remote_host)}" required></div>
+<div><label for="fw-remote-port">目标端口</label><input id="fw-remote-port" type="number" min="1" max="65535" value="${esc(r.remote_port)}" required></div>
+</div><label class="field-check"><input id="fw-enabled" type="checkbox"${r.enabled ? ' checked' : ''}>启用</label><p class="helper" id="fw-help"></p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">${editing ? '保存修改' : '创建转发'}</button></div></form>`);
+    const target = () => nodes.find(n => n.id === ($('#fw-node')?.value || node.id)) || node;
+    const updateFields = () => {
+        const nft = $('#fw-backend').value === 'nftables';
+        if (nft) { $('#fw-transport').value = 'tcp+udp'; $('#fw-listen-host').value = '0.0.0.0'; }
+        $('#fw-transport').disabled = nft;
+        $('#fw-listen-host-field').hidden = nft;
+        $('#fw-remote-label').textContent = nft ? '目标 IPv4' : '目标地址';
+        $('#fw-remote-host').placeholder = nft ? '例如 203.0.113.10' : 'IP 或域名';
+        $('#fw-help').textContent = nft ? 'nftables 为内核转发：固定 TCP+UDP、监听所有地址，目标须为 IPv4；保存后会开启服务器的 IPv4 转发。' : 'Realm 支持 TCP / UDP，目标可为域名或 IP。';
+    };
+    $('#fw-backend').addEventListener('change', updateFields);
+    updateFields();
+    $('#fw-generate-port').onclick = () => {
+        const used = [...(target().snapshot.instances || []), ...(target().snapshot.forwards || []).map(x => ({port: x.listen_port}))];
+        try { $('#fw-listen-port').value = installPortCandidate(used, $('#fw-listen-port').value); } catch (err) { formError(err); }
+    };
+    if (!editing && !r.listen_port) $('#fw-generate-port').onclick();
+    $('#fw-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target);
+        button.disabled = true;
+        const data = {rule: {backend: $('#fw-backend').value, remark: $('#fw-remark').value.trim(), transport: $('#fw-transport').value,
+            listen_host: $('#fw-listen-host').value.trim(), listen_port: Number($('#fw-listen-port').value), remote_host: $('#fw-remote-host').value.trim(),
+            remote_port: Number($('#fw-remote-port').value), enabled: $('#fw-enabled').checked}};
+        try {
+            const result = await post('/nodes/' + target().id + '/forwards', editing ? {op: 'update', id: rule.id, ...data} : {op: 'add', ...data});
+            activeTaskId = result.id;
+            await refresh();
+            showTask(result.id);
+        } catch (err) { formError(err); button.disabled = false; }
+    };
+}
+async function forwardAction(action, b) {
+    const node = nodes.find(n => n.id === b.dataset.node), rule = node?.snapshot.forwards?.find(r => r.id === b.dataset.id);
+    if (action === 'fw-add') return forwardDialog(forwardFilter.node, null);
+    if (!rule) throw new Error('转发规则不存在，请刷新后重试');
+    if (action === 'fw-edit') return forwardDialog(node.id, rule);
+    const submit = async op => { const r = await post('/nodes/' + node.id + '/forwards', {op, id: rule.id}); activeTaskId = r.id; await refresh(); showTask(r.id); };
+    if (action === 'fw-toggle') {
+        b.disabled = true;
+        try { await submit(rule.enabled ? 'disable' : 'enable'); } finally { b.disabled = false; }
+    } else if (action === 'fw-delete') {
+        choiceDialog('删除转发规则', `删除 ${esc(node.name)} 上监听 ${rule.listen_port} 的${esc(forwardBackends[rule.backend])}转发，到 ${esc(rule.remote_host)}:${rule.remote_port} 的流量将中断。`, [], () => submit('delete'));
     }
 }
 

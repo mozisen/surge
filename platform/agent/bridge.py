@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from vaio.install_options import SS_METHODS
-from vaio.common import MUTATIONS, PROTOCOLS, config_revision, validate_platform_task, validate_task, validate_upgrade_task
+from vaio.common import MUTATIONS, PROTOCOLS, config_revision, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task
 from .addresses import discover
 from .config_details import config_details
 from .inventory import mutable, read_db, rows, service_for, users_for
@@ -30,6 +30,16 @@ class TransactionUnknown(RuntimeError):
 class TransactionRolledBack(RuntimeError):
     """Runtime and database restoration completed."""
 
+
+FORWARD_FAILURES = {
+    "invalid_request": "转发规则无效：nftables 目标须为 IPv4，端口须为 1–65535",
+    "port_conflict": "监听端口与该节点的其他转发规则或代理协议冲突",
+    "rule_not_found": "转发规则在节点上已不存在，请刷新后重试",
+    "rule_changed": "转发规则已在节点上被修改，请刷新后重试",
+    "lock_timeout": "节点上有其他配置操作正在进行，请稍后重试",
+    "storage_error": "节点无法写入事务记录，请检查磁盘空间与权限",
+    "request_id_conflict": "任务 ID 已用于其他请求，已拒绝",
+}
 
 # Script account_apply failure codes → operator-facing messages. Every failure was
 # rejected before writing or rolled back; none is replayed.
@@ -110,7 +120,10 @@ class Bridge:
             raise ValueError("任务 ID 无效")
         platform = isinstance(task, dict) and task.get("action") == "platform_apply"
         upgrade = isinstance(task, dict) and task.get("action") == "agent_upgrade"
-        if platform:
+        forward = isinstance(task, dict) and task.get("action") == "forward_apply"
+        if forward:
+            validated = validate_forward_task({k: v for k, v in task.items() if k != "id"})
+        elif platform:
             validated = validate_platform_task({k: v for k, v in task.items() if k != "id"})
         elif upgrade:
             validated = validate_upgrade_task({k: v for k, v in task.items() if k != "id"})
@@ -141,6 +154,8 @@ class Bridge:
             try:
                 if upgrade:
                     result = self._upgrade(identity)
+                elif forward:
+                    result = self._forward_apply(validated, identity)
                 elif platform:
                     result = self._platform_apply(validated, identity)
                 else:
@@ -196,6 +211,34 @@ class Bridge:
         if code == "rev_conflict" and type(data.get("rev")) is int:
             message += "（节点版本 " + str(data["rev"]) + "）"
         raise ValueError(message)
+
+    def _forward_apply(self, task, identity):
+        """Port-forward change through the script's transactional API; an unknown outcome is never replayed."""
+        if self.script_api is None:
+            raise ValueError("节点脚本接口不可用，无法修改端口转发")
+        try:
+            reply = self.script_api.forward(task["params"], identity)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            reply = None
+        if reply is None or reply.get("status") == "unknown":
+            try:
+                reply = self.script_api.result(identity)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                reply = None
+            if reply is None or reply.get("status") not in ("succeeded", "failed"):
+                raise TransactionUnknown("端口转发结果未确认，未重放；请在节点核对 " + str(self.cfg / "api-results" / (identity + ".json")))
+        if hasattr(self.script_api, "invalidate"):
+            self.script_api.invalidate()
+        data = reply.get("data") if isinstance(reply.get("data"), dict) else {}
+        if reply["status"] == "succeeded":
+            rule = data.get("rule") if isinstance(data.get("rule"), dict) else None
+            return {"rule": {"id": rule.get("id")} if rule and isinstance(rule.get("id"), str) else None,
+                    "steps": ["节点脚本校验规则与端口冲突", "保存事务备份", "写入转发规则", "重启 Realm / 重载 nftables 并校验"]}
+        code = reply.get("code")
+        if code == "apply_failed":
+            detail = str(data.get("message") or "")[:200]
+            raise TransactionRolledBack("端口转发应用失败，节点已回滚" + ("：" + detail if detail else ""))
+        raise ValueError(FORWARD_FAILURES.get(code, "端口转发被节点拒绝"))
 
     def _upgrade(self, identity):
         """Hand the upgrade to a detached updater; its outcome is reported in later snapshots."""

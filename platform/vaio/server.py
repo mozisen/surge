@@ -18,7 +18,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
 from . import platform_users
-from .common import MUTATIONS, LEGACY_COMBINATIONS, PROTOCOLS, digest, require_text, validate_platform_task, validate_task, validate_upgrade_task
+from .common import FORWARD_FIELDS, MUTATIONS, LEGACY_COMBINATIONS, PROTOCOLS, digest, require_text, validate_forward_rule, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task
 from .install_options import ADVANCED_INSTALL_FIELDS, REALITY_INSTALL_FIELDS
 from .store import Store
 
@@ -806,6 +806,8 @@ def create_app(config=None):
             error = check(node, json.loads(node["snapshot"]))
             if error:
                 return jsonify(error=error), 409
+            if callable(request):
+                request = request()
             if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status IN ('queued','running','unknown')", (node_id,)).fetchone():
                 return jsonify(error="该节点有未完成或待核对的任务，请先处理"), 409
             task_id = str(uuid.uuid4())
@@ -842,6 +844,45 @@ def create_app(config=None):
                 return "请输入节点名称确认：切换后节点上的全部用户和凭据都会删除"
         return node_task(node_id, "platform_apply", validate_platform_task(
             {"action": "platform_apply", "params": {"ops": [{"op": "set_authority", "mode": mode}]}}), check)
+
+    @app.post("/api/nodes/<node_id>/forwards")
+    @admin
+    def node_forward(node_id):
+        """One port-forward change on one node. The base is the rule as last reported by the node."""
+        data = body()
+        op = data.get("op")
+        allowed = {"add": {"op", "rule"}, "update": {"op", "id", "rule"}, "delete": {"op", "id"}, "enable": {"op", "id"}, "disable": {"op", "id"}}
+        if op not in allowed or set(data) != allowed[op]:
+            raise ValueError("转发操作无效")
+        rule = validate_forward_rule(data["rule"]) if "rule" in data else None
+        holder = {}
+
+        def check(node, snapshot):
+            if snapshot.get("forward_version") != 1:
+                return "该节点程序或脚本版本过旧，请先升级节点"
+            rules = snapshot.get("forwards", [])
+            if op != "add":
+                current = next((r for r in rules if r.get("id") == data["id"]), None)
+                if current is None:
+                    return "转发规则不存在，请刷新后重试"
+                holder["base"] = {k: current[k] for k in ("id",) + FORWARD_FIELDS if k in current}
+            target = rule if rule else ({**holder["base"], "enabled": True} if op == "enable" else None)
+            if target and target.get("enabled", True):
+                kinds = lambda t: {"tcp", "udp"} if t == "tcp+udp" else {t}
+                for other in rules:
+                    if other.get("id") != data.get("id") and other.get("listen_port") == target["listen_port"] and kinds(other.get("transport")) & kinds(target["transport"]):
+                        return "监听端口 %d 已被该节点的其他转发规则使用" % target["listen_port"]
+                if any(i.get("port") == target["listen_port"] for i in snapshot.get("instances", [])):
+                    return "监听端口 %d 已被该节点的代理协议使用" % target["listen_port"]
+
+        def request_body():
+            entry = {"op": op}
+            if op != "add":
+                entry.update(id=data["id"], base=holder["base"])
+            if rule is not None:
+                entry["rule"] = rule
+            return validate_forward_task({"action": "forward_apply", "params": {"ops": [entry]}})
+        return node_task(node_id, "forward_apply", request_body, check)
 
     @app.post("/api/nodes/<node_id>/upgrade")
     @admin

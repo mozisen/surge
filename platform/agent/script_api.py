@@ -1,5 +1,5 @@
 """Script API bridge. Protocol capabilities never grant task execution rights; only the
-unified-account transaction (account_apply) is written through it."""
+unified-account transaction (account_apply) and port-forward changes (forward_apply) are written through it."""
 import hashlib
 import json
 import os
@@ -8,6 +8,8 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+
+from vaio.common import sanitize_forwards
 
 from .runtime import ROOT, UPSTREAM_SHA
 
@@ -56,6 +58,11 @@ class ScriptAPI:
         request = {'api_version': 1, 'request_id': self._request_id(request_id), 'action': 'account_apply', 'params': params}
         return self._call(request, 300)[1]
 
+    def forward(self, params, request_id):
+        """Port-forward transaction (Realm / nftables). The task ID is the script's idempotency key."""
+        request = {'api_version': 1, 'request_id': self._request_id(request_id), 'action': 'forward_apply', 'params': params}
+        return self._call(request, 300)[1]
+
     def share(self, target, name, host):
         """A member's connection link from the script (read-only; nothing is recorded)."""
         request = {'api_version': 1, 'request_id': str(uuid.uuid4()), 'action': 'account_share',
@@ -70,6 +77,10 @@ class ScriptAPI:
         request = {'api_version': 1, 'request_id': str(uuid.uuid4()), 'action': 'result',
                    'params': {'request_id': self._request_id(request_id)}}
         return self._call(request, 30)[1]
+
+    def invalidate(self):
+        """Next status() re-reads inventory (after a forward change)."""
+        self.checked = 0
 
     def status(self):
         now = time.monotonic()
@@ -97,9 +108,12 @@ class ScriptAPI:
             # Version 2 adds set_authority, 3 adds account_share and user modes; earlier operations are unchanged.
             accounts_ready = isinstance(accounts, dict) and accounts.get('version') in (1, 2, 3) \
                 and isinstance(accounts.get('actions'), list) and 'account_apply' in accounts['actions']
+            forward = c.get('forward_api')
+            forward_ready = isinstance(forward, dict) and forward.get('version') == 1
             self.cached = {'status': 'ready', 'version': version, 'stage': 'read_only',
                            'protocol_count': len(protocols), 'instance_count': len(instances),
-                           'accounts_api': 1 if accounts_ready else 0}
+                           'accounts_api': 1 if accounts_ready else 0, 'forward_api': 1 if forward_ready else 0,
+                           'forwards': sanitize_forwards(i.get('forwards')) if forward_ready else []}
         except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
             self.cached = {'status': 'unavailable', 'stage': 'read_only'}
         self.checked = now

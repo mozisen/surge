@@ -33,7 +33,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -301,4 +301,59 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     assert.strictEqual(posts.at(-1)[1].bot_token, '');
     assert.strictEqual(posts.at(-1)[1].clear_token, true);
     console.log('PASS notification page: status, bot toggle, bindings, bind code, unbind, settings payload');
+
+    // 端口转发：列表、筛选、按钮可用性、弹窗字段联动与提交
+    const realmRule = {id: 'abcdef012345', backend: 'realm', remark: '<b>web</b>', transport: 'tcp', listen_host: '0.0.0.0', listen_port: 20000, remote_host: 'example.com', remote_port: 80, enabled: true, status: 'running', bytes: 1073741824};
+    const nftRule = {id: 'nft-30000', backend: 'nftables', remark: '', transport: 'tcp+udp', listen_host: '0.0.0.0', listen_port: 30000, remote_host: '1.2.3.4', remote_port: 53, enabled: false, status: 'disabled', bytes: null};
+    context.nodes = [
+        {id: 'a', name: '香港', adopted: true, status: 'online', maintenance: false, deleted: null, snapshot: {forward_version: 1, instances: [{port: 443}], forwards: [realmRule, nftRule]}},
+        {id: 'b', name: '东京', adopted: true, status: 'offline', maintenance: false, deleted: null, snapshot: {forward_version: 1, instances: [], forwards: [{...realmRule, id: '0123456789ab', remark: 'tokyo'}]}},
+        {id: 'c', name: '旧版', adopted: true, status: 'online', maintenance: false, deleted: null, snapshot: {instances: []}}];
+    vm.runInContext('nodes = this.nodes;', context);
+    const frows = context.forwardRows();
+    assert.strictEqual(frows.length, 3);
+    const fmatch = f => frows.filter(r => context.forwardMatches(r, {node: '', backend: '', q: '', ...f})).map(r => r.r.id);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(fmatch({backend: 'nftables'}))), ['nft-30000']);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(fmatch({node: 'b'}))), ['0123456789ab']);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(fmatch({q: '1.2.3.4'}))), ['nft-30000']);
+    const ftable = context.forwardTable(frows);
+    assert(ftable.includes('&lt;b&gt;web&lt;/b&gt;') && !ftable.includes('<b>web') && ftable.includes('1.0 GiB') && ftable.includes('已停用') && ftable.includes('example.com:80'));
+    assert(ftable.includes('data-action="fw-toggle" data-node="a" data-id="nft-30000">启用') && ftable.includes('data-action="fw-edit" data-node="b" data-id="0123456789ab" disabled'));
+    for (const id of ['forward-node', 'forward-backend', 'forward-search', 'forward-results', 'forward-count'])
+        element(id, {addEventListener(type, fn) { this.listener = fn; }});
+    context.forwardsPage();
+    assert.strictEqual(html.section, 'forwards');
+    assert(html.shell.includes('端口转发') && html.shell.includes('全部类型') && html.shell.includes('data-action="fw-add"') && html.shell.includes('1 台服务器的节点程序版本较旧'));
+    assert.strictEqual(elements['forward-count'].textContent, '3');
+    elements['forward-backend'].onchange({target: {value: 'realm'}});
+    assert.strictEqual(elements['forward-count'].textContent, '2 / 3');
+    elements['forward-search'].listener({target: {value: 'zzz'}});
+    assert(elements['forward-results'].innerHTML.includes('没有符合条件的转发规则'));
+    // 弹窗：nftables 固定 TCP+UDP 与监听地址；新建自动生成端口；提交载荷
+    for (const id of ['fw-form', 'fw-node', 'fw-backend', 'fw-remark', 'fw-transport', 'fw-listen-host', 'fw-listen-host-field', 'fw-listen-port', 'fw-generate-port', 'fw-remote-host', 'fw-remote-label', 'fw-remote-port', 'fw-enabled', 'fw-help'])
+        element(id, {addEventListener(type, fn) { this.events = {...(this.events || {}), [type]: fn}; }});
+    context.crypto = {getRandomValues(a) { a[0] = 5; return a; }};
+    vm.runInContext('crypto = this.crypto; installPortCandidate = (used, current) => 20005;', context);
+    elements['fw-node'].value = 'a'; elements['fw-backend'].value = 'realm';
+    context.forwardDialog('', null);
+    assert(html.title === '新建转发' && html.modal.includes('id="fw-node"') && !html.modal.includes('旧版') && !html.modal.includes('东京'));
+    assert.strictEqual(elements['fw-listen-port'].value, 20005);
+    elements['fw-backend'].value = 'nftables'; elements['fw-backend'].events.change();
+    assert(elements['fw-transport'].disabled && elements['fw-transport'].value === 'tcp+udp' && elements['fw-listen-host-field'].hidden && elements['fw-remote-label'].textContent === '目标 IPv4');
+    Object.assign(elements['fw-remark'], {value: ' game '}); elements['fw-remote-host'].value = '5.6.7.8'; elements['fw-remote-port'].value = '443'; elements['fw-enabled'].checked = true;
+    posts.length = 0;
+    context.post = async (path, data) => { posts.push([path, data]); return {id: 'task-1'}; };
+    vm.runInContext('refresh = async () => {}; showTask = () => {};', context);
+    await elements['fw-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), ['/nodes/a/forwards', {op: 'add', rule: {backend: 'nftables', remark: 'game', transport: 'tcp+udp', listen_host: '0.0.0.0', listen_port: 20005, remote_host: '5.6.7.8', remote_port: 443, enabled: true}}]);
+    await context.forwardAction('fw-edit', {dataset: {node: 'a', id: 'abcdef012345'}});
+    assert(html.title === '修改转发 · 香港' && !html.modal.includes('id="fw-node"') && html.modal.includes('value="&lt;b&gt;web&lt;/b&gt;"'));
+    await context.forwardAction('fw-toggle', {dataset: {node: 'a', id: 'nft-30000'}, disabled: false});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.at(-1))), ['/nodes/a/forwards', {op: 'enable', id: 'nft-30000'}]);
+    await context.forwardAction('fw-delete', {dataset: {node: 'a', id: 'abcdef012345'}});
+    assert(html.modal.includes('监听 20000') && html.modal.includes('example.com:80'));
+    await elements['pu-choice-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.at(-1))), ['/nodes/a/forwards', {op: 'delete', id: 'abcdef012345'}]);
+    await assert.rejects(context.forwardAction('fw-edit', {dataset: {node: 'a', id: 'missing'}}), /不存在/);
+    console.log('PASS port forwarding page: rows, filters, writable servers, dialog fields, add/toggle/delete payloads');
 })().catch(error => { console.error(error); process.exit(1); });
