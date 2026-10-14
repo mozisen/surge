@@ -15,12 +15,22 @@ from . import platform_users
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS relay_lines(
- id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES platform_users(id) ON DELETE CASCADE,
+ id TEXT PRIMARY KEY, user_id TEXT REFERENCES platform_users(id) ON DELETE CASCADE,
  landing_node_id TEXT NOT NULL, landing_core TEXT NOT NULL, landing_protocol TEXT NOT NULL, landing_port INTEGER NOT NULL,
  landing_host TEXT NOT NULL, hops TEXT NOT NULL, removing INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, updated REAL NOT NULL);
 '''
 
 MAX_HOPS = 5
+PORT_ONLY_KEYS = {"node_id", "port", "host", "transport"}
+
+
+def migrate(db):
+    """0.3.0-preview.25 created user_id NOT NULL; port-only lines may have no user."""
+    if any(row[1] == "user_id" and row[3] for row in db.execute("PRAGMA table_info(relay_lines)")):
+        db.execute("ALTER TABLE relay_lines RENAME TO relay_lines_old")
+        db.executescript(SCHEMA)
+        db.execute("INSERT INTO relay_lines SELECT * FROM relay_lines_old")
+        db.execute("DROP TABLE relay_lines_old")
 UDP_PROTOCOLS = {"hy2", "tuic"}
 BOTH_PROTOCOLS = {"ss2022", "ss-legacy", "snell", "snell-v5", "snell-v6", "snell-shadowtls", "snell-v5-shadowtls", "ss2022-shadowtls"}
 STATE_TEXT = {"creating": "创建中", "active": "正常", "partial": "部分失败", "removing": "删除中"}
@@ -82,22 +92,33 @@ def create(db, data, now=None):
     now = time.time() if now is None else now
     if not isinstance(data, dict) or set(data) != {"user_id", "hops", "landing"}:
         raise ValueError("中转线路参数无效")
-    user = db.execute("SELECT * FROM platform_users WHERE id=? AND deleting IS NULL", (data["user_id"],)).fetchone() \
-        if isinstance(data["user_id"], str) else None
-    if not user:
-        raise ValueError("用户不存在")
     hops, landing = data["hops"], data["landing"]
     if not isinstance(hops, list) or not 1 <= len(hops) <= MAX_HOPS:
         raise ValueError("中转服务器为 1–%d 层" % MAX_HOPS)
-    if not isinstance(landing, dict) or set(landing) != {"node_id", "core", "protocol", "port", "host"}:
+    # Port-only (exit machine): no protocol, just forward to host:port; the user is optional and never linked.
+    port_only = isinstance(landing, dict) and set(landing) == PORT_ONLY_KEYS
+    if not isinstance(landing, dict) or not port_only and set(landing) != {"node_id", "core", "protocol", "port", "host"}:
         raise ValueError("落地参数无效")
+    user = None
+    if data["user_id"] is not None or not port_only:
+        user = db.execute("SELECT * FROM platform_users WHERE id=? AND deleting IS NULL", (data["user_id"],)).fetchone() \
+            if isinstance(data["user_id"], str) else None
+        if not user:
+            raise ValueError("请选择用户" if data["user_id"] is None else "用户不存在")
     landing_node = db.execute("SELECT * FROM nodes WHERE id=? AND deleted IS NULL AND revoked=0 AND adopted=1", (landing.get("node_id"),)).fetchone()
     if not landing_node:
         raise ValueError("落地服务器不存在或尚未接管")
-    target = {k: landing[k] for k in ("core", "protocol", "port")}
-    if not any((i.get("core"), i.get("protocol"), i.get("port")) == (target["core"], target["protocol"], target["port"])
-               for i in json.loads(landing_node["snapshot"]).get("instances", [])):
-        raise ValueError("落地协议不存在，请刷新后重试")
+    if type(landing.get("port")) is not int or not 1 <= landing["port"] <= 65535:
+        raise ValueError("落地端口必须是 1–65535 的整数")
+    if port_only:
+        if landing["transport"] not in ("tcp", "udp", "tcp+udp"):
+            raise ValueError("转发协议无效")
+        target = {"core": "", "protocol": "", "port": landing["port"]}
+    else:
+        target = {k: landing[k] for k in ("core", "protocol", "port")}
+        if not any((i.get("core"), i.get("protocol"), i.get("port")) == (target["core"], target["protocol"], target["port"])
+                   for i in json.loads(landing_node["snapshot"]).get("instances", [])):
+            raise ValueError("落地协议不存在，请刷新后重试")
     host = landing["host"]
     if not isinstance(host, str) or not 1 <= len(host) <= 253 or not (_is_ip(host) or re.fullmatch(DNS_NAME, host)):
         raise ValueError("落地地址必须是 IP 地址或域名")
@@ -117,10 +138,10 @@ def create(db, data, now=None):
     if len(set(ids)) != len(ids):
         raise ValueError("同一条线路中服务器不能重复，中转服务器也不能是落地服务器")
     line_id = str(uuid.uuid4())
-    remark = ("中转：%s → %s" % (user["name"], landing_node["name"]))[:64].replace('"', "")
+    remark = ("中转：%s → %s" % (user["name"] if user else "端口", landing_node["name"]))[:64].replace('"', "")
     planned = []
     for index, (hop, node) in enumerate(zip(hops, nodes)):
-        transport = "tcp+udp" if hop["backend"] == "nftables" else transport_for(target["protocol"])
+        transport = "tcp+udp" if hop["backend"] == "nftables" else landing["transport"] if port_only else transport_for(target["protocol"])
         if index + 1 < len(hops):
             next_node = nodes[index + 1]
             target_host = _address(next_node, ipv4_only=hop["backend"] == "nftables")
@@ -141,8 +162,11 @@ def create(db, data, now=None):
                                       "listen_port": hop["listen_port"], "remote_host": target_host, "remote_port": target_port, "enabled": True})
         planned.append({"node_id": node["id"], "rule": rule})
     # The user gets the landing protocol if not yet a member (platform-managed landing node only).
-    link = db.execute("SELECT * FROM platform_links WHERE user_id=? AND node_id=? AND removing IS NULL", (user["id"], landing_node["id"])).fetchone()
-    if link is None:
+    link = None if port_only else db.execute("SELECT * FROM platform_links WHERE user_id=? AND node_id=? AND removing IS NULL",
+                                             (user["id"], landing_node["id"])).fetchone()
+    if port_only:
+        pass
+    elif link is None:
         platform_users.add_link(db, user["id"], landing_node["id"], [target], now)
     elif not _is_member(db, link, target):
         platform_users.member_op(db, link, {"action": "add", "target": target})
@@ -151,7 +175,7 @@ def create(db, data, now=None):
         task_id = _queue_forward(db, item["node_id"], {"op": "add", "rule": item["rule"]}, "relay:%s:%d:add:%s" % (line_id, index, uuid.uuid4().hex[:8]), now)
         stored.append({**item, "forward_id": None, "task_id": task_id, "status": "pending"})
     db.execute("INSERT INTO relay_lines VALUES(?,?,?,?,?,?,?,?,0,?,?)",
-               (line_id, user["id"], landing_node["id"], target["core"], target["protocol"], target["port"], host, json.dumps(stored), now, now))
+               (line_id, user["id"] if user else None, landing_node["id"], target["core"], target["protocol"], target["port"], host, json.dumps(stored), now, now))
     return line_id
 
 
@@ -271,6 +295,8 @@ def share(db, line_id, now=None):
     if not line:
         raise ValueError("中转线路不存在")
     hops = json.loads(line["hops"])
+    if not line["landing_protocol"]:
+        raise ValueError("仅转发端口的线路没有落地协议，无法导出连接信息")
     if line["removing"] or any(h["status"] != "active" for h in hops):
         raise ValueError("线路尚未全部就绪，暂时无法导出连接")
     user = db.execute("SELECT name FROM platform_users WHERE id=?", (line["user_id"],)).fetchone()
@@ -294,8 +320,8 @@ def describe(db, line, nodes):
     statuses = {h["status"] for h in hops}
     state = "removing" if line["removing"] else "creating" if "pending" in statuses else "partial" if statuses & {"failed", "remove_failed"} else "active"
     entry_node = nodes.get(hops[0]["node_id"]) if hops else None
-    user = db.execute("SELECT name FROM platform_users WHERE id=?", (line["user_id"],)).fetchone()
-    return {"id": line["id"], "user_id": line["user_id"], "user_name": user["name"] if user else "已删除的用户", "state": state,
+    user = db.execute("SELECT name FROM platform_users WHERE id=?", (line["user_id"],)).fetchone() if line["user_id"] else None
+    return {"id": line["id"], "user_id": line["user_id"], "user_name": user["name"] if user else "", "state": state, "port_only": not line["landing_protocol"],
             "landing": {"node_id": line["landing_node_id"], "node_name": nodes[line["landing_node_id"]]["name"] if line["landing_node_id"] in nodes else "已删除的服务器",
                         "core": line["landing_core"], "protocol": line["landing_protocol"], "port": line["landing_port"], "host": line["landing_host"]},
             "entry": {"host": _address(entry_node) if entry_node else "", "port": hops[0]["rule"]["listen_port"] if hops else None},

@@ -33,7 +33,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -402,5 +402,20 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     await context.relayAction('rl-share', {dataset: {id: 'l1'}});
     assert.strictEqual(posts.at(-1)[0], '/relays/l1/share');
     await assert.rejects(context.relayAction('rl-share', {dataset: {id: 'missing'}}), /不存在/);
+    const portLine = {...lineA, id: 'l3', user_id: null, user_name: '', port_only: true, landing: {...lineA.landing, protocol: '', core: ''}};
+    const ptable = context.relayTable([portLine]);
+    assert(ptable.includes('仅转发端口') && ptable.includes('<span class="muted">—</span>') && !ptable.includes('rl-share'));
+    // 落地选项：已关联、将关联、被占用的一用户一实例与不支持用户不可选、无用户时协议不可选；最后是仅转发端口
+    const landNode = {id: 'c', snapshot: {instances: [
+        {core: 'singbox', protocol: 'hy2', port: 8443, user_mode: 'multi', user_available: true, users: [{}]},
+        {core: 'xray', protocol: 'vless', port: 443, user_mode: 'multi', user_available: true, users: []},
+        {core: 'xray', protocol: 'snell-v6', port: 38915, user_mode: 'single', user_available: true, users: [{name: 'other'}]},
+        {core: 'xray', protocol: 'naive', port: 4443, user_mode: 'none', user_available: false, users: []}]}};
+    const owner = {id: 'u1', links: [{node_id: 'c', members: [{core: 'singbox', protocol: 'hy2', port: 8443}]}]};
+    const opts = context.relayLandingOptions(landNode, owner).map(o => [o.label, o.disabled]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(opts)), [['Hysteria2 · 8443（已关联）', false], ['VLESS Reality · 443（将为该用户关联）', false],
+        ['snell-v6 · 38915（已被其他用户使用）', true], ['naive · 4443（不支持用户）', true], ['仅转发端口（出口机）', false]]);
+    const noUser = context.relayLandingOptions(landNode, null);
+    assert(noUser.slice(0, 2).every(o => o.disabled && o.label.includes('需选择用户')) && !noUser.at(-1).disabled);
     console.log('PASS relay page: server filter, chain, actions, retry/delete/share payloads');
 })().catch(error => { console.error(error); process.exit(1); });

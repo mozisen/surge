@@ -34,8 +34,9 @@ class Store:
             db.executescript(PLATFORM_SCHEMA)
             from .platform_users import INSTALL_PLAN_SCHEMA
             db.execute(INSTALL_PLAN_SCHEMA)
-            from .relays import SCHEMA as RELAY_SCHEMA
+            from .relays import SCHEMA as RELAY_SCHEMA, migrate as relay_migrate
             db.executescript(RELAY_SCHEMA)
+            relay_migrate(db)
             db.execute("BEGIN IMMEDIATE")
             # 2: platform users. Older databases (and restored v1 backups) gain the tables above.
             if db.execute("PRAGMA user_version").fetchone()[0] > 2:

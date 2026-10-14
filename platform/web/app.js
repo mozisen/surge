@@ -1247,7 +1247,7 @@ function relayTable(lines) {
     if (!lines.length) return '<div class="empty"><p>没有符合条件的中转线路。</p></div>';
     return `<div class="table-wrap"><table><thead><tr><th>用户</th><th>线路</th><th>入口</th><th>落地协议</th><th>状态</th><th>操作</th></tr></thead><tbody>${lines.map(line => {
         const data = `data-id="${esc(line.id)}"`;
-        return `<tr><td><a href="#users/${esc(line.user_id)}">${esc(line.user_name)}</a></td><td class="relay-chain">${relayChain(line)}</td><td class="mono">${esc(line.entry.host || '—')}:${line.entry.port}</td><td>${esc(names[line.landing.protocol] || line.landing.protocol)}<br><span class="muted mono">${esc(line.landing.host)}:${line.landing.port}</span></td><td><span class="badge ${line.state === 'active' ? 'running' : 'stopped'}">${esc(relayStates[line.state] || line.state)}</span></td><td><div class="action-row">${line.state === 'active' ? `<button class="small" data-action="rl-share" ${data}>连接信息</button>` : ''}${line.state === 'partial' ? `<button class="small" data-action="rl-retry" ${data}>重试</button>` : ''}<button class="small" data-action="rl-delete" ${data}${['creating', 'removing'].includes(line.state) ? ' disabled' : ''}>删除</button></div></td></tr>`;
+        return `<tr><td>${line.user_id ? `<a href="#users/${esc(line.user_id)}">${esc(line.user_name)}</a>` : '<span class="muted">—</span>'}</td><td class="relay-chain">${relayChain(line)}</td><td class="mono">${esc(line.entry.host || '—')}:${line.entry.port}</td><td>${line.port_only ? '仅转发端口' : esc(names[line.landing.protocol] || line.landing.protocol)}<br><span class="muted mono">${esc(line.landing.host)}:${line.landing.port}</span></td><td><span class="badge ${line.state === 'active' ? 'running' : 'stopped'}">${esc(relayStates[line.state] || line.state)}</span></td><td><div class="action-row">${line.state === 'active' && !line.port_only ? `<button class="small" data-action="rl-share" ${data}>连接信息</button>` : ''}${line.state === 'partial' ? `<button class="small" data-action="rl-retry" ${data}>重试</button>` : ''}<button class="small" data-action="rl-delete" ${data}${['creating', 'removing'].includes(line.state) ? ' disabled' : ''}>删除</button></div></td></tr>`;
     }).join('')}</tbody></table></div>`;
 }
 async function relaysPage() {
@@ -1271,46 +1271,76 @@ async function relaysPage() {
 function relayMembers(user, nodeId) {
     return (user?.links || []).filter(l => l.node_id === nodeId).flatMap(l => l.members || []);
 }
+// 落地协议选项：已关联 / 将关联；不支持用户或被其他用户占用的一用户一实例不可选；最后是「仅转发端口」
+function relayLandingOptions(node, user) {
+    const members = relayMembers(user, node?.id);
+    const items = (node?.snapshot.instances || []).map(i => {
+        const member = members.some(m => m.protocol === i.protocol && m.port === i.port && m.core === i.core);
+        const occupied = !member && i.user_mode === 'single' && (i.users || []).length > 0;
+        const note = member ? '已关联' : i.user_available === false ? '不支持用户' : occupied ? '已被其他用户使用' : user ? '将为该用户关联' : '需选择用户';
+        return {value: `${i.core}:${i.protocol}:${i.port}`, label: `${names[i.protocol] || i.protocol} · ${i.port}（${note}）`,
+                disabled: i.user_available === false || occupied || !user, port: i.port};
+    });
+    return [...items, {value: 'port-only', label: '仅转发端口（出口机）', disabled: false, port: null}];
+}
 async function relayDialog() {
     const users = (await api('/users')).users.filter(u => !u.deleting);
     const relayServers = nodes.filter(n => !n.deleted && forwardWritable(n));
-    const landingServers = nodes.filter(n => !n.deleted && n.adopted && (n.snapshot.instances || []).length);
-    if (!users.length) return modal('暂无平台用户', '<p>中转线路属于某个平台用户，请先在「用户管理」中创建用户。</p>');
-    if (!relayServers.length || !landingServers.length) return modal('暂无可用服务器', '<p>需要至少一台支持端口转发的在线服务器作为中转（节点程序需升级到最新版），以及一台已安装协议的服务器作为落地。</p>');
-    const hops = [{node_id: relayServers[0].id, backend: 'realm', listen_port: ''}];
+    const landingServers = nodes.filter(n => !n.deleted && n.adopted);
+    if (!relayServers.length || !landingServers.length) return modal('暂无可用服务器', '<p>需要至少一台支持端口转发的在线服务器作为中转（节点程序需升级到最新版），以及一台已接管的服务器作为落地。</p>');
     const option = (v, label, current, disabled) => `<option value="${esc(v)}"${v === current ? ' selected' : ''}${disabled ? ' disabled' : ''}>${esc(label)}</option>`;
-    modal('添加中转线路', `<form id="relay-form"><div class="install-top"><div class="inline-field"><label for="relay-user">用户</label><select id="relay-user">${users.map(u => option(u.id, u.name, users[0].id)).join('')}</select></div></div>
+    // 默认取两台不同的服务器：中转优先选不是落地候选第一位的那台
+    const firstRelay = relayServers.find(n => landingServers.some(l => l.id !== n.id)) || relayServers[0];
+    const hops = [{node_id: firstRelay.id, backend: 'realm', listen_port: ''}];
+    const firstLanding = landingServers.find(x => x.id !== firstRelay.id);
+    if (!firstLanding) return modal('暂无可用服务器', '<p>中转服务器和落地服务器不能是同一台，至少需要两台服务器。</p>');
+    modal('添加中转线路', `<form id="relay-form"><div class="install-top"><div class="inline-field"><label for="relay-user">用户</label><select id="relay-user">${users.map(u => option(u.id, u.name, users[0]?.id)).join('')}${option('', '不指定用户', users.length ? null : '')}</select></div></div>
 <div class="relay-flow"><section class="relay-box"><h3>中转服务器</h3><div id="relay-hops"></div><button type="button" class="small" id="relay-add-hop">${icon('plus')}添加一层中转</button></section>
 <div class="relay-arrow" aria-hidden="true">${icon('arrow')}</div>
-<section class="relay-box"><h3>落地服务器</h3><label for="relay-landing-node">服务器</label><select id="relay-landing-node">${landingServers.map(n => option(n.id, n.name, landingServers.find(x => !hops.some(h => h.node_id === x.id))?.id || landingServers[0].id)).join('')}</select><label for="relay-landing-protocol">协议</label><select id="relay-landing-protocol"></select><label for="relay-landing-host">落地地址</label><input id="relay-landing-host" maxlength="253" required placeholder="IP 或域名"><p class="helper" id="relay-landing-help"></p></section></div>
+<section class="relay-box"><h3>落地服务器</h3><label for="relay-landing-node">服务器</label><select id="relay-landing-node">${landingServers.map(n => option(n.id, n.name, firstLanding.id)).join('')}</select><label for="relay-landing-protocol">协议</label><select id="relay-landing-protocol"></select><div id="relay-port-only-fields" hidden><div class="relay-hop-row"><div><label for="relay-landing-port">落地端口</label><input id="relay-landing-port" type="number" min="1" max="65535"></div><div><label for="relay-landing-transport">转发协议</label><select id="relay-landing-transport">${option('tcp+udp', 'TCP + UDP', 'tcp+udp')}${option('tcp', 'TCP', '')}${option('udp', 'UDP', '')}</select></div></div></div><label for="relay-landing-host">落地地址</label><input id="relay-landing-host" maxlength="253" required placeholder="IP 或域名"><p class="helper" id="relay-landing-help"></p></section></div>
 <div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">创建线路</button></div></form>`, true);
-    const user = () => users.find(u => u.id === $('#relay-user').value);
+    const user = () => users.find(u => u.id === $('#relay-user').value) || null;
     const nodeById = id => nodes.find(n => n.id === id);
-    const used = node => [...(node?.snapshot.instances || []), ...(node?.snapshot.forwards || []).map(x => ({port: x.listen_port}))];
+    const portOnly = () => $('#relay-landing-protocol').value === 'port-only';
+    // 入口端口默认等于落地协议（或仅转发时的落地端口）的端口，仍可手动修改。
+    const landingPort = () => portOnly() ? Number($('#relay-landing-port').value) || '' : Number(($('#relay-landing-protocol').value || '').split(':')[2]) || '';
     const renderHops = () => {
-        $('#relay-hops').innerHTML = hops.map((h, i) => `<div class="relay-hop"><div class="relay-hop-head"><span>第 ${i + 1} 层</span>${hops.length > 1 ? `<button type="button" class="quiet small" data-hop-remove="${i}" aria-label="删除第 ${i + 1} 层">删除</button>` : ''}</div><label for="relay-hop-node-${i}">服务器</label><select id="relay-hop-node-${i}" data-hop="${i}" data-field="node_id">${relayServers.map(n => option(n.id, n.name, h.node_id)).join('')}</select><div class="relay-hop-row"><div><label for="relay-hop-backend-${i}">转发方式</label><select id="relay-hop-backend-${i}" data-hop="${i}" data-field="backend">${option('realm', 'Realm', h.backend)}${option('nftables', 'nftables', h.backend)}</select></div><div><label for="relay-hop-port-${i}">入口端口</label><input id="relay-hop-port-${i}" data-hop="${i}" data-field="listen_port" type="number" min="1" max="65535" value="${esc(h.listen_port)}" required></div></div></div>`).join('<div class="relay-hop-arrow" aria-hidden="true">↓</div>');
+        $('#relay-hops').innerHTML = hops.map((h, i) => `<div class="relay-hop"><div class="relay-hop-head"><span>第 ${i + 1} 层</span>${hops.length > 1 ? `<button type="button" class="quiet small" data-hop-remove="${i}" aria-label="删除第 ${i + 1} 层">删除</button>` : ''}</div><label for="relay-hop-node-${i}">服务器</label><select id="relay-hop-node-${i}" data-hop="${i}" data-field="node_id">${relayServers.map(n => option(n.id, relayServerLabel(n, i), h.node_id, relayTaken(n.id, i))).join('')}</select><div class="relay-hop-row"><div><label for="relay-hop-backend-${i}">转发方式</label><select id="relay-hop-backend-${i}" data-hop="${i}" data-field="backend">${option('realm', 'Realm', h.backend)}${option('nftables', 'nftables', h.backend)}</select></div><div><label for="relay-hop-port-${i}">入口端口</label><input id="relay-hop-port-${i}" data-hop="${i}" data-field="listen_port" type="number" min="1" max="65535" value="${esc(h.listen_port)}" required></div></div></div>`).join('<div class="relay-hop-arrow" aria-hidden="true">↓</div>');
         document.querySelectorAll('#relay-hops select').forEach(enhanceSelect);
-        $('#relay-add-hop').disabled = hops.length >= Math.min(5, relayServers.length);
+        $('#relay-add-hop').disabled = hops.length >= 5 || !relayServers.some(n => !relayTaken(n.id, -1));
+        // 落地服务器不能与任何一层中转相同
+        [...$('#relay-landing-node').options].forEach(o => { o.disabled = hops.some(h => h.node_id === o.value); });
     };
-    const fillPort = i => { try { hops[i].listen_port = installPortCandidate(used(nodeById(hops[i].node_id)), hops[i].listen_port); } catch (err) { hops[i].listen_port = ''; } };
+    // 同一条线路里服务器不能重复：其他层或落地已用的服务器不可选
+    function relayTaken(id, index) {
+        return id === $('#relay-landing-node').value || hops.some((h, j) => j !== index && h.node_id === id);
+    }
+    function relayServerLabel(n, index) {
+        return n.name + (n.id === $('#relay-landing-node').value ? '（已是落地）' : hops.some((h, j) => j !== index && h.node_id === n.id) ? '（已在其他层）' : '');
+    }
+    const followPort = () => { hops.forEach(h => { h.listen_port = landingPort(); }); renderHops(); };
+    const renderProtocol = () => {
+        const only = portOnly();
+        $('#relay-port-only-fields').hidden = !only;
+        $('#relay-landing-port').required = only;
+        followPort();
+    };
     const renderLanding = () => {
-        const node = nodeById($('#relay-landing-node').value), members = relayMembers(user(), node?.id);
-        const instances = node?.snapshot.instances || [];
-        $('#relay-landing-protocol').innerHTML = instances.map(i => {
-            const member = members.some(m => m.protocol === i.protocol && m.port === i.port && m.core === i.core);
-            return option(`${i.core}:${i.protocol}:${i.port}`, `${names[i.protocol] || i.protocol} · ${i.port}${member ? '（已关联）' : i.user_available === false ? '（不支持用户）' : '（将为该用户关联）'}`, '', i.user_available === false);
-        }).join('');
+        const node = nodeById($('#relay-landing-node').value), previous = $('#relay-landing-protocol').value;
+        const items = relayLandingOptions(node, user());
+        const keep = items.find(o => o.value === previous && !o.disabled) || items.find(o => !o.disabled);
+        $('#relay-landing-protocol').innerHTML = items.map(o => option(o.value, o.label, keep.value, o.disabled)).join('');
+        $('#relay-landing-protocol').value = keep.value;
         $('#relay-landing-host').value = node?.snapshot.addresses?.ipv4 || node?.snapshot.addresses?.ipv6 || '';
         $('#relay-landing-help').textContent = $('#relay-landing-host').value ? '默认为该服务器上报的公网 IP，可改为内网地址或域名。' : '该服务器未上报公网 IP（节点程序需升级），请手动填写。';
+        renderProtocol();
     };
-    hops.forEach((h, i) => fillPort(i));
-    renderHops();
     renderLanding();
     $('#relay-hops').addEventListener('change', e => {
         const i = Number(e.target.dataset.hop), field = e.target.dataset.field;
         if (!field) return;
         hops[i][field] = field === 'listen_port' ? Number(e.target.value) : e.target.value;
-        if (field === 'node_id') { fillPort(i); renderHops(); }
+        if (field === 'node_id') renderHops();
     });
     $('#relay-hops').addEventListener('click', e => {
         const i = e.target.closest('[data-hop-remove]')?.dataset.hopRemove;
@@ -1319,22 +1349,30 @@ async function relayDialog() {
         renderHops();
     });
     $('#relay-add-hop').onclick = () => {
-        const free = relayServers.find(n => !hops.some(h => h.node_id === n.id) && n.id !== $('#relay-landing-node').value) || relayServers[0];
-        hops.push({node_id: free.id, backend: 'realm', listen_port: ''});
-        fillPort(hops.length - 1);
+        const free = relayServers.find(n => !relayTaken(n.id, -1));
+        if (!free) return;
+        hops.push({node_id: free.id, backend: 'realm', listen_port: landingPort()});
         renderHops();
     };
     $('#relay-landing-node').addEventListener('change', renderLanding);
     $('#relay-user').addEventListener('change', renderLanding);
+    $('#relay-landing-protocol').addEventListener('change', renderProtocol);
+    $('#relay-landing-port').addEventListener('input', followPort);
     $('#relay-form').onsubmit = async e => {
         e.preventDefault();
         const button = $('[type=submit]', e.target);
         button.disabled = true;
-        const [core, protocol, port] = ($('#relay-landing-protocol').value || '::').split(':');
+        const host = $('#relay-landing-host').value.trim(), nodeId = $('#relay-landing-node').value;
         try {
-            if (!protocol) throw new Error('请选择落地协议');
-            await post('/relays', {user_id: $('#relay-user').value, hops: hops.map(h => ({node_id: h.node_id, backend: h.backend, listen_port: Number(h.listen_port)})),
-                landing: {node_id: $('#relay-landing-node').value, core, protocol, port: Number(port), host: $('#relay-landing-host').value.trim()}});
+            let landing;
+            if (portOnly()) landing = {node_id: nodeId, port: Number($('#relay-landing-port').value), host, transport: $('#relay-landing-transport').value};
+            else {
+                const [core, protocol, port] = ($('#relay-landing-protocol').value || '::').split(':');
+                if (!protocol) throw new Error('请选择落地协议');
+                if (!user()) throw new Error('落地协议需要选择用户；只转发端口请选择「仅转发端口」');
+                landing = {node_id: nodeId, core, protocol, port: Number(port), host};
+            }
+            await post('/relays', {user_id: user()?.id || null, hops: hops.map(h => ({node_id: h.node_id, backend: h.backend, listen_port: Number(h.listen_port)})), landing});
             $('#modal').close();
             toast('线路已提交，正在各中转服务器建立转发');
             await relaysPage();

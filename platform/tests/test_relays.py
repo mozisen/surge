@@ -117,7 +117,10 @@ class Relays(unittest.TestCase):
             (self.body([{**hop, "backend": "nftables"}], land, host="land.example.com"), "IPv4"),
             (self.body([hop, {"node_id": quiet.id, "backend": "realm", "listen_port": 30002}], land), None),  # quiet is the 2nd hop: fine
             (self.body([{"node_id": quiet.id, "backend": "realm", "listen_port": 30002}, hop], land), "公网 IP"),
-            ({"user_id": "nobody", "hops": [hop], "landing": {}}, "用户不存在"),
+            ({**self.body([hop], land), "user_id": "nobody"}, "用户不存在"),
+            ({**self.body([hop], land), "user_id": None}, "请选择用户"),                       # a protocol landing needs a user
+            ({"user_id": None, "hops": [hop], "landing": {"node_id": land.id, "port": 70000, "host": "8.8.4.9", "transport": "tcp"}}, "落地端口"),
+            ({"user_id": None, "hops": [hop], "landing": {"node_id": land.id, "port": 9000, "host": "8.8.4.9", "transport": "sctp"}}, "转发协议"),
             (self.body([], land), "1–5"),
         ]
         for data, message in cases:
@@ -154,6 +157,33 @@ class Relays(unittest.TestCase):
         task = a.poll(run=False)
         self.client.post('/api/agent/%s/tasks/%s/result' % (a.id, task['id']), json={"status": "failed", "message": "转发规则在节点上已不存在，请刷新后重试", "result": {}}, headers=a.auth)
         self.assertEqual(self.lines(), [])
+
+    def test_port_only_line(self):
+        a, land = RelayNode(self, 'A', '9.9.9.1'), RelayNode(self, 'L', '8.8.4.9')
+        a.poll(run=False); land.poll(run=False)
+        body = {"user_id": None, "hops": [{"node_id": a.id, "backend": "realm", "listen_port": 9000}],
+                "landing": {"node_id": land.id, "port": 9000, "host": "8.8.4.9", "transport": "tcp"}}
+        line_id = self.post('/relays', body, 201)['id']
+        task = a.poll()
+        rule = task['params']['ops'][0]['rule']
+        self.assertEqual((rule['remote_host'], rule['remote_port'], rule['transport'], rule['remark']), ('8.8.4.9', 9000, 'tcp', '中转：端口 → L'))
+        line = self.lines()[0]
+        self.assertEqual((line['state'], line['port_only'], line['user_name'], line['landing']['protocol']), ('active', True, '', ''))
+        self.assertIsNone(land.poll(run=False))                                             # no user link, nothing on the landing node
+        self.assertIn('无法导出', self.post('/relays/%s/share' % line_id, {}, 400)['error'])
+        # With a user it is only ownership: still no link on the landing node.
+        body = {**body, "user_id": self.user, "hops": [{"node_id": a.id, "backend": "nftables", "listen_port": 9001}], "landing": {**body["landing"], "transport": "udp"}}
+        self.post('/relays', body, 201)
+        self.assertEqual(a.poll()['params']['ops'][0]['rule']['transport'], 'tcp+udp')     # nftables is always TCP+UDP
+        self.assertEqual(self.client.get('/api/users/' + self.user).json['user']['links'], [])
+        self.assertEqual(sorted(l['user_name'] for l in self.lines()), ['', 'alice'])
+
+    def test_migrates_not_null_user_column(self):
+        with self.store.connect() as db:
+            db.execute("DROP TABLE relay_lines")
+            db.execute(relays.SCHEMA.replace("user_id TEXT REFERENCES", "user_id TEXT NOT NULL REFERENCES"))
+            relays.migrate(db)
+            self.assertEqual([r[3] for r in db.execute("PRAGMA table_info(relay_lines)") if r[1] == "user_id"], [0])
 
     def test_transport_mapping(self):
         self.assertEqual([relays.transport_for(p) for p in ("hy2", "tuic", "ss2022", "snell-v5", "vless", "trojan")],
