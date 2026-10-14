@@ -1,2 +1,2 @@
 """Vaio Panel."""
-__version__ = "0.3.0-preview.22"
+__version__ = "0.3.0-preview.23"

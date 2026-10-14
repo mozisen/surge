@@ -22,6 +22,9 @@ class SimNode:
         # A script-mode node in these tests was adopted by an older panel/agent (no automatic switch), then upgraded.
         self.authority_version = 0 if authority == 'script' else version
         self.protocol_users = {('xray', 'vless', 443): {}, ('singbox', 'hy2', 8443): {}}
+        if authority == 'script':
+            # A script-managed node keeps script users; without any the panel switches it automatically.
+            self.protocol_users[('xray', 'vless', 443)]['old'] = {"used": 1}
         result = test.client.post('/api/nodes', json={"name": name}, headers=test.headers)
         self.id = result.json['node_id']
         script = result.json['script']
@@ -203,6 +206,30 @@ class PlatformUsersPanel(unittest.TestCase):
         a.protocol_users[('xray', 'vless', 443)]['alice']['used'] = 10
         a.settle()
         self.assertEqual(self.user(user)["used"], 10)
+
+    def test_adopted_script_nodes_switch_automatically_when_empty(self):
+        node = SimNode(self, 'E', authority='script')        # adopted before switching existed; has a script user
+        self.assertIsNone(node.poll(run=False))              # users present: wait for the operator
+        node.protocol_users[('xray', 'vless', 443)].clear()
+        task = node.poll(run=False)
+        self.assertEqual(task['params']['ops'], [{"op": "set_authority", "mode": "platform"}])
+        self.client.post('/api/agent/%s/tasks/%s/result' % (node.id, task['id']), json={"status": "failed", "message": "boom", "result": {}}, headers=node.auth)
+        self.assertIsNone(node.poll(run=False))              # failed automatic switch: no tight retry loop
+        with self.store.connect() as db:
+            db.execute("UPDATE tasks SET created=created-3700 WHERE request_key LIKE 'auto-authority:%'")
+        node.settle()
+        self.assertEqual(node.authority, 'platform')
+        self.assertIsNone(node.poll(run=False))              # already platform: nothing more
+        with self.store.connect() as db:
+            audit = [r[0] for r in db.execute("SELECT detail FROM audit WHERE detail LIKE '%自动切到平台管理%'")]
+        self.assertEqual(len(audit), 2)
+        old = SimNode(self, 'O', authority='script')
+        old.protocol_users[('xray', 'vless', 443)].clear()
+        old.authority_version = 0
+        self.assertIsNone(old.poll(run=False))               # old agent cannot switch
+        with self.store.connect() as db:
+            db.execute("UPDATE nodes SET maintenance=1 WHERE id=?", (old.id,))
+            self.assertEqual(platform_users.auto_authority(db), [])
 
     def test_adopt_switches_to_platform(self):
         node = SimNode(self, 'A', authority='script', adopt=False)

@@ -33,7 +33,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -108,10 +108,17 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
 
     // 用户管理方式与一键升级
     const block = context.authorityBlock(node('d', {snapshot: {authority_version: 1, user_authority: 'script', instances: [], last_upgrade: {status: 'rolled_back', at: 1, to: '0.3.0-preview.12', message: '新版未按时上线'}}}));
-    assert(block.includes('以节点脚本为准') && block.includes('切换为平台管理') && block.includes('已回滚') && block.includes('新版未按时上线'));
-    assert(context.authorityBlock(node('c', {snapshot: {instances: []}})).includes('旧版节点'));
-    const managed = context.authorityBlock(node('e', {snapshot: {authority_version: 1, user_authority: 'platform', instances: []}}));
-    assert(managed.includes('以平台为准') && !managed.includes('data-action="authority"') && !managed.includes('切回脚本管理'), 'platform-managed servers have no switch button');
+    assert(block.includes('上次升级') && block.includes('已回滚') && block.includes('新版未按时上线'));
+    assert(!block.includes('用户管理') && !block.includes('管理方式') && !block.includes('data-action="authority"'), 'no user-management block on the detail page');
+    assert.strictEqual(context.authorityBlock(node('c', {snapshot: {instances: []}})), '');
+    // Notice: platform or old nodes show nothing; empty script nodes are switching; script users need confirmation.
+    assert.strictEqual(context.authorityNotice(node('e', {snapshot: {authority_version: 1, user_authority: 'platform', instances: [{users: [{}]}]}})), '');
+    assert.strictEqual(context.authorityNotice(node('c', {snapshot: {instances: [{users: [{}]}]}})), '');
+    assert.strictEqual(context.authorityNotice(node('f', {adopted: false, snapshot: {authority_version: 1, user_authority: 'script', instances: [{users: [{}]}]}})), '');
+    assert(context.authorityNotice(node('g', {snapshot: {authority_version: 1, user_authority: 'script', instances: []}})).includes('正在把该服务器切换为平台统一管理'));
+    const withUsers = context.authorityNotice(node('h', {snapshot: {authority_version: 1, user_authority: 'script', instances: [{users: [{}, {}]}]}}));
+    assert(withUsers.includes('仍有 2 个脚本用户') && withUsers.includes('data-action="authority" >清空并切到平台管理'));
+    assert(context.authorityNotice(node('i', {status: 'offline', snapshot: {authority_version: 1, user_authority: 'script', instances: [{users: [{}]}]}})).includes('disabled'));
     element('authority-form'); element('authority-confirm', {value: 'node-a'});
     context.authorityDialog(context.nodes[0]);
     assert(html.title === '切回脚本管理' && !html.modal.includes('authority-confirm'));

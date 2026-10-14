@@ -444,6 +444,36 @@ def schedule(db, now=None):
     return queued
 
 
+AUTO_AUTHORITY_RETRY = 3600
+
+
+def auto_authority(db, now=None):
+    """Adopted servers are platform-managed. Switch script-mode nodes that hold no script users;
+    nodes with users wait for the operator to confirm clearing them. A failed automatic switch
+    is retried after an hour, never in a tight loop."""
+    now = time.time() if now is None else now
+    queued = []
+    for node in db.execute("SELECT id, snapshot FROM nodes WHERE adopted=1 AND deleted IS NULL AND revoked=0 AND maintenance=0 AND last_seen>?",
+                           (now - ONLINE,)).fetchall():
+        snapshot = json.loads(node["snapshot"])
+        if snapshot.get("error") or snapshot.get("authority_version") != 1 or snapshot.get("accounts_version") != 1 \
+                or snapshot.get("user_authority") == "platform":
+            continue
+        if any(item.get("users") for item in snapshot.get("instances", [])):
+            continue
+        if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND (status IN ('queued','running','unknown') OR "
+                      "(request_key LIKE 'auto-authority:%' AND created>?))", (node["id"], now - AUTO_AUTHORITY_RETRY)).fetchone():
+            continue
+        task_id = str(uuid.uuid4())
+        request = validate_platform_task({"action": "platform_apply", "params": {"ops": [{"op": "set_authority", "mode": "platform"}]}})
+        db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
+                   (task_id, node["id"], "platform_apply", json.dumps(request), "queued", now, "auto-authority:" + task_id))
+        db.execute("INSERT INTO audit(at,event,node_id,detail) VALUES(?,?,?,?)",
+                   (now, "task.queued", node["id"], task_id + " platform_apply（已接管服务器自动切到平台管理）"))
+        queued.append(task_id)
+    return queued
+
+
 def task_finished(db, task, status, message, now=None):
     """Record a platform_apply outcome on the affected links."""
     now = time.time() if now is None else now

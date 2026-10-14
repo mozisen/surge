@@ -540,6 +540,7 @@ def create_app(config=None):
             db.execute("UPDATE tasks SET status='unknown',message='执行结果未确认；请核对节点后重新操作',finished=? WHERE node_id=? AND status='running' AND started<?",
                        (time.time(), node_id, time.time() - 2100))
             db.execute("UPDATE tasks SET result=NULL WHERE action='share' AND finished<?", (time.time() - 600,))
+            platform_users.auto_authority(db)
             platform_users.schedule(db)
             busy = db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status='running'", (node_id,)).fetchone()
             task = None

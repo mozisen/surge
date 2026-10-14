@@ -378,6 +378,7 @@ def scan(store, now=None):
                        chat, '⚠️ 账号即将到期\n用户：%s\n到期时间：%s' % (user['name'], user['expire_date']))
             failing = db.execute("SELECT 1 FROM platform_links WHERE user_id=? AND state IN ('failed','unknown')", (user['id'],)).fetchone()
             transition(db, 'puser-sync:' + user['id'], label + ' · 节点同步失败或结果未知', bool(failing), now, config)
+        platform_users.auto_authority(db, now)
         platform_users.schedule(db, now)
         for task in db.execute("SELECT tasks.*, nodes.name FROM tasks JOIN nodes ON nodes.id=tasks.node_id WHERE tasks.status IN ('failed','unknown') AND finished>?", (now - 3600,)).fetchall():
             transition(db, 'task:' + task['id'], task['name'] + ' · 任务失败或结果未知：' + {'install':'安装协议','update':'修改实例','delete':'删除实例','user_add':'新增用户','user_update':'修改用户','user_delete':'删除用户','start':'启动服务','stop':'停止服务','restart':'重启服务','share':'导出连接','inspect':'检查配置','platform_apply':'平台用户同步','agent_upgrade':'一键升级','forward_apply':'端口转发'}.get(task['action'], '节点操作') + '（' + task['id'][:8] + '）', True, now, config)

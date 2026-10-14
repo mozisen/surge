@@ -62,3 +62,8 @@ Questions to answer:
 - One contract in `vaio/common.py`: `validate_forward_rule` (same constraints as the script's `_fwd_validate`; nftables = TCP+UDP, listen 0.0.0.0, IPv4 target), `validate_forward_task` (exactly one op), `sanitize_forwards` (snapshot rows; malformed rows are dropped, at most 500).
 - The panel never trusts a client-supplied base: `POST /api/nodes/<id>/forwards` takes `{op, id?, rule?}` and builds `base` from the node's last snapshot inside `node_task` (request built after `check`). The script rejects with `rule_changed` when the node's rule differs, so script-menu or nft.sh edits are never overwritten.
 - Agent: `forward_apply` goes through `Bridge` like `platform_apply` (journal, unknown never replayed, result lookup) and calls `ScriptAPI.invalidate()` so the next snapshot carries the new rules; forwards come from the script inventory (cached 60 s), not from db.json.
+
+## User authority on adopted servers
+
+- Adopted servers are platform-managed. `platform_users.auto_authority()` (called from the agent poll and the monitor scan) queues `set_authority platform` for adopted, online, non-maintenance nodes that report `authority_version=1`, are still script-managed and hold no script users; request keys `auto-authority:*` mark these tasks, and a failed one is retried only after `AUTO_AUTHORITY_RETRY` (1 h). Nodes with script users wait for the operator (detail-page notice → `authorityDialog`, name confirmation).
+- The detail page has no user-management block; tests that need a script-managed node must give it a script user.
