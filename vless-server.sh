@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.9"
+readonly VERSION="3.7.4-preview.10"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -30987,6 +30987,11 @@ manage_accounts() {
 }
 
 # 切换用户管理方式（脚本 / 平台）
+# 本机已注册 Vaio 节点程序（被面板接管）
+_vaio_enrolled() {
+    [[ -f "${VAIO_AGENT_CONFIG:-/etc/vaio-agent/config.json}" ]]
+}
+
 _authority_menu() {
     local mode counts core proto port count total=0 confirm
     mode=$(db_authority_get)
@@ -31007,6 +31012,11 @@ _authority_menu() {
         read -rp "  输入 CLEAR 确认切换: " confirm
         [[ "$confirm" == CLEAR ]] || { _info "已取消"; return 0; }
         db_authority_set platform && _ok "已切换为以平台为准；请在面板「用户管理」中新建用户"
+    elif _vaio_enrolled; then
+        # 接管的服务器统一由平台管理用户：已注册 Vaio 节点程序时不在本机切回。
+        echo -e "  本节点已由 Vaio 面板接管，用户统一由平台管理，不能在本机切回「以脚本为准」。"
+        echo -e "  ${D}如需改回本机管理，请先在面板删除该服务器并卸载 Vaio 节点程序。${NC}"
+        return 0
     else
         echo -e "  切回「以脚本为准」后，平台停止管理本节点；现有用户和凭据保留，改由本机菜单管理。"
         read -rp "  确认切回? [y/N]: " confirm

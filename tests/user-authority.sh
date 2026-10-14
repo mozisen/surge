@@ -6,7 +6,7 @@ fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 # Bash 3.2 的 set -e 不处理 [[ ]] 失败，断言统一显式失败。
 fail() { echo "FAIL line $1"; exit 1; }
-CFG="$fixture"; DB_FILE="$fixture/db.json"
+CFG="$fixture"; DB_FILE="$fixture/db.json"; VAIO_AGENT_CONFIG="$fixture/vaio-agent.json"
 STANDALONE_PROTOCOLS="snell snell-v5 snell-v6 snell-shadowtls snell-v5-shadowtls ss2022-shadowtls naive"
 load() {
     local body
@@ -15,7 +15,7 @@ load() {
     eval "$body"
 }
 for fn in db_authority_get _authority_guard _authority_rows _authority_user_counts _authority_new_secret _authority_apply \
-    db_authority_set _authority_menu _account_jq_defs _accounts_user_states _accounts_reload _accounts_reload_or_queue accounts_apply \
+    db_authority_set _vaio_enrolled _authority_menu _account_jq_defs _accounts_user_states _accounts_reload _accounts_reload_or_queue accounts_apply \
     _api_account_backup_files _api_account_restore _api_sha256 _db_apply is_standalone_protocol _is_snell_users_protocol \
     _add_user _delete_user _set_user_quota _toggle_user _set_user_expire_date _set_user_routing _tg_unbind_user _snell_edit_user; do
     load "$fn"
@@ -113,3 +113,13 @@ _authority_menu <<< 'n' >/dev/null 2>&1
 _authority_menu <<< 'y' >/dev/null 2>&1
 [[ "$(db_authority_get)" == script ]] || fail $LINENO
 echo 'PASS menu requires CLEAR to take over and confirmation to switch back'
+
+# 7. 已注册 Vaio 节点程序（被面板接管）：平台模式下不能在本机切回
+_authority_menu <<< 'CLEAR' >/dev/null 2>&1
+[[ "$(db_authority_get)" == platform ]] || fail $LINENO
+echo '{}' > "$VAIO_AGENT_CONFIG"
+out=$(_authority_menu <<< 'y' 2>&1)
+[[ "$(db_authority_get)" == platform ]] || fail $LINENO
+grep -q '已由 Vaio 面板接管' <<< "$out" || fail $LINENO
+rm -f "$VAIO_AGENT_CONFIG"
+echo 'PASS an enrolled node cannot switch back to script management locally'

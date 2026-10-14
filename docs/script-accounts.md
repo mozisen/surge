@@ -147,3 +147,8 @@
 - 菜单「端口转发」：新建（选择 Realm 或 nftables）、查看（含状态与流量）、修改、启用/停用、删除、状态/日志；原 nft.sh 工具入口保留在上一级（诊断、BBR 等）。
 - 接口：`--api forward_apply`，`params.ops` 只含一个操作（add / update / delete / enable / disable，非新增须带 `id` 与 `base`）。`base` 是平台看到的规则，与节点当前规则不同则返回 `rule_changed`，不覆盖脚本或 nft.sh 的修改。事务共用 `.txn.lock`、`api-results` 幂等记录，备份 `rules.json`、Realm 配置和 nftables 配置；应用失败（如 nftables 校验失败、Realm 未能保持运行）恢复备份并重载，恢复失败为 unknown 且不重放。inventory 增加 `forwards`（规则 + `status` running/stopped/disabled + `bytes`）与 `forward_status`；capabilities 增加 `forward_api.version=1`。
 - 测试：新增 `tests/port-forward.sh`（旧规则补 id 与 nft.sh 规则识别、新增 Realm、各项校验与端口冲突、nftables 写入保留 nft.sh 规则并开启转发与计数、修改拒绝过期快照且 id 规则、停用保留元数据与启用恢复、应用失败回滚、幂等重放与结果查询、删除最后 Realm 规则停止服务、删除 nft.sh 规则、流量汇总与按需重建、请求格式）。其余脚本测试通过（`singbox-stats-live.sh` 需要真实统计核心，`accounts-cli.sh` 仅在 CI 以 root 运行）。
+
+## 已接管节点不能在本机切回（3.7.4-preview.10）
+
+- 节点已注册 Vaio 节点程序（存在 `/etc/vaio-agent/config.json`，可用 `VAIO_AGENT_CONFIG` 覆盖路径）且为「以平台为准」时，「用户管理方式」菜单只提示由面板统一管理，不再提供切回「以脚本为准」。如需改回本机管理，需先在面板删除该服务器并卸载节点程序。未注册的节点行为不变；面板自身的 `set_authority` 接口不受影响。
+- 测试：`tests/user-authority.sh` 新增已注册节点不能切回一项。
