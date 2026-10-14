@@ -18,7 +18,11 @@
 3. 在导出目录提交（作者为仓库所有者），推送到 vaio-panel `main`，打标签 `v<版本>` 并推送；在 GitHub 由标签创建 Release，标为最新正式版。
 4. 在本文件记录版本、来源提交与验证结果。预览版不发布到 vaio-panel。
 
-## 1.1.0（开发中，未发布到 vaio-panel）
+## 1.1.0（2026-10-14 发布到 vaio-panel）
+
+- 发布结果：在 vaio-panel `main` 上追加提交 `bf8cdd2`「Vaio Panel 1.1.0」（来源 surge `484d66e`，不改写历史），标签 `v1.1.0`。发布目录本地独立通过 unittest 194 项（跳过 3 项）与三个 cjs 测试；vaio-panel 的 Actions（main 与标签各一次）全部通过。
+- 远端另有标签 `v1.0.0：`（末尾为中文冒号），是网页创建 1.0.0 Release 时产生的，Release「Vaio Panel 1.0.0」挂在该标签上；`v1.0.0` 标签本身也存在。未改动，待用户决定是否整理。
+- 1.1.0 的 GitHub Release 需在网页由标签 `v1.1.0` 创建。
 
 - 安装：域名留空使用本机公网 IP（HTTP，`VAIO_ALLOW_HTTP=1`），自定义面板端口（域名默认 443、IP 默认 8080）；Nginx、证书与 `VAIO_PUBLIC_URL` 统一由 `scripts/panel-address.py`（root）生成，失败恢复原文件。
 - 面板地址：面板写 `/var/lib/vaio-panel/address-request.json`，`vaio-panel-address.path` 触发 root 辅助程序绑定或更换域名、关闭旧地址；面板以新地址启动时为已接管节点排队 `agent_set_url`（节点验证新地址 HTTPS 后改写配置）；旧 IP 或旧域名保留到「关闭旧地址」。1.0.0 升级时由 `update-panel.py` 补装辅助服务。
