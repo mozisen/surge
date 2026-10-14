@@ -15,7 +15,7 @@
 
 1. 在 surge 完成改动、测试与 CI，版本号写入 `platform/vaio/__init__.py`、`platform/web/index.html`、`platform/CHANGELOG.md`。
 2. 导出：`git archive <提交>:platform` 解包到空目录，确认 `python -m unittest discover -s tests` 与三个 cjs 测试在导出目录独立通过。
-3. 在导出目录提交（作者为仓库所有者），推送到 vaio-panel `main`，打标签 `v<版本>` 并推送；在 GitHub 由标签创建 Release，标为最新正式版。
+3. 在导出目录提交（作者与提交者均为 `mozi <49814846+mozisen@users.noreply.github.com>`，关联 GitHub 账号 mozisen，不使用本机姓名），推送到 vaio-panel `main`，打标签 `v<版本>` 并推送；在 GitHub 由标签创建 Release，标为最新正式版。
 4. 在本文件记录版本、来源提交与验证结果。预览版不发布到 vaio-panel。
 
 ## 1.1.0（2026-10-14 发布到 vaio-panel）
@@ -28,6 +28,11 @@
 - 面板地址：面板写 `/var/lib/vaio-panel/address-request.json`，`vaio-panel-address.path` 触发 root 辅助程序绑定或更换域名、关闭旧地址；面板以新地址启动时为已接管节点排队 `agent_set_url`（节点验证新地址 HTTPS 后改写配置）；旧 IP 或旧域名保留到「关闭旧地址」。1.0.0 升级时由 `update-panel.py` 补装辅助服务。
 - 卸载：`vaio-panel uninstall [--yes] [--backup 文件]`、`vaio-agent uninstall [--yes]`。
 - 测试：新增 `tests/test_panel_address.py`、`tests/test_uninstall.py`、`tests/platform-users.cjs` 面板地址一组；unittest 与 cjs 全部通过。**真实验收**：未执行（尚未在 VPS 上实际安装 IP 模式、绑定域名或卸载）。
+
+## 提交身份更正（2026-10-14）
+
+- 经用户确认，vaio-panel 的两个提交与标签改写为作者 `mozi`（GitHub noreply 邮箱，关联 mozisen），文件内容（tree）不变，日期与说明不变，强制推送 `main` 与 `v1.0.0`、`v1.0.0：`、`v1.1.0` 三个标签。
+- 新哈希：1.0.0 `264cba0` → `08537b7`，1.1.0 `bf8cdd2` → `359e780`。上文记录的旧哈希已不在远端。surge 仓库的提交按项目规则不改写。
 
 ## 1.2.0（surge 已完成，待发布到 vaio-panel）
 
