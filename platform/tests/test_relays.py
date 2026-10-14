@@ -1,5 +1,6 @@
 """中转线路：创建校验、各层转发任务与结果回写、用户关联落地协议、重试、删除、导出经中转的连接。"""
 import json
+import sqlite3
 import tempfile
 import unittest
 
@@ -179,11 +180,30 @@ class Relays(unittest.TestCase):
         self.assertEqual(sorted(l['user_name'] for l in self.lines()), ['', 'alice'])
 
     def test_migrates_not_null_user_column(self):
-        with self.store.connect() as db:
-            db.execute("DROP TABLE relay_lines")
-            db.execute(relays.SCHEMA.replace("user_id TEXT REFERENCES", "user_id TEXT NOT NULL REFERENCES"))
-            relays.migrate(db)
-            self.assertEqual([r[3] for r in db.execute("PRAGMA table_info(relay_lines)") if r[1] == "user_id"], [0])
+        path = self.tmp.name + '/old.sqlite'
+        from vaio.store import Store
+        Store(path)
+        def legacy(extra=""):
+            with sqlite3.connect(path) as db:
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute("DROP TABLE IF EXISTS relay_lines")
+                db.execute(relays.SCHEMA.replace("user_id TEXT REFERENCES", "user_id TEXT NOT NULL REFERENCES"))
+                db.execute("INSERT OR IGNORE INTO platform_users(id,name,created,updated) VALUES('u','alice',0,0)")
+                db.execute("INSERT INTO relay_lines VALUES('l1','u','n','xray','vless',443,'1.1.1.1','[]',0,0,0)")
+                if extra:
+                    db.executescript(extra)
+        def check():
+            with sqlite3.connect(path) as db:
+                self.assertEqual([r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'relay%'")], ['relay_lines'])
+                self.assertEqual(db.execute("SELECT id, user_id FROM relay_lines").fetchall(), [('l1', 'u')])
+                self.assertEqual([r[3] for r in db.execute("PRAGMA table_info(relay_lines)") if r[1] == "user_id"], [0])
+        legacy()
+        Store(path)          # the panel starts: migration copies the rows and leaves no transaction open
+        check()
+        # The 0.3.0-preview.26 failure: renamed and recreated, copy rolled back. The next start recovers the rows.
+        legacy("ALTER TABLE relay_lines RENAME TO relay_lines_old;" + relays.SCHEMA)
+        Store(path)
+        check()
 
     def test_transport_mapping(self):
         self.assertEqual([relays.transport_for(p) for p in ("hy2", "tuic", "ss2022", "snell-v5", "vless", "trojan")],

@@ -25,12 +25,15 @@ PORT_ONLY_KEYS = {"node_id", "port", "host", "transport"}
 
 
 def migrate(db):
-    """0.3.0-preview.25 created user_id NOT NULL; port-only lines may have no user."""
+    """0.3.0-preview.25 created user_id NOT NULL; port-only lines may have no user.
+
+    executescript commits before running and leaves no transaction open (the caller starts one next).
+    The copy runs as one explicit transaction; a relay_lines_old left by the 0.3.0-preview.26 migration,
+    whose copy was rolled back, is recovered here too."""
     if any(row[1] == "user_id" and row[3] for row in db.execute("PRAGMA table_info(relay_lines)")):
-        db.execute("ALTER TABLE relay_lines RENAME TO relay_lines_old")
-        db.executescript(SCHEMA)
-        db.execute("INSERT INTO relay_lines SELECT * FROM relay_lines_old")
-        db.execute("DROP TABLE relay_lines_old")
+        db.executescript("ALTER TABLE relay_lines RENAME TO relay_lines_old;" + SCHEMA)
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='relay_lines_old'").fetchone():
+        db.executescript("BEGIN; INSERT OR IGNORE INTO relay_lines SELECT * FROM relay_lines_old; DROP TABLE relay_lines_old; COMMIT;")
 UDP_PROTOCOLS = {"hy2", "tuic"}
 BOTH_PROTOCOLS = {"ss2022", "ss-legacy", "snell", "snell-v5", "snell-v6", "snell-shadowtls", "snell-v5-shadowtls", "ss2022-shadowtls"}
 STATE_TEXT = {"creating": "创建中", "active": "正常", "partial": "部分失败", "removing": "删除中"}
