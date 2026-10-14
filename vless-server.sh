@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.8"
+readonly VERSION="3.7.4-preview.9"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -3978,6 +3978,7 @@ _sync_all_user_traffic_unlocked() {
 sync_all_user_traffic() {
     local reset="${1:-true}" owner attempt rc
     _tg_platform_cleanup >/dev/null 2>&1 || true
+    _fwd_stats_ensure >/dev/null 2>&1 || true
 
     for attempt in {1..10}; do
         if mkdir "$TRAFFIC_SYNC_LOCK_DIR" 2>/dev/null; then
@@ -31256,7 +31257,7 @@ conf_path=Path('/etc/vless-reality/realm/config.toml')
 rules=json.loads(rules_path.read_text()) if rules_path.exists() else []
 lines=['[log]','level = "warn"','','[network]','no_tcp = false','use_udp = true','']
 for r in rules:
-    if not r.get('enabled', True):
+    if not r.get('enabled', True) or r.get('backend', 'realm') != 'realm':
         continue
     transport=r.get('transport','tcp')
     lines.append('[[endpoints]]')
@@ -31291,7 +31292,7 @@ from pathlib import Path
 p=Path(sys.argv[1])
 rules=json.loads(p.read_text()) if p.exists() else []
 for r in rules:
-    if not r.get('enabled', True):
+    if not r.get('enabled', True) or r.get('backend', 'realm') != 'realm':
         continue
     print(f"{r.get('transport','tcp')}|{r.get('listen_host','0.0.0.0')}|{r.get('listen_port','')}")
 PY2
@@ -31362,7 +31363,7 @@ realm_cleanup_runtime() {
 realm_restart_service() {
     ensure_realm_dir
     local rule_count
-    rule_count=$(jq 'length' "$REALM_RULES_FILE" 2>/dev/null || echo 0)
+    rule_count=$(jq '[.[] | select((.backend // "realm") == "realm" and .enabled != false)] | length' "$REALM_RULES_FILE" 2>/dev/null || echo 0)
     if [[ "$rule_count" == "0" ]]; then
         rm -f "$REALM_CONFIG_FILE" 2>/dev/null || true
         realm_cleanup_runtime
@@ -31379,132 +31380,486 @@ realm_restart_service() {
     fi
 }
 
-realm_add_rule() {
-    install_realm_binary || return 1
-    ensure_realm_dir
-    echo ""
-    _line
-    echo -e "  ${W}转发后端选择${NC}"
-    _line
-    _item "1" "Realm"
-    _item "0" "返回"
-    echo ""
-    local backend_choice
-    read -rp "  请选择 [1]: " backend_choice
-    backend_choice="${backend_choice:-1}"
-    [[ "$backend_choice" == "0" ]] && return 0
-    [[ "$backend_choice" != "1" ]] && { _err "无效选择"; return 1; }
+#───────────────────────────────────────────────────────────────────────────────
+# 统一转发规则（Realm + nftables）。脚本菜单与平台（--api forward_apply）共用同一规则模型：
+#   {id, backend, remark, transport, listen_host, listen_port, remote_host, remote_port, enabled}
+# Realm 规则、nftables 的备注与停用规则存于 realm/rules.json；启用中的 nftables 规则以
+# nft.sh 兼容的 /etc/nftables.d/port-forward.conf 为准，nft.sh 改动的规则也能同步。
+#───────────────────────────────────────────────────────────────────────────────
+NFT_FORWARD_CONF="/etc/nftables.d/port-forward.conf"
+NFT_MAIN_CONF="/etc/nftables.conf"
+NFT_SYSCTL_CONF="/etc/sysctl.d/99-nft-forward.conf"
+NFT_FORWARD_TABLE="port_forward"
+FWD_STATS_TABLE="vless_forward_stats"
+FWD_ERROR=""
 
-    local remark transport_choice transport listen_host listen_port remote_host remote_port
-    read -rp "  规则备注: " remark
-    echo ""
-    _line
-    echo -e "  ${W}协议类型${NC}"
-    _line
-    _item "1" "TCP"
-    _item "2" "UDP"
-    _item "3" "TCP + UDP"
-    echo ""
-    read -rp "  请选择 [1]: " transport_choice
-    transport_choice="${transport_choice:-1}"
-    case "$transport_choice" in
-        1) transport='tcp' ;;
-        2) transport='udp' ;;
-        3) transport='tcp+udp' ;;
-        *) _err "无效选择"; return 1 ;;
-    esac
-    read -rp "  监听地址 [0.0.0.0]: " listen_host
-    listen_host="${listen_host:-0.0.0.0}"
-    read -rp "  监听端口: " listen_port
-    read -rp "  目标地址: " remote_host
-    read -rp "  目标端口: " remote_port
-    [[ -z "$listen_port" || -z "$remote_host" || -z "$remote_port" ]] && { _err "参数不能为空"; return 1; }
-    _is_valid_domain_or_ip "$listen_host" || { _err "监听地址格式无效"; return 1; }
-    _is_valid_domain_or_ip "$remote_host" || { _err "目标地址格式无效"; return 1; }
-    _is_valid_port "$listen_port" || { _err "监听端口必须是 1-65535 的整数"; return 1; }
-    _is_valid_port "$remote_port" || { _err "目标端口必须是 1-65535 的整数"; return 1; }
-    echo ""
-    echo -e "  ${C}备注:${NC} ${G}${remark:-未命名}${NC}"
-    echo -e "  ${C}协议:${NC} ${G}${transport}${NC}"
-    echo -e "  ${C}监听:${NC} ${G}${listen_host}:${listen_port}${NC}"
-    echo -e "  ${C}目标:${NC} ${G}${remote_host}:${remote_port}${NC}"
-    echo ""
-    read -rp "  确认创建? [Y/n]: " confirm
-    [[ "$confirm" =~ ^[nN]$ ]] && return 0
-    if ! python3 - "$REALM_RULES_FILE" "$remark" "$transport" "$listen_host" "$listen_port" "$remote_host" "$remote_port" <<'PY2'
-import json, sys
-from pathlib import Path
-p=Path(sys.argv[1])
-rules=json.loads(p.read_text()) if p.exists() else []
-rules.append({
-  'backend':'realm',
-  'remark':sys.argv[2],
-  'transport':sys.argv[3],
-  'listen_host':sys.argv[4],
-  'listen_port':int(sys.argv[5]),
-  'remote_host':sys.argv[6],
-  'remote_port':int(sys.argv[7]),
-  'enabled':True
-})
-p.write_text(json.dumps(rules, ensure_ascii=False, indent=2))
-PY2
-    then
-        _err "转发规则写入失败"
-        return 1
-    fi
-    realm_restart_service || { _err "Realm 服务启动失败"; return 1; }
-    _ok "转发规则已创建并生效"
+_fwd_rand_id() {
+    openssl rand -hex 6 2>/dev/null || od -An -N6 -tx1 /dev/urandom | tr -d ' \n'
 }
 
-realm_list_rules() {
+_fwd_write_store() {
+    local content="$1" staged
     ensure_realm_dir
-    local count
-    count=$(jq 'length' "$REALM_RULES_FILE" 2>/dev/null || echo 0)
+    staged=$(mktemp "$REALM_RULES_FILE.XXXXXX") || return 1
+    jq '.' <<< "$content" > "$staged" && chmod 600 "$staged" && mv "$staged" "$REALM_RULES_FILE" || { rm -f "$staged"; return 1; }
+}
+
+# 启用中的 nftables 规则；解析方式与 nft.sh 相同：只看未注释的 tcp dnat 行。
+_fwd_nft_conf_rules() {
+    [[ -f "$NFT_FORWARD_CONF" ]] || { echo '[]'; return 0; }
+    sed -E '/^[[:space:]]*#/d' "$NFT_FORWARD_CONF" |
+        sed -nE 's/.*tcp dport ([0-9]+) dnat to ([0-9.]+):([0-9]+).*/\1 \2 \3/p' |
+        jq -Rsc '[split("\n")[] | select(length > 0) | split(" ") |
+            {listen_port: (.[0] | tonumber), remote_host: .[1], remote_port: (.[2] | tonumber)}] | unique_by(.listen_port)'
+}
+
+# 合并后的全部规则（规范化 JSON 数组）。旧 Realm 规则缺少 id 时补齐并写回。
+fwd_rules() {
+    ensure_realm_dir
+    local stored conf updated r
+    stored=$(jq -c 'if type == "array" then . else [] end' "$REALM_RULES_FILE" 2>/dev/null) || stored='[]'
+    if jq -e 'any(.[]; ((.backend // "realm") == "realm") and ((.id // "") | test("^[0-9a-f]{12}$") | not))' <<< "$stored" >/dev/null; then
+        updated='[]'
+        while IFS= read -r r; do
+            if jq -e '((.backend // "realm") == "realm") and ((.id // "") | test("^[0-9a-f]{12}$") | not)' <<< "$r" >/dev/null; then
+                r=$(jq -c --arg id "$(_fwd_rand_id)" '.id = $id' <<< "$r")
+            fi
+            updated=$(jq -c --argjson r "$r" '. + [$r]' <<< "$updated")
+        done < <(jq -c '.[]' <<< "$stored")
+        stored="$updated"
+        _fwd_write_store "$stored" || true
+    fi
+    conf=$(_fwd_nft_conf_rules) || conf='[]'
+    jq -c --argjson conf "$conf" '
+      def norm: {id, backend, remark: (.remark // ""), transport: (.transport // "tcp"), listen_host: (.listen_host // "0.0.0.0"),
+                 listen_port: (.listen_port | tonumber), remote_host: (.remote_host // ""), remote_port: (.remote_port | tonumber),
+                 enabled: (.enabled != false)};
+      . as $s |
+      [ $s[] | select((.backend // "realm") == "realm") | .backend = "realm" | norm ] +
+      [ $conf[] as $c | (first($s[] | select(.backend == "nftables" and (.listen_port | tonumber) == $c.listen_port)) // {}) as $m |
+        {id: ("nft-" + ($c.listen_port | tostring)), backend: "nftables", remark: ($m.remark // ""), transport: "tcp+udp",
+         listen_host: "0.0.0.0", listen_port: $c.listen_port, remote_host: $c.remote_host, remote_port: $c.remote_port, enabled: true} ] +
+      [ $s[] | select(.backend == "nftables" and .enabled == false) | (.listen_port | tonumber) as $p |
+        select(any($conf[]; .listen_port == $p) | not) |
+        .id = ("nft-" + ($p | tostring)) | .transport = "tcp+udp" | .listen_host = "0.0.0.0" | norm ]' <<< "$stored"
+}
+
+# nft.sh 兼容格式；先声明再删除表，重复加载不会叠加规则。
+_fwd_nft_write_conf() {
+    local rules="$1" staged
+    mkdir -p "$(dirname "$NFT_FORWARD_CONF")" || return 1
+    staged=$(mktemp "$NFT_FORWARD_CONF.XXXXXX") || return 1
+    {
+        printf '#!/usr/sbin/nft -f\n# 由 vless-server.sh 生成（与 nft.sh 格式兼容）\n\n'
+        printf 'table ip %s {}\ndelete table ip %s\n\n' "$NFT_FORWARD_TABLE" "$NFT_FORWARD_TABLE"
+        printf 'table ip %s {\n    # --- PREROUTING (DNAT) ---\n    chain prerouting {\n        type nat hook prerouting priority -100; policy accept;\n' "$NFT_FORWARD_TABLE"
+        jq -r '.[] | select(.backend == "nftables" and .enabled) |
+            "\n        # 转发: 本机:\(.listen_port) -> \(.remote_host):\(.remote_port)\n        tcp dport \(.listen_port) dnat to \(.remote_host):\(.remote_port)\n        udp dport \(.listen_port) dnat to \(.remote_host):\(.remote_port)"' <<< "$rules"
+        printf '    }\n\n    # --- POSTROUTING (SNAT) ---\n    chain postrouting {\n        type nat hook postrouting priority 100; policy accept;\n'
+        jq -r '.[] | select(.backend == "nftables" and .enabled) |
+            "\n        ip daddr \(.remote_host) tcp dport \(.remote_port) ct status dnat masquerade\n        ip daddr \(.remote_host) udp dport \(.remote_port) ct status dnat masquerade"' <<< "$rules"
+        printf '    }\n}\n'
+    } > "$staged" && chmod 644 "$staged" && mv "$staged" "$NFT_FORWARD_CONF" || { rm -f "$staged"; return 1; }
+}
+
+# 写入规则文件：rules.json（Realm 全部规则 + nftables 备注与停用规则）与 nftables 配置。不重载服务。
+_fwd_save() {
+    local rules="$1"
+    _fwd_write_store "$(jq -c '[.[] | if .backend == "nftables" then del(.id) else . end]' <<< "$rules")" || return 1
+    if jq -e 'any(.[]; .backend == "nftables")' <<< "$rules" >/dev/null || [[ -f "$NFT_FORWARD_CONF" ]]; then
+        _fwd_nft_write_conf "$rules" || return 1
+    fi
+}
+
+# nftables 前置条件：命令可用、开机加载 /etc/nftables.d、开启 IPv4 转发（与 nft.sh 相同路径）。
+_fwd_nft_prepare() {
+    if ! check_cmd nft; then
+        _info "安装 nftables..."
+        if check_cmd apt-get; then DEBIAN_FRONTEND=noninteractive apt-get install -y nftables >/dev/null 2>&1
+        elif check_cmd apk; then apk add --no-cache nftables >/dev/null 2>&1
+        elif check_cmd dnf; then dnf install -y nftables >/dev/null 2>&1
+        elif check_cmd yum; then yum install -y nftables >/dev/null 2>&1
+        fi
+        check_cmd nft || { _err "nftables 安装失败"; return 1; }
+    fi
+    if [[ ! -f "$NFT_MAIN_CONF" ]]; then
+        printf '#!/usr/sbin/nft -f\ninclude "/etc/nftables.d/*.conf"\n' > "$NFT_MAIN_CONF" || return 1
+    elif ! grep -qF 'include "/etc/nftables.d/*.conf"' "$NFT_MAIN_CONF"; then
+        printf '\ninclude "/etc/nftables.d/*.conf"\n' >> "$NFT_MAIN_CONF" || return 1
+    fi
+    svc enable nftables 2>/dev/null || true
+    if [[ ! -f "$NFT_SYSCTL_CONF" || "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" != 1 ]]; then
+        printf 'net.ipv4.ip_forward = 1\n' > "$NFT_SYSCTL_CONF" && sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || {
+            _err "开启 IPv4 转发失败"; return 1; }
+    fi
+}
+
+_fwd_nft_reload() {
+    [[ -f "$NFT_FORWARD_CONF" ]] && check_cmd nft || return 0
+    nft -c -f "$NFT_FORWARD_CONF" >/dev/null 2>&1 || { _err "nftables 转发规则校验失败"; return 1; }
+    nft -f "$NFT_FORWARD_CONF" >/dev/null 2>&1 || { _err "nftables 转发规则加载失败"; return 1; }
+}
+
+# nftables 流量：独立表在 forward 链按目标与回程计数（重建即清零，节点重启后也清零）。
+_fwd_stats_sync() {
+    local rules="${1:-}" body
+    check_cmd nft || return 0
+    [[ -n "$rules" ]] || rules=$(fwd_rules) || return 0
+    body=$(jq -r '[.[] | select(.backend == "nftables" and .enabled) | . as $r | ("tcp", "udp") |
+        "        ip daddr \($r.remote_host) \(.) dport \($r.remote_port) counter comment \"fwd:\($r.id)\"",
+        "        ip saddr \($r.remote_host) \(.) sport \($r.remote_port) counter comment \"fwd:\($r.id)\""] | join("\n")' <<< "$rules")
+    if [[ -z "$body" ]]; then
+        nft delete table inet "$FWD_STATS_TABLE" >/dev/null 2>&1 || true
+        return 0
+    fi
+    printf 'table inet %s {}\ndelete table inet %s\ntable inet %s {\n    chain forward {\n        type filter hook forward priority -150; policy accept;\n%s\n    }\n}\n' \
+        "$FWD_STATS_TABLE" "$FWD_STATS_TABLE" "$FWD_STATS_TABLE" "$body" | nft -f - >/dev/null 2>&1
+}
+
+# 流量同步时调用：计数表缺失或规则集合变化（含 nft.sh 改动）才重建，不清零现有计数。
+_fwd_stats_ensure() {
+    check_cmd nft || return 0
+    local rules want have
+    rules=$(fwd_rules 2>/dev/null) || return 0
+    want=$(jq -r '[.[] | select(.backend == "nftables" and .enabled) | .id] | sort | join(" ")' <<< "$rules")
+    have=$(nft -j list table inet "$FWD_STATS_TABLE" 2>/dev/null | jq -r '[.nftables[]?.rule? | select(.) | (.comment // "") | ltrimstr("fwd:")] | unique | sort | join(" ")' 2>/dev/null)
+    [[ "$want" == "$have" ]] || _fwd_stats_sync "$rules"
+}
+
+# {id: bytes}；Realm 用 iptables 入站计数，nftables 用计数表（两个方向之和）。
+_fwd_bytes() {
+    local rules="$1" nft_bytes='{}' realm_bytes='{}' id port transport tcp udp
+    if check_cmd nft; then
+        nft_bytes=$(nft -j list table inet "$FWD_STATS_TABLE" 2>/dev/null | jq -c '
+            [.nftables[]?.rule? | select(.) | {id: ((.comment // "") | ltrimstr("fwd:")), b: ([.expr[]? | .counter?.bytes? // empty] | add // 0)} |
+             select(.id != "")] | group_by(.id) | map({key: .[0].id, value: (map(.b) | add)}) | from_entries' 2>/dev/null) || nft_bytes='{}'
+        [[ -n "$nft_bytes" ]] || nft_bytes='{}'
+    fi
+    if check_cmd iptables; then
+        while read -r id port transport; do
+            [[ -n "$id" ]] || continue
+            tcp=0; udp=0
+            [[ "$transport" == udp ]] || tcp=$(realm_get_traffic_bytes "$port" tcp)
+            [[ "$transport" == tcp ]] || udp=$(realm_get_traffic_bytes "$port" udp)
+            realm_bytes=$(jq -c --arg id "$id" --argjson b "$(( ${tcp:-0} + ${udp:-0} ))" '.[$id] = $b' <<< "$realm_bytes")
+        done < <(jq -r '.[] | select(.backend == "realm" and .enabled) | "\(.id) \(.listen_port) \(.transport)"' <<< "$rules")
+    fi
+    jq -nc --argjson a "$nft_bytes" --argjson b "$realm_bytes" '$a + $b'
+}
+
+# 规则 + 运行状态与流量（inventory 与菜单共用）
+fwd_inventory() {
+    local rules bytes realm_running=false loaded=" " nft_ok=false realm_installed=false
+    rules=$(fwd_rules) || rules='[]'
+    { [[ -x "$REALM_BIN" ]] || check_cmd realm; } && realm_installed=true
+    svc status "$REALM_SVC" >/dev/null 2>&1 && realm_running=true
+    if check_cmd nft; then
+        nft_ok=true
+        loaded=" $(nft list table ip "$NFT_FORWARD_TABLE" 2>/dev/null | sed -nE 's/.*tcp dport ([0-9]+) dnat to.*/\1/p' | tr '\n' ' ') "
+    fi
+    bytes=$(_fwd_bytes "$rules") || bytes='{}'
+    jq -c --argjson b "$bytes" --arg loaded "$loaded" --argjson realm "$realm_running" \
+        --argjson installed "$realm_installed" --argjson nft "$nft_ok" '
+        {rules: map(.listen_port as $p | . + {status: (if .enabled | not then "disabled"
+                                  elif .backend == "realm" then (if $realm then "running" else "stopped" end)
+                                  elif ($loaded | contains(" \($p) ")) then "running" else "stopped" end),
+                         bytes: ($b[.id] // null)}),
+         status: {realm_installed: $installed, realm_running: $realm, nft_available: $nft}}' <<< "$rules"
+}
+
+# 字段、地址与类型约束；失败时 FWD_ERROR=invalid_request
+_fwd_validate() {
+    local rule="$1" backend listen remote
+    jq -e 'type == "object" and ((keys - ["id","backend","remark","transport","listen_host","listen_port","remote_host","remote_port","enabled"]) | length == 0) and
+        (.backend == "realm" or .backend == "nftables") and (.transport == "tcp" or .transport == "udp" or .transport == "tcp+udp") and
+        (.listen_port | type == "number" and . == floor and . >= 1 and . <= 65535) and
+        (.remote_port | type == "number" and . == floor and . >= 1 and . <= 65535) and
+        (.remark | type == "string" and length <= 64 and (test("[[:cntrl:]\"]") | not)) and
+        (.enabled | type == "boolean") and (.listen_host | type == "string") and
+        (.remote_host | type == "string" and length >= 1 and length <= 253)' <<< "$rule" >/dev/null 2>&1 || { FWD_ERROR=invalid_request; return 1; }
+    backend=$(jq -r .backend <<< "$rule"); listen=$(jq -r .listen_host <<< "$rule"); remote=$(jq -r .remote_host <<< "$rule")
+    if [[ "$backend" == nftables ]]; then
+        [[ "$listen" == 0.0.0.0 && "$(jq -r .transport <<< "$rule")" == tcp+udp ]] || { FWD_ERROR=invalid_request; return 1; }
+        _is_valid_ipv4_literal "$remote" || { FWD_ERROR=invalid_request; return 1; }
+    else
+        [[ "$listen" == 0.0.0.0 || "$listen" == :: ]] || _is_valid_ipv4_literal "$listen" || _is_valid_ipv6_literal "$listen" || {
+            FWD_ERROR=invalid_request; return 1; }
+        _is_valid_ipv4_literal "$remote" || _is_valid_ipv6_literal "$remote" || _is_valid_dns_name "$remote" || {
+            FWD_ERROR=invalid_request; return 1; }
+    fi
+}
+
+# 同一服务器上监听端口（同协议）不得与其他转发规则或代理实例端口重复
+_fwd_conflict() {
+    local rules="$1" rule="$2" ports='[]'
+    [[ -f "$DB_FILE" ]] && ports=$(jq -c '[(.xray // {}), (.singbox // {}) | to_entries[] | .value | (if type == "array" then .[] else . end) |
+        select(type == "object") | .port | numbers]' "$DB_FILE" 2>/dev/null) || ports='[]'
+    jq -e --argjson n "$rule" --argjson ports "${ports:-[]}" '
+        def tr: if . == "tcp+udp" then ["tcp", "udp"] else [.] end;
+        ($ports | index($n.listen_port)) != null or
+        any(.[]; .id != $n.id and .listen_port == $n.listen_port and
+            ((.transport | tr) as $a | ($n.transport | tr) | any(. as $t | $a | index($t) != null)))' <<< "$rules" >/dev/null
+}
+
+# 规则写入后让运行状态一致：按需安装 Realm/nftables、Realm 重启（无启用规则时停止）、nftables 重载、刷新计数。
+_fwd_activate() {
+    local rules="$1"
+    if jq -e 'any(.[]; .backend == "realm" and .enabled)' <<< "$rules" >/dev/null; then
+        install_realm_binary >/dev/null || { _err "Realm 安装失败"; return 1; }
+    fi
+    if jq -e 'any(.[]; .backend == "nftables" and .enabled)' <<< "$rules" >/dev/null; then
+        _fwd_nft_prepare || return 1
+    fi
+    realm_restart_service || { _err "Realm 转发服务启动失败"; return 1; }
+    if jq -e 'any(.[]; .backend == "realm" and .enabled)' <<< "$rules" >/dev/null; then
+        sleep 1
+        svc status "$REALM_SVC" >/dev/null 2>&1 || { _err "Realm 转发服务未能保持运行，请检查端口占用"; return 1; }
+    fi
+    _fwd_nft_reload || return 1
+    _fwd_stats_sync "$rules" || true
+}
+
+_fwd_backup() {
+    local dir="$1" f name
+    mkdir -p "$dir" && chmod 700 "$dir" || return 1
+    for f in "$REALM_RULES_FILE" "$REALM_CONFIG_FILE" "$NFT_FORWARD_CONF"; do
+        name=$(printf '%s' "$f" | _api_sha256)
+        if [[ -f "$f" ]]; then cp -p "$f" "$dir/$name" || return 1; else : > "$dir/$name.missing"; fi
+    done
+}
+
+# 恢复备份并让运行状态回到原规则；成功返回 0（已回滚），失败返回 1（结果未知）
+_fwd_restore() {
+    local dir="$1" f name failed=0
+    for f in "$REALM_RULES_FILE" "$REALM_CONFIG_FILE" "$NFT_FORWARD_CONF"; do
+        name=$(printf '%s' "$f" | _api_sha256)
+        if [[ -f "$dir/$name.missing" ]]; then rm -f "$f" || failed=1; else cp -p "$dir/$name" "$f" || failed=1; fi
+    done
+    realm_restart_service >/dev/null 2>&1 || failed=1
+    _fwd_nft_reload >/dev/null 2>&1 || failed=1
+    _fwd_stats_sync >/dev/null 2>&1 || true
+    return "$failed"
+}
+
+_fwd_rule_core() {
+    jq -c '{id, backend, remark, transport, listen_host, listen_port, remote_host, remote_port, enabled}'
+}
+
+# 一个转发操作（add/update/delete/enable/disable）。调用方持有事务锁。
+# 返回 0 成功（FWD_RESULT 为新规则 JSON 或 null）；1 校验失败或已回滚（FWD_ERROR）；2 恢复失败、结果未知。
+_fwd_execute() {
+    local op="$1" id="$2" base="$3" rule="$4" backup="$5" rules current new
+    FWD_ERROR=""; FWD_RESULT="null"
+    rules=$(fwd_rules) || { FWD_ERROR=invalid_database; return 1; }
+    if [[ "$op" != add ]]; then
+        current=$(jq -c --arg id "$id" 'first(.[] | select(.id == $id)) // empty' <<< "$rules")
+        [[ -n "$current" ]] || { FWD_ERROR=rule_not_found; return 1; }
+        # 平台按快照修改：规则在节点上已被改动（脚本菜单或 nft.sh）时拒绝，避免覆盖。
+        if [[ -n "$base" && "$(_fwd_rule_core <<< "$base" | jq -cS .)" != "$(_fwd_rule_core <<< "$current" | jq -cS .)" ]]; then
+            FWD_ERROR=rule_changed; return 1
+        fi
+    fi
+    case "$op" in
+        add|update)
+            new=$(jq -c '{backend, remark: (.remark // ""), transport, listen_host: (.listen_host // "0.0.0.0"), listen_port, remote_host, remote_port,
+                          enabled: (.enabled != false)}' <<< "$rule") || { FWD_ERROR=invalid_request; return 1; }
+            if [[ "$(jq -r .backend <<< "$new")" == nftables ]]; then
+                new=$(jq -c '.transport = "tcp+udp" | .listen_host = "0.0.0.0" | .id = ("nft-" + (.listen_port | tostring))' <<< "$new")
+            elif [[ "$op" == update && "$(jq -r .backend <<< "$current")" == realm ]]; then
+                new=$(jq -c --arg id "$id" '.id = $id' <<< "$new")
+            else
+                new=$(jq -c --arg id "$(_fwd_rand_id)" '.id = $id' <<< "$new")
+            fi
+            _fwd_validate "$new" || return 1
+            rules=$(jq -c --arg id "$id" '[.[] | select(.id != $id)]' <<< "$rules")
+            ! _fwd_conflict "$rules" "$new" || { FWD_ERROR=port_conflict; return 1; }
+            rules=$(jq -c --argjson n "$new" '. + [$n]' <<< "$rules")
+            FWD_RESULT="$new"
+            ;;
+        delete) rules=$(jq -c --arg id "$id" '[.[] | select(.id != $id)]' <<< "$rules") ;;
+        enable|disable)
+            new=$(jq -c --argjson on "$([[ "$op" == enable ]] && echo true || echo false)" '.enabled = $on' <<< "$current")
+            if [[ "$op" == enable ]]; then
+                ! _fwd_conflict "$(jq -c --arg id "$id" '[.[] | select(.id != $id)]' <<< "$rules")" "$new" || { FWD_ERROR=port_conflict; return 1; }
+            fi
+            rules=$(jq -c --argjson n "$new" '[.[] | if .id == $n.id then $n else . end]' <<< "$rules")
+            FWD_RESULT="$new"
+            ;;
+        *) FWD_ERROR=invalid_request; return 1 ;;
+    esac
+    _fwd_backup "$backup" || { FWD_ERROR=storage_error; return 1; }
+    if _fwd_save "$rules" && _fwd_activate "$rules"; then
+        return 0
+    fi
+    FWD_ERROR=apply_failed
+    _fwd_restore "$backup" && return 1
+    return 2
+}
+
+# 平台转发写接口（forward_api version 1）：单请求单操作，事务与幂等同 account_apply。
+_api_forward_apply() {
+    local request="$1" results="$CFG/api-results" backups="$CFG/api-backups" fingerprint record prior backup op id base rule rc data
+    jq -e '(.params | type == "object") and ((.params | keys) == ["ops"]) and (.params.ops | type == "array" and length == 1) and
+        (.params.ops[0] | type == "object" and ((keys - ["op", "id", "base", "rule"]) | length == 0) and
+         (.op == "add" or .op == "update" or .op == "delete" or .op == "enable" or .op == "disable") and
+         (if .op == "add" then (.rule | type == "object") and (has("id") | not) else
+            (.id | type == "string" and test("^([0-9a-f]{12}|nft-[0-9]{1,5})$")) and (.base | type == "object") and
+            (if .op == "update" then (.rule | type == "object") else (has("rule") | not) end) end))' <<< "$request" >/dev/null 2>&1 || {
+        _api_reply failed invalid_request; return 1; }
+    mkdir -p "$results" "$backups" && chmod 700 "$results" "$backups" || { _api_reply failed storage_error; return 1; }
+    fingerprint=$(jq -cS '{action, params}' <<< "$request" | _api_sha256)
+    record="$results/$api_id.json"
+    _api_txn_lock || { _api_reply failed lock_timeout; return 1; }
+    if [[ -f "$record" ]]; then
+        prior=$(cat "$record")
+        _api_txn_unlock
+        [[ "$(jq -r .fingerprint <<< "$prior")" == "$fingerprint" ]] || { _api_reply failed request_id_conflict; return 1; }
+        case "$(jq -r .status <<< "$prior")" in
+            succeeded) _api_reply succeeded ok "$(jq -c .data <<< "$prior")"; return 0 ;;
+            failed) _api_reply failed "$(jq -r .code <<< "$prior")" "$(jq -c .data <<< "$prior")"; return 1 ;;
+            *) _api_reply unknown result_unknown '{"replay_allowed":false}'; return 1 ;;
+        esac
+    fi
+    _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" '{fingerprint:$f,status:"running"}')" || { _api_txn_unlock; _api_reply failed storage_error; return 1; }
+    op=$(jq -r '.params.ops[0].op' <<< "$request"); id=$(jq -r '.params.ops[0].id // ""' <<< "$request")
+    base=$(jq -c '.params.ops[0].base // empty' <<< "$request"); rule=$(jq -c '.params.ops[0].rule // empty' <<< "$request")
+    backup="$backups/$api_id"
+    _fwd_execute "$op" "$id" "$base" "$rule" "$backup" >>"$backup.log" 2>&1
+    rc=$?
+    if [[ "$rc" == 0 ]]; then
+        data=$(jq -nc --argjson r "$FWD_RESULT" '{rule: $r}')
+        _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" --argjson d "$data" '{fingerprint:$f,status:"succeeded",data:$d}')"
+        _api_txn_unlock
+        _api_reply succeeded ok "$data"
+        return 0
+    fi
+    if [[ "$rc" == 1 ]]; then
+        data=$(jq -nc --arg m "$(sed 's/\x1b\[[0-9;]*m//g' "$backup.log" 2>/dev/null | grep -E '✗|!' | tail -n1 | sed -E 's/^[[:space:]]*(✗|!)[[:space:]]*//')" \
+            --argjson rb "$([[ "$FWD_ERROR" == apply_failed ]] && echo true || echo false)" '{message: $m, rolled_back: $rb}')
+        _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" --arg c "$FWD_ERROR" --argjson d "$data" '{fingerprint:$f,status:"failed",code:$c,data:$d}')"
+        _api_txn_unlock
+        _api_reply failed "$FWD_ERROR" "$data"
+        return 1
+    fi
+    _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" '{fingerprint:$f,status:"unknown"}')"
+    _api_txn_unlock
+    _api_reply unknown result_unknown '{"replay_allowed":false}'
+    return 1
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# 端口转发菜单（Realm 与 nftables 统一管理）
+#───────────────────────────────────────────────────────────────────────────────
+_fwd_cli() {
+    local op="$1" id="$2" rule="${3:-}" backup
+    backup="$CFG/api-backups/cli-$(date +%s)-$$"
+    mkdir -p "$CFG/api-backups" && chmod 700 "$CFG/api-backups" || { _err "无法创建备份目录"; return 1; }
+    _api_txn_lock || { _err "其他配置操作正在进行，请稍后再试"; return 1; }
+    _fwd_execute "$op" "$id" "" "$rule" "$backup"
+    local rc=$?
+    _api_txn_unlock
+    case "$rc" in
+        0) return 0 ;;
+        1) case "$FWD_ERROR" in
+               port_conflict) _err "监听端口与其他转发规则或代理协议冲突" ;;
+               invalid_request) _err "参数无效：nftables 目标须为 IPv4 地址，端口须为 1-65535" ;;
+               rule_not_found) _err "规则不存在" ;;
+               apply_failed) _err "应用失败，已恢复原规则" ;;
+               *) _err "操作失败（$FWD_ERROR）" ;;
+           esac
+           return 1 ;;
+        *) _err "应用失败且恢复未确认，请检查 $backup"; return 1 ;;
+    esac
+}
+
+_fwd_print_rules() {
+    local inv
+    inv=$(fwd_inventory) || inv='{"rules":[]}'
     echo ""
     _line
     echo -e "  ${W}转发规则${NC}"
     _line
-    [[ "$count" == "0" ]] && { echo -e "  ${D}暂无规则${NC}"; _line; return 0; }
-    python3 - "$REALM_RULES_FILE" <<'PY2'
-import json, sys
-from pathlib import Path
-p=Path(sys.argv[1])
-rules=json.loads(p.read_text()) if p.exists() else []
-for i, r in enumerate(rules, 1):
-    print(f"{i}) {r.get('remark') or '未命名'}")
-    print(f"   后端: {r.get('backend','realm')}")
-    print(f"   协议: {r.get('transport','tcp')}")
-    print(f"   监听: {r.get('listen_host','0.0.0.0')}:{r.get('listen_port','')}")
-    print(f"   目标: {r.get('remote_host','')}:{r.get('remote_port','')}")
-    print(f"   状态: {'已启用' if r.get('enabled', True) else '已禁用'}")
-    print()
-PY2
+    if [[ "$(jq '.rules | length' <<< "$inv")" == 0 ]]; then
+        echo -e "  ${D}暂无规则${NC}"
+        _line
+        return 1
+    fi
+    local i=1 line
+    while IFS= read -r line; do
+        printf '  %s\n' "${i}) ${line}"
+        ((i++))
+    done < <(jq -r '.rules[] | "\(if .remark == "" then "未命名" else .remark end)  [\(if .backend == "realm" then "Realm" else "nftables" end) · \(.transport | ascii_upcase)]  \(.listen_host):\(.listen_port) → \(.remote_host):\(.remote_port)  \({"running":"运行中","stopped":"未运行","disabled":"已停用"}[.status])\(if .bytes == null then "" else "  流量 \(.bytes) B" end)"' <<< "$inv")
     _line
 }
 
-realm_delete_rule() {
-    ensure_realm_dir
-    local count
-    count=$(jq 'length' "$REALM_RULES_FILE" 2>/dev/null || echo 0)
-    [[ "$count" == "0" ]] && { _warn "暂无规则可删除"; return 0; }
-    realm_list_rules
-    local idx
-    read -rp "  选择要删除的规则编号 [1-${count}]，0返回: " idx
-    [[ "$idx" == "0" ]] && return 0
-    [[ ! "$idx" =~ ^[0-9]+$ ]] && { _err "无效选择"; return 1; }
-    ((idx>=1 && idx<=count)) || { _err "超出范围"; return 1; }
+_fwd_pick() {
+    local rules count idx
+    rules=$(fwd_rules) || return 1
+    count=$(jq length <<< "$rules")
+    _fwd_print_rules || return 1
+    read -rp "  选择规则编号 [1-${count}]，0 返回: " idx
+    [[ "$idx" == 0 || -z "$idx" ]] && return 1
+    [[ "$idx" =~ ^[0-9]+$ ]] && (( idx >= 1 && idx <= count )) || { _err "无效选择"; return 1; }
+    FWD_PICKED=$(jq -c ".[$((idx - 1))]" <<< "$rules")
+}
+
+# 交互填写规则；$1 为修改前的规则（新建为空）
+_fwd_prompt_rule() {
+    local old="${1:-}" backend transport remark listen_host listen_port remote_host remote_port choice
+    _fwd_def() { [[ -n "$old" ]] && jq -r ".$1" <<< "$old" || echo "$2"; }
+    echo ""
+    _item "1" "Realm（支持 TCP / UDP，目标可为域名）"
+    _item "2" "nftables（内核转发，TCP+UDP，目标须为 IPv4）"
+    read -rp "  转发类型 [$( [[ "$(_fwd_def backend realm)" == nftables ]] && echo 2 || echo 1 )]: " choice
+    case "${choice:-$( [[ "$(_fwd_def backend realm)" == nftables ]] && echo 2 || echo 1 )}" in
+        1) backend=realm ;; 2) backend=nftables ;; *) _err "无效选择"; return 1 ;;
+    esac
+    read -rp "  备注 [$(_fwd_def remark '')]: " remark; remark="${remark:-$(_fwd_def remark '')}"
+    if [[ "$backend" == realm ]]; then
+        echo -e "  协议: 1) TCP  2) UDP  3) TCP + UDP"
+        read -rp "  请选择 [$(case "$(_fwd_def transport tcp)" in udp) echo 2;; tcp+udp) echo 3;; *) echo 1;; esac)]: " choice
+        case "${choice:-$(case "$(_fwd_def transport tcp)" in udp) echo 2;; tcp+udp) echo 3;; *) echo 1;; esac)}" in
+            1) transport=tcp ;; 2) transport=udp ;; 3) transport=tcp+udp ;; *) _err "无效选择"; return 1 ;;
+        esac
+        read -rp "  监听地址 [$(_fwd_def listen_host 0.0.0.0)]: " listen_host; listen_host="${listen_host:-$(_fwd_def listen_host 0.0.0.0)}"
+    else
+        transport=tcp+udp; listen_host=0.0.0.0
+    fi
+    read -rp "  监听端口 [$(_fwd_def listen_port '')]: " listen_port; listen_port="${listen_port:-$(_fwd_def listen_port '')}"
+    read -rp "  目标地址 [$(_fwd_def remote_host '')]: " remote_host; remote_host="${remote_host:-$(_fwd_def remote_host '')}"
+    read -rp "  目标端口 [$(_fwd_def remote_port '')]: " remote_port; remote_port="${remote_port:-$(_fwd_def remote_port '')}"
+    _is_valid_port "$listen_port" && _is_valid_port "$remote_port" || { _err "端口必须是 1-65535 的整数"; return 1; }
+    FWD_PROMPTED=$(jq -nc --arg b "$backend" --arg r "$remark" --arg t "$transport" --arg lh "$listen_host" --argjson lp "$((10#$listen_port))" \
+        --arg rh "$remote_host" --argjson rp "$((10#$remote_port))" --argjson on "$( [[ -n "$old" ]] && jq '.enabled' <<< "$old" || echo true)" \
+        '{backend:$b, remark:$r, transport:$t, listen_host:$lh, listen_port:$lp, remote_host:$rh, remote_port:$rp, enabled:$on}')
+}
+
+fwd_add_rule_menu() {
+    _fwd_prompt_rule || return 1
+    _fwd_cli add "" "$FWD_PROMPTED" && _ok "转发规则已创建并生效"
+}
+
+fwd_edit_rule_menu() {
+    _fwd_pick || return 0
+    _fwd_prompt_rule "$FWD_PICKED" || return 1
+    _fwd_cli update "$(jq -r .id <<< "$FWD_PICKED")" "$FWD_PROMPTED" && _ok "转发规则已修改并生效"
+}
+
+fwd_toggle_rule_menu() {
+    _fwd_pick || return 0
+    if [[ "$(jq -r .enabled <<< "$FWD_PICKED")" == true ]]; then
+        _fwd_cli disable "$(jq -r .id <<< "$FWD_PICKED")" && _ok "规则已停用"
+    else
+        _fwd_cli enable "$(jq -r .id <<< "$FWD_PICKED")" && _ok "规则已启用"
+    fi
+}
+
+fwd_delete_rule_menu() {
+    _fwd_pick || return 0
+    local confirm
     read -rp "  确认删除? [y/N]: " confirm
-    [[ ! "$confirm" =~ ^[yY]$ ]] && return 0
-    python3 - "$REALM_RULES_FILE" "$idx" <<'PY2'
-import json, sys
-from pathlib import Path
-p=Path(sys.argv[1])
-rules=json.loads(p.read_text()) if p.exists() else []
-del rules[int(sys.argv[2])-1]
-p.write_text(json.dumps(rules, ensure_ascii=False, indent=2))
-PY2
-    realm_restart_service || true
-    _ok "规则已删除"
+    [[ "$confirm" =~ ^[yY]$ ]] || return 0
+    _fwd_cli delete "$(jq -r .id <<< "$FWD_PICKED")" && _ok "规则已删除"
 }
 
 realm_status_logs_menu() {
@@ -31537,46 +31892,12 @@ realm_status_logs_menu() {
                 echo -e "  ${W}转发状态${NC}"
                 _line
                 local service_state="未运行"
-                if svc status "$REALM_SVC" >/dev/null 2>&1 || systemctl is-active --quiet "$REALM_SVC" 2>/dev/null; then
-                    service_state="运行中"
-                elif pgrep -x realm >/dev/null 2>&1; then
-                    service_state="运行中"
+                svc status "$REALM_SVC" >/dev/null 2>&1 && service_state="运行中"
+                echo -e "  ${C}Realm 服务:${NC} ${G}${service_state}${NC}"
+                if check_cmd nft; then
+                    echo -e "  ${C}nftables:${NC} ${G}$(nft list table ip "$NFT_FORWARD_TABLE" >/dev/null 2>&1 && echo 已加载 || echo 未加载)${NC}"
                 fi
-                echo -e "  ${C}服务状态:${NC} ${G}${service_state}${NC}"
-                echo ""
-                local count idx remark transport listen_host listen_port remote_host remote_port enabled ping_value tcp_bytes udp_bytes total_bytes tcp_state udp_state
-                count=$(jq 'length' "$REALM_RULES_FILE" 2>/dev/null || echo 0)
-                if [[ "$count" == "0" ]]; then
-                    echo -e "  ${D}当前没有转发规则${NC}"
-                else
-                    for idx in $(seq 0 $((count-1))); do
-                        remark=$(jq -r '.['"$idx"'].remark // "未命名"' "$REALM_RULES_FILE")
-                        transport=$(jq -r '.['"$idx"'].transport // "tcp"' "$REALM_RULES_FILE")
-                        listen_host=$(jq -r '.['"$idx"'].listen_host // "0.0.0.0"' "$REALM_RULES_FILE")
-                        listen_port=$(jq -r ".[$idx].listen_port" "$REALM_RULES_FILE")
-                        remote_host=$(jq -r ".[$idx].remote_host" "$REALM_RULES_FILE")
-                        remote_port=$(jq -r ".[$idx].remote_port" "$REALM_RULES_FILE")
-                        enabled=$(jq -r ".[$idx].enabled // true" "$REALM_RULES_FILE")
-                        ping_value=$(realm_ping_host "$remote_host")
-                        [[ -z "$ping_value" ]] && ping_value="超时/N/A"
-                        tcp_bytes=$(realm_get_traffic_bytes "$listen_port" tcp)
-                        udp_bytes=$(realm_get_traffic_bytes "$listen_port" udp)
-                        total_bytes=$((tcp_bytes + udp_bytes))
-                        tcp_state=$(ss -lnt 2>/dev/null | awk -v p=":$listen_port" '$4 ~ p"$" {found=1} END{print found?"运行中":"-"}')
-                        udp_state=$(ss -lnu 2>/dev/null | awk -v p=":$listen_port" '$4 ~ p"$" {found=1} END{print found?"运行中":"-"}')
-                        echo -e "  ${G}● ${remark}${NC}"
-                        echo -e "    规则      : ${G}${listen_host}:${listen_port}${NC} → ${G}${remote_host}:${remote_port}${NC}"
-                        echo -e "    状态      : $( [[ "$enabled" == "true" ]] && echo 运行中 || echo 已禁用 )"
-                        echo -e "    总流量    : $(format_bytes "$total_bytes")"
-                        echo -e "    TCP / UDP : $(format_bytes "$tcp_bytes") / $(format_bytes "$udp_bytes")"
-                        echo -e "    Ping      : ${ping_value}"
-                        echo -e "    监听端口  : ${listen_port}"
-                        echo -e "    监听状态  : TCP ${tcp_state} / UDP ${udp_state}"
-                        echo -e "    协议      : ${transport}"
-                        echo ""
-                    done
-                fi
-                _line
+                _fwd_print_rules || true
                 _pause
                 ;;
             2)
@@ -31692,24 +32013,28 @@ manage_port_forwarding() {
         _header
         echo -e "  ${W}端口转发${NC}"
         _line
-        _item "1" "新建转发规则"
+        _item "1" "新建转发规则（Realm / nftables）"
         _item "2" "查看转发规则"
-        _item "3" "删除转发规则"
-        _item "4" "转发状态 / 日志"
-        _item "5" "启动 iPerf3 服务端"
-        _item "6" "查看 iPerf3 状态"
-        _item "7" "停止 iPerf3 服务端"
+        _item "3" "修改转发规则"
+        _item "4" "启用 / 停用规则"
+        _item "5" "删除转发规则"
+        _item "6" "转发状态 / 日志"
+        _item "7" "启动 iPerf3 服务端"
+        _item "8" "查看 iPerf3 状态"
+        _item "9" "停止 iPerf3 服务端"
         _item "0" "返回"
         _line
         read -rp "  请选择: " choice
         case "$choice" in
-            1) realm_add_rule; _pause ;;
-            2) realm_list_rules; _pause ;;
-            3) realm_delete_rule; _pause ;;
-            4) realm_status_logs_menu ;;
-            5) start_iperf3_server_menu; _pause ;;
-            6) iperf3_status_menu; _pause ;;
-            7) stop_iperf3_server_menu; _pause ;;
+            1) fwd_add_rule_menu; _pause ;;
+            2) _fwd_print_rules; _pause ;;
+            3) fwd_edit_rule_menu; _pause ;;
+            4) fwd_toggle_rule_menu; _pause ;;
+            5) fwd_delete_rule_menu; _pause ;;
+            6) realm_status_logs_menu ;;
+            7) start_iperf3_server_menu; _pause ;;
+            8) iperf3_status_menu; _pause ;;
+            9) stop_iperf3_server_menu; _pause ;;
             0) return ;;
             *) _err "无效选择" ;;
         esac
@@ -31761,8 +32086,8 @@ manage_port_forwarding_backends() {
         _header
         echo -e "  ${W}端口转发${NC}"
         _line
-        _item "1" "Realm 转发"
-        _item "2" "nftables 转发"
+        _item "1" "转发规则（Realm / nftables，与面板同步）"
+        _item "2" "nft.sh 工具（诊断、BBR 等）"
         _item "0" "返回"
         _line
         read -rp "  请选择: " choice
@@ -33002,7 +33327,7 @@ _api_account_result() {
 }
 
 _api_dispatch() {
-    local request action api_id="" inventory target matches count
+    local request action api_id="" inventory target matches count forwards
     command -v jq >/dev/null 2>&1 || {
         printf '%s\n' '{"api_version":1,"status":"failed","code":"missing_jq","data":null}'
         return 1
@@ -33030,6 +33355,7 @@ _api_dispatch() {
                user_modes:$modes,
                accounts_api:{version:3,actions:["account_apply","result","account_share"],ops:($ops|split(" ")),
                  transaction:true,idempotent:true,snell_member_add:"assign_empty_instance"},
+               forward_api:{version:1,actions:["forward_apply","result"],ops:["add","update","delete","enable","disable"],backends:["realm","nftables"]},
                protocols:([($x|split(" ")[])|{core:"xray",protocol:.,write_supported:false}] +
                  [($s|split(" ")[])|{core:"singbox",protocol:.,write_supported:false}] +
                  [($p|split(" ")[])|{core:"standalone",protocol:.,write_supported:false}]),
@@ -33038,7 +33364,8 @@ _api_dispatch() {
             ;;
         inventory)
             inventory=$(_api_inventory 2>/dev/null) || { _api_reply failed invalid_database; return 1; }
-            _api_reply succeeded ok "$inventory"
+            forwards=$(fwd_inventory 2>/dev/null) || forwards='{"rules":[],"status":{}}'
+            _api_reply succeeded ok "$(jq -c --argjson f "$forwards" '. + {forwards: $f.rules, forward_status: $f.status}' <<< "$inventory")"
             ;;
         result)
             # 只读查询统一用户写接口的结果；未知请求永不重放。
@@ -33051,6 +33378,10 @@ _api_dispatch() {
             ;;
         account_share)
             _api_account_share "$request"
+            return $?
+            ;;
+        forward_apply)
+            _api_forward_apply "$request"
             return $?
             ;;
         plan)

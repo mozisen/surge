@@ -137,3 +137,13 @@
 - 平台模式下 `tg_send_message`、`send_tg_message`、`tg_send_bound_user_message`、`check_daily_report` 直接返回，即使配置文件被手动写回也不发送；「TG 通知配置」菜单只显示「TG 通知由 Vaio 平台管理」。
 - 以脚本为准的节点行为不变，脚本仍可独立使用 TG 通知。切回脚本不会恢复已清除的 TG 配置，需要重新设置。
 - 测试：新增 `tests/tg-platform.sh`（脚本模式保留配置与发送、平台模式清除配置/旧数据库配置/cron 且权限 600、幂等、平台模式不发送任何消息、机器人轮询清理后退出、菜单只读、切换与流量同步调用清理）；其余脚本测试通过（`singbox-stats-live.sh` 需要真实统计核心，`accounts-cli.sh` 仅在 CI 以 root 运行）。
+
+## 端口转发：Realm 与 nftables 统一管理（3.7.4-preview.9）
+
+- 规则模型：`{id, backend: realm|nftables, remark, transport, listen_host, listen_port, remote_host, remote_port, enabled}`。Realm 规则存于 `realm/rules.json`，旧规则首次读取时补 12 位十六进制 `id`。nftables 启用中的规则以 nft.sh 兼容的 `/etc/nftables.d/port-forward.conf`（`table ip port_forward`）为准，id 为 `nft-<监听端口>`；备注和停用的规则存于 `realm/rules.json`。用 nft.sh 新增或删除的规则会直接反映出来。
+- nftables 约束（与 nft.sh 一致）：固定 TCP+UDP、监听所有地址、目标必须是 IPv4。启用时按需安装 nftables、在 `/etc/nftables.conf` 加入 `include "/etc/nftables.d/*.conf"`、开机启用 nftables 服务、写入 `/etc/sysctl.d/99-nft-forward.conf` 开启 IPv4 转发。生成的配置先声明再删除表，重复加载不叠加；回程改用 `masquerade`，不再需要本机 IP。
+- 端口冲突：同一服务器上监听端口（同协议）不得与其他转发规则重复，也不得与代理实例端口重复（停用的规则也计入）。
+- 流量：Realm 沿用 iptables `VLESS_REALM_COUNTERS` 的入站计数；nftables 用独立表 `inet vless_forward_stats` 在 forward 链按目标和回程计数，每次应用时重建，流量同步时只在规则集合变化（含 nft.sh 改动）时重建。重启后清零。
+- 菜单「端口转发」：新建（选择 Realm 或 nftables）、查看（含状态与流量）、修改、启用/停用、删除、状态/日志；原 nft.sh 工具入口保留在上一级（诊断、BBR 等）。
+- 接口：`--api forward_apply`，`params.ops` 只含一个操作（add / update / delete / enable / disable，非新增须带 `id` 与 `base`）。`base` 是平台看到的规则，与节点当前规则不同则返回 `rule_changed`，不覆盖脚本或 nft.sh 的修改。事务共用 `.txn.lock`、`api-results` 幂等记录，备份 `rules.json`、Realm 配置和 nftables 配置；应用失败（如 nftables 校验失败、Realm 未能保持运行）恢复备份并重载，恢复失败为 unknown 且不重放。inventory 增加 `forwards`（规则 + `status` running/stopped/disabled + `bytes`）与 `forward_status`；capabilities 增加 `forward_api.version=1`。
+- 测试：新增 `tests/port-forward.sh`（旧规则补 id 与 nft.sh 规则识别、新增 Realm、各项校验与端口冲突、nftables 写入保留 nft.sh 规则并开启转发与计数、修改拒绝过期快照且 id 规则、停用保留元数据与启用恢复、应用失败回滚、幂等重放与结果查询、删除最后 Realm 规则停止服务、删除 nft.sh 规则、流量汇总与按需重建、请求格式）。其余脚本测试通过（`singbox-stats-live.sh` 需要真实统计核心，`accounts-cli.sh` 仅在 CI 以 root 运行）。

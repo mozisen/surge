@@ -5,8 +5,8 @@
 - 仓库：https://github.com/mozisen/surge
 - 分支：`codex/platform-3.7.4`
 - 提交：与当前根目录脚本同一 Git 提交；使用下列摘要固定内容。
-- 版本：`3.7.4-preview.8`（以平台为准时 TG 通知交由平台管理）
-- SHA-256：`1e36ec7ef9b031f3b68a15b56a9914932fefcabf66f406ed042a96a63fc0c846`
+- 版本：`3.7.4-preview.9`（端口转发 Realm / nftables 统一管理与平台写接口）
+- SHA-256：`47c23156bf1b6b13d9cd034cdf3d1a3b75235d373dbf2ac3513eab6db1c684a3`
 
 原快照未提供许可证，不对该文件另行声明许可证。
 
@@ -37,3 +37,5 @@ SS 单用户入站采集：按唯一端口和标签读取非清零计数，累�
 3.7.4-preview.7：SOCKS（每个端口实例一个用户，Xray 入站统计，policy 开启 statsInbound）与 Snell+ShadowTLS、Snell v5+ShadowTLS、SS2022+ShadowTLS（每台节点一份，归一个用户，nft 端口计数）接入用户管理。分配时更换凭据与 ShadowTLS 握手密码；唯一用户停用、到期或超额时 SOCKS 换成随机账号、ShadowTLS 停止前后端服务。没有 users 的旧实例行为不变。
 
 3.7.4-preview.8：以平台为准的节点不再使用本机 TG 通知。切到平台时（以及已是平台模式的节点在流量同步、机器人轮询或打开菜单时）清空 `telegram.json` 为默认值、删除数据库旧的 `.telegram`、移除用户机器人轮询 cron；平台模式下管理员告警、用户提醒、每日报告都不发送，TG 菜单只读。以脚本为准的节点不变。上一固定版本为 3.7.4-preview.7，SHA-256 为 `b472a93ef874b00386e2ad12ec20c22bb82ffc64642a5b244e39473512d3f117`。
+
+3.7.4-preview.9：端口转发统一管理 Realm 与 nftables。Realm 规则补稳定 id；nftables 启用中的规则以 nft.sh 兼容的 `/etc/nftables.d/port-forward.conf` 为准（nft.sh 改动也能同步），备注与停用规则存于 `realm/rules.json`。菜单新增修改、启用/停用；`--api` 新增 `forward_apply`（单操作事务、幂等、按快照拒绝过期修改、失败回滚）与 inventory 的 `forwards`/`forward_status`（状态与流量），能力声明 `forward_api.version=1`。上一固定版本为 3.7.4-preview.8，SHA-256 为 `1e36ec7ef9b031f3b68a15b56a9914932fefcabf66f406ed042a96a63fc0c846`。
