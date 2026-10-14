@@ -1038,6 +1038,12 @@ function authorityNotice(node) {
     const s = node.snapshot;
     if (!node.adopted || s.authority_version !== 1 || s.user_authority === 'platform') return '';
     const users = (s.instances || []).reduce((n, i) => n + (i.users || []).length, 0);
+    const last = (typeof tasks !== 'undefined' ? tasks : []).filter(t => t.node_id === node.id && t.action === 'platform_apply'
+        && t.request?.params?.ops?.[0]?.op === 'set_authority').sort((a, b) => b.created - a.created)[0];
+    if (!users && last && ['failed', 'unknown'].includes(last.status)) {
+        const ready = node.status === 'online' && !node.maintenance;
+        return `<div class="notice warn"><span>切换为平台管理失败：${esc(last.message || '原因未知')}。可升级节点程序后重试，自动切换每小时重试一次。</span><button data-action="authority" ${ready ? '' : 'disabled'}>重试切换</button></div>`;
+    }
     if (!users) return '<div class="notice"><span>正在把该服务器切换为平台统一管理用户，完成后在「用户管理」中新建用户。</span></div>';
     const ready = node.status === 'online' && !node.maintenance;
     return `<div class="notice warn"><span>该服务器仍有 ${users} 个脚本用户，尚未由平台统一管理。清空这些用户后切换为平台管理，现有客户端会失效。</span><button data-action="authority" ${ready ? '' : 'disabled'}>清空并切到平台管理</button></div>`;

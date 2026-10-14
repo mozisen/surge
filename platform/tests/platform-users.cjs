@@ -116,6 +116,12 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     assert.strictEqual(context.authorityNotice(node('c', {snapshot: {instances: [{users: [{}]}]}})), '');
     assert.strictEqual(context.authorityNotice(node('f', {adopted: false, snapshot: {authority_version: 1, user_authority: 'script', instances: [{users: [{}]}]}})), '');
     assert(context.authorityNotice(node('g', {snapshot: {authority_version: 1, user_authority: 'script', instances: []}})).includes('正在把该服务器切换为平台统一管理'));
+    context.tasks = [{node_id: 'g', action: 'platform_apply', created: 2, status: 'failed', message: '节点数据库格式无效<x>', request: {params: {ops: [{op: 'set_authority', mode: 'platform'}]}}},
+                     {node_id: 'g', action: 'platform_apply', created: 1, status: 'succeeded', message: '', request: {params: {ops: [{op: 'set_authority', mode: 'platform'}]}}}];
+    vm.runInContext('tasks = this.tasks;', context);
+    const failedNotice = context.authorityNotice(node('g', {snapshot: {authority_version: 1, user_authority: 'script', instances: []}}));
+    assert(failedNotice.includes('切换为平台管理失败：节点数据库格式无效&lt;x&gt;') && failedNotice.includes('重试切换') && !failedNotice.includes('正在把'));
+    vm.runInContext('tasks = [];', context);
     const withUsers = context.authorityNotice(node('h', {snapshot: {authority_version: 1, user_authority: 'script', instances: [{users: [{}, {}]}]}}));
     assert(withUsers.includes('仍有 2 个脚本用户') && withUsers.includes('data-action="authority" >清空并切到平台管理'));
     assert(context.authorityNotice(node('i', {status: 'offline', snapshot: {authority_version: 1, user_authority: 'script', instances: [{users: [{}]}]}})).includes('disabled'));
