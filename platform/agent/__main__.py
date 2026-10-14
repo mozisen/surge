@@ -147,6 +147,17 @@ class Agent:
                 future = executor.submit(self.run_task, task)
         return future
 
+    def maintain(self):
+        """Every minute, serialized with tasks: sample per-user traffic, then local expiry / quota enforcement."""
+        runtime = getattr(self.bridge, "runtime", None)
+        if self.script_api and runtime is not None:
+            try:
+                runtime.sync_traffic()
+            except (OSError, RuntimeError) as error:
+                logging.warning("用户流量同步失败：%s；详情见 %s/traffic-sync.log", error, self.cfg)
+            self.snapshot_at = 0          # report the new usage on the next poll
+        self.bridge.reconcile()
+
     def watch_addresses(self):
         """Public IPv4/IPv6 for relay targets, refreshed in the background so polls never wait on the network."""
         from .inventory import public_addresses
@@ -170,7 +181,7 @@ class Agent:
                             if maintenance is None or maintenance.done():
                                 if maintenance and maintenance.exception():
                                     logging.error("本地到期检查失败，请查看 runtime.log")
-                                maintenance = executor.submit(self.bridge.reconcile)
+                                maintenance = executor.submit(self.maintain)
                                 last_maintenance = time.time()
                         future = self.cycle(executor, future)
                         delay = 2

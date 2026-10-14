@@ -149,6 +149,29 @@ class Runtime:
             raise ValueError("无法从 Reality 私钥生成公钥，未安装协议")
         return private, base64.urlsafe_b64encode(result.stdout[-32:]).decode().rstrip("=")
 
+    def sync_traffic(self, timeout=120):
+        """Per-user usage: run the script's sampler (Xray / Sing-box / Snell counters into db.json).
+        The script installs its own cron only with its Telegram features, which the platform replaces,
+        so the agent runs it. The script takes the same db.json flock; callers must not hold it."""
+        script = ROOT / "vendor/vless-server.sh"
+        if hashlib.sha256(script.read_bytes()).hexdigest() != UPSTREAM_SHA:
+            raise RuntimeError("脚本完整性校验失败")
+        log_path = self.cfg / "traffic-sync.log"
+        with open(log_path, "ab") as log:
+            if log_path.stat().st_size > 1024 * 1024:
+                log.truncate(0)
+            proc = subprocess.Popen(["bash", str(script), "--sync-traffic"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                    start_new_session=True, cwd="/",
+                                    env={**os.environ, "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"})
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                raise RuntimeError("流量同步超时")
+        if proc.returncode:
+            raise RuntimeError("流量同步失败（退出码 %d）" % proc.returncode)
+
     def launch_upgrade(self, task_id):
         """Start the updater outside the agent's service so stopping the agent cannot kill it."""
         if not isinstance(task_id, str) or str(uuid.UUID(task_id)) != task_id:
