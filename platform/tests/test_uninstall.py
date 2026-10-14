@@ -11,7 +11,8 @@ STUB = '''#!/bin/sh
 echo "$(basename "$0") $*" >> "{log}"
 case "$(basename "$0")" in
   id) echo 0 ;;
-  crontab) if [ "$1" = -l ]; then cat "{cron}"; else cat > "{cron}"; fi ;;
+  # Like the real crontab: read all input, then replace the table (a pipeline reading -l must not see it truncated).
+  crontab) if [ "$1" = -l ]; then cat "{cron}"; else t=$(mktemp); cat > "$t"; mv "$t" "{cron}"; fi ;;
 esac
 exit 0
 '''
