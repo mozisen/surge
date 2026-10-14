@@ -50,3 +50,10 @@
 - 修复平台用户流量一直为 0：节点程序每分钟运行内置脚本 `--sync-traffic`（脚本的同步 cron 只随其 TG 功能安装，平台接管后从未同步）。节点需一键更新到 1.2.1 后生效。
 - 发布结果：vaio-panel `main` 追加提交 `f43a1c4`「Vaio Panel 1.2.1」（来源 surge `e0d6523`，作者 mozi），标签 `v1.2.1`。发布目录本地独立通过 unittest 211 项（跳过 3 项）与三个 cjs 测试；vaio-panel 的 Actions（main 与标签）全部通过。
 - 诊断依据（经用户授权只读检查 vps.town）：victoria 无 sync-traffic cron、无同步日志；面板中 vps 与 victoria 的 traffic_status 均为 unavailable，用户 used 均为 0。**真实验收**：未执行（节点尚未更新到 1.2.1）。
+
+## 1.2.2（2026-10-14 发布到 vaio-panel）
+
+- 1.2.1 无法从 1.2.0 升级：vps.town 面板内更新两次均在「运行测试」一步失败并保留 1.2.0，原因是 `test_missing_update_helper_is_installed_through_address_helper` 依赖真实的 `/etc/systemd/system/vaio-panel-update.path` 不存在。1.2.2 改为 `SYSTEMD_DIR` 配置（测试用临时目录），并在导出目录模拟已安装辅助服务的环境复跑全部测试通过。v1.2.1 标签保留，不改写历史。
+- 同时包含：打开「面板更新」立即重新检查（每分钟最多一次），后台缓存 1 小时；更新中左下角显示「更新中」。
+- 发布结果：vaio-panel `main` 追加提交 `bbcb878`「Vaio Panel 1.2.2」（来源 surge `316cc59`，作者 mozi），标签 `v1.2.2`。发布目录本地 unittest 212 项（跳过 3 项）与三个 cjs 测试通过；vaio-panel Actions（main 与标签）通过。
+- 经用户授权，已清除 vps.town 面板的 `update_check` 缓存（使其显示 v1.2.1）。**真实验收**：未完成（待在 vps.town 面板内更新到 1.2.2，并一键更新节点程序验证用户流量）。
