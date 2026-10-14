@@ -2689,3 +2689,14 @@ dialog.install .install-warning {
         transform: rotate(90deg);
     }
 }
+
+/* 面板地址：节点切换进度 */
+.pa-migration {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line-soft);
+}
+.pa-migration h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+}

@@ -227,6 +227,19 @@ def validate_upgrade_task(data):
     return {"action": "agent_upgrade", "params": {}}
 
 
+def validate_set_url_task(data):
+    """Point a node at the panel's new HTTPS address (after binding a domain)."""
+    from urllib.parse import urlsplit
+    if not isinstance(data, dict) or set(data) != {"action", "params"} or data["action"] != "agent_set_url" \
+            or not isinstance(data["params"], dict) or set(data["params"]) != {"url"} or not isinstance(data["params"]["url"], str):
+        raise ValueError("面板地址任务字段无效")
+    url = data["params"]["url"].rstrip("/")
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname or parts.path or parts.query or parts.fragment or parts.username or len(url) > 300:
+        raise ValueError("新的面板地址必须是 HTTPS 根地址")
+    return {"action": "agent_set_url", "params": {"url": url}}
+
+
 FORWARD_FIELDS = ("backend", "remark", "transport", "listen_host", "listen_port", "remote_host", "remote_port", "enabled")
 FORWARD_OPS = {"add": {"op", "rule"}, "update": {"op", "id", "base", "rule"}, "delete": {"op", "id", "base"},
                "enable": {"op", "id", "base"}, "disable": {"op", "id", "base"}}

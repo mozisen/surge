@@ -56,6 +56,25 @@ def extract(payload, target):
                 path.chmod(0o755 if item.mode & 0o111 else 0o644)
 
 
+ADDRESS_UNITS = {
+    "vaio-panel-address.service": "[Unit]\nDescription=Vaio Panel address change\n[Service]\nType=oneshot\n"
+                                  "ExecStart=/usr/bin/python3 /opt/vaio-panel/scripts/panel-address.py apply\n",
+    "vaio-panel-address.path": "[Unit]\nDescription=Vaio Panel address change requests\n[Path]\n"
+                               "PathExists=/var/lib/vaio-panel/address-request.json\n[Install]\nWantedBy=multi-user.target\n",
+}
+
+
+def ensure_address_helper(units=Path("/etc/systemd/system")):
+    """Panels installed before 1.1.0 lack the root helper that changes the panel address; add it once."""
+    if all((units / name).exists() for name in ADDRESS_UNITS):
+        return False
+    for name, content in ADDRESS_UNITS.items():
+        (units / name).write_text(content)
+    subprocess.run(['systemctl', 'daemon-reload'], check=False, timeout=60)
+    subprocess.run(['systemctl', 'enable', '--now', 'vaio-panel-address.path'], check=False, timeout=60)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="升级面板，保留数据并自动检查恢复")
     parser.add_argument("--repo", default="mozisen/vaio-panel", help="GitHub 仓库：mozisen/vaio-panel（正式版）或 mozisen/surge（预览版）")
@@ -131,6 +150,7 @@ def main():
             shutil.copy2(stage/'scripts/vaio-panel','/usr/local/bin/vaio-panel')
             Path('/usr/local/bin/vaio-panel').chmod(0o755)
             (backup/'previous-code').write_text(str(old_link or old_directory)+'\n')
+            ensure_address_helper()
             print('升级完成，版本 '+expected+'；备份 '+str(backup))
         except BaseException:
             if switched:

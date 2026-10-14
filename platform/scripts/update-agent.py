@@ -134,8 +134,9 @@ def main():
     config = json.loads(Path("/etc/vaio-agent/config.json").read_text())
     base = config["url"].rstrip("/")
     parsed = urlsplit(base)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.query or parsed.fragment or parsed.path:
-        raise SystemExit("公网节点升级需要 HTTPS 面板根地址")
+    if parsed.scheme not in ("https", "http") or (parsed.scheme == "http" and config.get("allow_http") is not True) \
+            or not parsed.hostname or parsed.username or parsed.query or parsed.fragment or parsed.path:
+        raise SystemExit("公网节点升级需要 HTTPS 面板根地址（未绑定域名的面板除外）")
     opener = urllib.request.build_opener(NoRedirect())
 
     def api(path, data=None, private=False):

@@ -79,7 +79,8 @@ const actions = {
     inspect: '检查实例',
     platform_apply: '平台用户同步',
     agent_upgrade: '一键升级',
-    forward_apply: '端口转发'
+    forward_apply: '端口转发',
+    agent_set_url: '切换面板地址'
 };
 // 端口转发任务的一行摘要：操作 + 监听端口
 const forwardSummary = t => {
@@ -205,7 +206,7 @@ function login() {
 function shell(content, section) {
     const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器管理'], ['instances', 'globe', '节点管理'], ['relays', 'relay', '中转管理'], ['forwards', 'forward', '端口转发'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '通知配置'], ['backups', 'server', '备份恢复'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
     const nav = links.map(([id, ico, text]) => `<a href="#${id}" class="${section===id?'active':''}"${section===id?' aria-current="page"':''}>${icon(ico)}${text}</a>`).join('');
-    $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
+    $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="pa-open">面板地址</button><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
 }
 
 // Readout value: number large, unit set apart in small muted type.
@@ -253,7 +254,7 @@ function nodeCards() {
 }
 
 function taskTable(list) {
-    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='forward_apply'?esc(forwardSummary(t)):esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
+    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
 }
 
 function overview(section) {
@@ -484,7 +485,7 @@ function showTask(id) {
         return;
     }
     const r = t.result || {};
-    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='forward_apply'?esc(forwardSummary(t)):esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
+    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
 }
 
 function installPortCandidate(instances, current) {
@@ -780,6 +781,7 @@ document.addEventListener('click', async e => {
         } else if (action.startsWith('pu-')) await userAction(action, b);
         else if (action.startsWith('fw-')) await forwardAction(action, b);
         else if (action.startsWith('rl-')) await relayAction(action, b);
+        else if (action.startsWith('pa-')) await panelAddressAction(action, b);
         else if (action === 'node-instance') {
             // Instance dialogs act on `selected`; point it at the instance's server first.
             selected = nodes.find(n => n.id === b.dataset.node);
@@ -1225,6 +1227,51 @@ async function notifyAction(action, b) {
             await post('/users/' + b.dataset.id + '/tg-unbind');
             toast('已解除 ' + b.dataset.name + ' 的 Telegram 绑定');
             await monitorPage();
+        });
+    }
+}
+
+// ---------------------------------------------------------------- 面板地址（绑定域名切换 HTTPS、节点改用新地址、关闭旧地址）
+const panelMigrationText = {succeeded: '已切换', failed: '失败', unknown: '结果未知', queued: '等待节点', running: '切换中', missing: '未通知'};
+async function panelAddressDialog() {
+    const d = await api('/panel-address'), st = d.status, m = d.migration;
+    const busy = d.pending || st?.state === 'running';
+    const statusLine = busy ? '<div class="notice">正在处理地址变更（申请证书、配置 Nginx、重启面板），请稍候…</div>'
+        : st?.state === 'failed' ? `<div class="notice warn">上次操作失败：${esc(st.message)}</div>`
+        : st?.state === 'succeeded' ? `<div class="notice">${esc(st.message)}</div>` : '';
+    const failedNodes = (m?.nodes || []).filter(n => !['succeeded', 'queued', 'running'].includes(n.status));
+    const migration = m && m.total ? `<section class="pa-migration"><h3>节点改用新地址 <span class="count">${m.done} / ${m.total}</span></h3>${m.nodes.map(n => `<div class="kv"><span>${esc(n.name)}</span><span>${esc(panelMigrationText[n.status] || n.status)}${n.status === 'failed' && n.message ? `<br><span class="muted">${esc(n.message)}</span>` : ''}</span></div>`).join('')}<div class="action-row">${failedNodes.length ? '<button type="button" data-action="pa-retry">重新通知未切换的节点</button>' : ''}${d.legacy_open ? '<button type="button" data-action="pa-close">关闭旧地址</button>' : ''}</div><p class="helper">节点需升级到 1.1.0 及以上才能自动改用新地址；旧地址（未加密的 IP 地址或原域名）在关闭前继续可用。</p></section>` : (d.legacy_open ? '<div class="action-row"><button type="button" data-action="pa-close">关闭旧地址</button></div>' : '');
+    modal('面板地址', `<div class="kv"><span>当前地址</span><span class="mono">${esc(d.url)}</span></div><div class="kv"><span>连接</span><span>${d.secure ? 'HTTPS 加密' : 'HTTP 未加密'}</span></div>${statusLine}
+<form id="pa-form"><div class="install-grid"><div><label for="pa-domain">域名</label><input id="pa-domain" maxlength="253" placeholder="panel.example.com" required></div><div><label for="pa-port">HTTPS 端口</label><input id="pa-port" type="number" min="1" max="65535" value="443" required></div></div>
+<p class="helper">先把域名解析到本服务器，并放行 TCP 80（申请证书）与该端口。提交后自动申请证书、配置 Nginx 并重启面板，失败会恢复原配置；完成后请用新地址访问，节点会自动收到新地址。</p>
+${d.helper ? '' : '<div class="notice warn">此面板缺少地址辅助服务（升级到 1.1.0 后自动安装）。也可在服务器以 root 执行：vaio-panel domain 域名 端口</div>'}
+<div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">关闭</button><button type="submit" class="primary"${busy || !d.helper ? ' disabled' : ''}>${d.secure ? '更换域名' : '绑定域名并切换 HTTPS'}</button></div></form>${migration}`);
+    $('#pa-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target);
+        button.disabled = true;
+        try {
+            await post('/panel-address', {domain: $('#pa-domain').value.trim(), port: Number($('#pa-port').value)});
+            toast('已提交，正在申请证书并切换地址');
+            await panelAddressDialog();
+        } catch (err) { formError(err); button.disabled = false; }
+    };
+    if (busy) setTimeout(() => { if ($('#modal').open && $('#pa-form')) panelAddressDialog().catch(() => {}); }, 4000);
+}
+async function panelAddressAction(action) {
+    if (action === 'pa-open') return panelAddressDialog();
+    if (action === 'pa-retry') {
+        const r = await post('/panel-address/retry');
+        toast(r.queued ? '已重新通知 ' + r.queued + ' 个节点' : '没有需要重新通知的节点');
+        return panelAddressDialog();
+    }
+    if (action === 'pa-close') {
+        const d = await api('/panel-address');
+        const waiting = (d.migration?.nodes || []).filter(n => n.status !== 'succeeded').map(n => n.name);
+        choiceDialog('关闭旧地址', waiting.length ? `以下节点尚未改用新地址：${waiting.map(esc).join('、')}。关闭后它们将无法连接面板，需要在节点重新执行安装命令。确定关闭？`
+            : '关闭未加密的 IP 地址（或原域名），之后只能通过当前 HTTPS 地址访问面板。', [], async () => {
+            await post('/panel-address/close-legacy', waiting.length ? {force: true} : {});
+            toast('正在关闭旧地址');
         });
     }
 }

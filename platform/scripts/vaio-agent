@@ -11,5 +11,37 @@ case "${1:-help}" in
     [ "$(id -u)" = 0 ] || { echo '请使用 root 执行'; exit 1; }
     if [ "$1" = resume ]; then python3 /opt/vaio-agent/scripts/update-agent.py --resume
     else python3 /opt/vaio-agent/scripts/update-agent.py; fi ;;
-  *) echo '用法：vaio-agent status（状态）| logs（日志）| update（保留身份升级）| resume（解除维护）' ;;
+  uninstall)
+    [ "$(id -u)" = 0 ] || { echo '请使用 root 执行'; exit 1; }
+    P=${VAIO_UNINSTALL_PREFIX:-}
+    if [ "${2:-}" != --yes ] && [ "${2:-}" != -y ]; then
+      echo '将删除节点程序（服务、/opt/vaio-agent、身份与日志）。节点脚本、代理配置和用户保留，代理照常运行。'
+      printf '输入 UNINSTALL 确认卸载: '
+      read -r answer </dev/tty
+      [ "$answer" = UNINSTALL ] || { echo '已取消'; exit 0; }
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl stop vaio-agent 2>/dev/null || true
+      systemctl disable vaio-agent >/dev/null 2>&1 || true
+      rm -f "$P/etc/systemd/system/vaio-agent.service"
+      systemctl daemon-reload 2>/dev/null || true
+    elif command -v rc-service >/dev/null 2>&1; then
+      rc-service vaio-agent stop 2>/dev/null || true
+      rc-update del vaio-agent default >/dev/null 2>&1 || true
+      rm -f "$P/etc/init.d/vaio-agent"
+    fi
+    # Scheduled jobs that ran the bundled script go back to the node's own script.
+    if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q '/opt/vaio-agent/vendor/vless-server.sh'; then
+      if [ -x "$P/usr/local/bin/vless-server.sh" ]; then
+        crontab -l | sed 's#/opt/vaio-agent/vendor/vless-server.sh#/usr/local/bin/vless-server.sh#g' | crontab -
+        echo '定时任务已改用 /usr/local/bin/vless-server.sh'
+      else
+        echo '注意：定时任务仍指向节点程序内置脚本，请在节点脚本菜单中重新设置流量与到期检查任务'
+      fi
+    fi
+    rm -rf "$P/opt/vaio-agent" "$P"/opt/vaio-agent-backup-* "$P/etc/vaio-agent" "$P/var/lib/vaio-agent"
+    rm -f "$P/usr/local/bin/vaio-agent"
+    echo '节点程序已卸载。如需重新接入，请在面板「添加服务器」复制新的安装命令。'
+    ;;
+  *) echo '用法：vaio-agent status（状态）| logs（日志）| update（保留身份升级）| resume（解除维护）| uninstall（卸载）' ;;
 esac

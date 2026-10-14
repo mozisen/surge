@@ -1,3 +1,4 @@
+import hashlib
 import io
 import gzip
 import json
@@ -37,6 +38,23 @@ def agent_archive():
     return gzip.compress(buffer.getvalue(), mtime=0)
 
 
+def queue_url_migration(db, public_url, retry=False, now=None):
+    """Queue agent_set_url for nodes that have not switched to public_url yet (once per address; retry re-queues failures)."""
+    from .common import validate_set_url_task
+    now = time.time() if now is None else now
+    prefix = "set-url:" + hashlib.sha256(public_url.encode()).hexdigest()[:12] + ":"
+    request = json.dumps(validate_set_url_task({"action": "agent_set_url", "params": {"url": public_url}}))
+    count = 0
+    for node in db.execute("SELECT id FROM nodes WHERE adopted=1 AND deleted IS NULL AND revoked=0").fetchall():
+        last = db.execute("SELECT status FROM tasks WHERE request_key LIKE ? AND node_id=? ORDER BY created DESC LIMIT 1", (prefix + "%", node["id"])).fetchone()
+        if last and last["status"] in ("succeeded", "queued", "running", "unknown"):
+            continue
+        db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
+                   (str(uuid.uuid4()), node["id"], "agent_set_url", request, "queued", now, prefix + uuid.uuid4().hex[:8]))
+        count += 1
+    return count
+
+
 def create_app(config=None):
     app = Flask(__name__, static_folder=str(ROOT / "web"), static_url_path="/assets")
     app.config.update(MAX_CONTENT_LENGTH=1024 * 1024,
@@ -48,10 +66,20 @@ def create_app(config=None):
     url = urlsplit(app.config["PUBLIC_URL"])
     if url.scheme not in ("http", "https") or not url.hostname or url.path not in ("", "/") or url.query or url.fragment or url.username:
         raise ValueError("VAIO_PUBLIC_URL 必须是完整的 HTTP(S) 根地址")
-    if url.scheme != "https" and url.hostname not in ("localhost", "127.0.0.1", "::1"):
-        raise ValueError("公网面板必须设置 HTTPS 地址")
+    allow_http = app.config.get("ALLOW_HTTP", os.environ.get("VAIO_ALLOW_HTTP") == "1")
+    if url.scheme != "https" and not allow_http and url.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("公网面板必须设置 HTTPS 地址（未绑定域名时由安装器设置 VAIO_ALLOW_HTTP=1）")
     store = Store(app.config["DATABASE"])
     app.extensions["store"] = store
+    data_dir = Path(app.config["DATABASE"]).resolve().parent
+    with store.connect() as db:
+        # The panel came up on a different address than last time (domain bound or changed): tell every node once.
+        # First start (fresh install or upgrade from 1.0.0) only records the address the nodes already use.
+        db.execute("BEGIN IMMEDIATE")
+        last = db.execute("SELECT value FROM settings WHERE key='panel_url'").fetchone()
+        if last and last[0] != app.config["PUBLIC_URL"] and url.scheme == "https":
+            queue_url_migration(db, app.config["PUBLIC_URL"])
+        db.execute("INSERT OR REPLACE INTO settings VALUES('panel_url',?)", (app.config["PUBLIC_URL"],))
     if not app.config["TESTING"] and os.environ.get("VAIO_MONITOR", "1") != "0":
         from .monitor import start
         start(store)
@@ -395,7 +423,8 @@ def create_app(config=None):
 
     def enrollment(node_id, token):
         # Download script uses token via stdin, never as a URL query or process argument.
-        payload = json.dumps({"url": app.config["PUBLIC_URL"], "node_id": node_id, "enroll_token": token})
+        payload = json.dumps({"url": app.config["PUBLIC_URL"], "node_id": node_id, "enroll_token": token,
+                              **({"allow_http": True} if url.scheme == "http" else {})})
         script = (ROOT / "scripts/install-agent.sh").read_text()
         script = script.replace("@@URL@@", shlex.quote(app.config["PUBLIC_URL"]))
         script = script.replace("@@ENROLLMENT@@", payload)
@@ -930,6 +959,76 @@ def create_app(config=None):
     def relay_share(line_id):
         from . import relays
         return jsonify(id=relay_change("relay.share", lambda db: relays.share(db, line_id))), 201
+
+    def address_migration(db):
+        key = "set-url:" + hashlib.sha256(app.config["PUBLIC_URL"].encode()).hexdigest()[:12] + ":%"
+        nodes = {r["id"]: r["name"] for r in db.execute("SELECT id, name FROM nodes WHERE adopted=1 AND deleted IS NULL AND revoked=0")}
+        latest = {}
+        for row in db.execute("SELECT node_id, status, message FROM tasks WHERE request_key LIKE ? ORDER BY created", (key,)):
+            latest[row["node_id"]] = (row["status"], row["message"])
+        items = [{"node_id": i, "name": n, "status": latest.get(i, ("missing", ""))[0], "message": latest.get(i, ("", ""))[1]} for i, n in nodes.items()]
+        return {"total": len(items), "done": sum(1 for i in items if i["status"] == "succeeded"), "nodes": items}
+
+    @app.get("/api/panel-address")
+    @admin
+    def panel_address():
+        status_file, request_file = data_dir / "address-status.json", data_dir / "address-request.json"
+        try:
+            status = json.loads(status_file.read_text())
+        except (OSError, ValueError):
+            status = None
+        with store.connect() as db:
+            migration = address_migration(db) if url.scheme == "https" else None
+        return jsonify(url=app.config["PUBLIC_URL"], secure=url.scheme == "https", legacy_open=allow_http and url.scheme == "https",
+                       helper=Path("/etc/systemd/system/vaio-panel-address.path").exists() or app.config.get("ADDRESS_HELPER", False),
+                       pending=request_file.exists(), status=status, migration=migration)
+
+    def address_request(payload):
+        request_file = data_dir / "address-request.json"
+        if request_file.exists():
+            raise ValueError("上一个地址操作仍在处理中，请稍候")
+        staged = data_dir / ("address-request.%d.tmp" % os.getpid())
+        staged.write_text(json.dumps(payload))
+        os.replace(staged, request_file)
+
+    @app.post("/api/panel-address")
+    @admin
+    def panel_address_set():
+        data = body()
+        domain, port = data.get("domain"), data.get("port", 443)
+        if set(data) - {"domain", "port"} or not isinstance(domain, str) or not re.fullmatch(r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}", domain):
+            raise ValueError("域名格式无效，请输入不带 https:// 和路径的域名")
+        if type(port) is not int or not 1 <= port <= 65535 or port == 18080:
+            raise ValueError("端口必须是 1–65535 的整数（18080 为后台端口）")
+        address_request({"action": "set_domain", "domain": domain.lower(), "port": port})
+        with store.connect() as db:
+            audit(db, "panel.address_requested", None, domain.lower() + ":" + str(port))
+        return jsonify(ok=True)
+
+    @app.post("/api/panel-address/close-legacy")
+    @admin
+    def panel_address_close():
+        if url.scheme != "https":
+            raise ValueError("请先绑定域名并切换到 HTTPS")
+        with store.connect() as db:
+            migration = address_migration(db)
+        waiting = [n["name"] for n in migration["nodes"] if n["status"] != "succeeded"]
+        if waiting and body().get("force") is not True:
+            return jsonify(error="以下节点尚未改用新地址：" + "、".join(waiting) + "；关闭后它们将无法连接，需在节点重新执行安装命令", waiting=waiting), 409
+        address_request({"action": "close_legacy"})
+        with store.connect() as db:
+            audit(db, "panel.legacy_close_requested", None, "")
+        return jsonify(ok=True)
+
+    @app.post("/api/panel-address/retry")
+    @admin
+    def panel_address_retry():
+        if url.scheme != "https":
+            raise ValueError("请先绑定域名并切换到 HTTPS")
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            count = queue_url_migration(db, app.config["PUBLIC_URL"], retry=True)
+        return jsonify(queued=count)
 
     @app.post("/api/nodes/<node_id>/upgrade")
     @admin

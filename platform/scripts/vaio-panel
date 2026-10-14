@@ -29,5 +29,44 @@ case "${1:-help}" in
     cd /opt/vaio-panel
     runuser -u vaio-panel --preserve-environment -- .venv/bin/python -m vaio init
     ;;
-  *) echo '用法：vaio-panel status（状态）| restart（重启）| logs（日志）| account（重置账号密码）| update（备份并升级）| backup（创建备份）| verify-backup --name 文件名（校验）| restore --name 文件名（停服恢复）' ;;
+  domain)
+    [ "$(id -u)" = 0 ] || { echo '更换面板地址需要 root'; exit 1; }
+    [ -n "${2:-}" ] || { echo '用法：vaio-panel domain 域名 [端口，默认 443]'; exit 1; }
+    exec python3 /opt/vaio-panel/scripts/panel-address.py domain --domain "$2" --port "${3:-443}" ;;
+  uninstall)
+    [ "$(id -u)" = 0 ] || { echo '卸载需要 root'; exit 1; }
+    shift
+    # VAIO_UNINSTALL_PREFIX only for tests; the real paths are absolute.
+    P=${VAIO_UNINSTALL_PREFIX:-}
+    yes=''; backup=''
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --yes|-y) yes=1 ;;
+        --backup) [ -n "${2:-}" ] || { echo '用法：vaio-panel uninstall [--yes] [--backup 文件.tar.gz]'; exit 1; }; backup=$2; shift ;;
+        *) echo '用法：vaio-panel uninstall [--yes] [--backup 文件.tar.gz]'; exit 1 ;;
+      esac
+      shift
+    done
+    if [ -z "$yes" ]; then
+      echo '将删除面板服务、程序、配置、数据库和面板备份、Nginx 站点与系统用户 vaio-panel。'
+      echo '不会删除证书、其他网站，也不影响各节点上的代理和用户（节点程序会连不上面板）。'
+      printf '输入 UNINSTALL 确认卸载: '
+      read -r answer </dev/tty
+      [ "$answer" = UNINSTALL ] || { echo '已取消'; exit 0; }
+    fi
+    if [ -n "$backup" ]; then
+      tar -czf "$backup" -C "$P/" var/lib/vaio-panel etc/vaio-panel && chmod 600 "$backup" && echo "已备份数据库与配置到 $backup" || { echo '备份失败，已停止卸载'; exit 1; }
+    fi
+    systemctl stop vaio-panel-address.path vaio-panel-address.service vaio-panel 2>/dev/null || true
+    systemctl disable vaio-panel vaio-panel-address.path >/dev/null 2>&1 || true
+    rm -f "$P/etc/systemd/system/vaio-panel.service" "$P/etc/systemd/system/vaio-panel-address.service" "$P/etc/systemd/system/vaio-panel-address.path"
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f "$P/etc/nginx/sites-enabled/vaio-panel" "$P/etc/nginx/sites-available/vaio-panel"
+    if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then systemctl reload nginx 2>/dev/null || true; fi
+    rm -rf "$P/opt/vaio-panel" "$P/opt/vaio-panel-releases" "$P"/opt/vaio-panel-before-* "$P/etc/vaio-panel" "$P/var/lib/vaio-panel" "$P/var/backups/vaio-panel"
+    userdel vaio-panel 2>/dev/null || true
+    rm -f "$P/usr/local/bin/vaio-panel"
+    echo '面板已卸载。重新安装请运行 README 中的安装命令。'
+    ;;
+  *) echo '用法：vaio-panel status（状态）| restart（重启）| logs（日志）| account（重置账号密码）| update（备份并升级）| domain 域名 [端口]（绑定域名）| backup（创建备份）| verify-backup --name 文件名（校验）| restore --name 文件名（停服恢复）| uninstall（卸载）' ;;
 esac

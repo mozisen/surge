@@ -33,7 +33,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -418,4 +418,31 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     const noUser = context.relayLandingOptions(landNode, null);
     assert(noUser.slice(0, 2).every(o => o.disabled && o.label.includes('需选择用户')) && !noUser.at(-1).disabled);
     console.log('PASS relay page: server filter, chain, actions, retry/delete/share payloads');
+
+    // 面板地址：HTTP 提示、绑定表单、处理中、迁移进度与关闭旧地址
+    element('pa-form'); element('pa-domain'); element('pa-port');
+    context.responses['/panel-address'] = {url: 'http://1.2.3.4:8080', secure: false, legacy_open: false, helper: true, pending: false, status: null, migration: null};
+    await context.panelAddressDialog();
+    assert(html.title === '面板地址' && html.modal.includes('HTTP 未加密') && html.modal.includes('绑定域名并切换 HTTPS') && !html.modal.includes('pa-close'));
+    elements['pa-domain'].value = ' panel.example.com '; elements['pa-port'].value = '8443';
+    posts.length = 0;
+    context.post = async (path, data) => { posts.push([path, data]); return {queued: 1}; };
+    await elements['pa-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), ['/panel-address', {domain: 'panel.example.com', port: 8443}]);
+    context.responses['/panel-address'] = {url: 'https://panel.example.com:8443', secure: true, legacy_open: true, helper: true, pending: false,
+        status: {state: 'failed', message: '执行失败，已恢复原配置：<x>'},
+        migration: {total: 2, done: 1, nodes: [{name: 'A', status: 'succeeded'}, {name: '<b>B</b>', status: 'failed', message: '任务字段无效'}]}};
+    await context.panelAddressDialog();
+    assert(html.modal.includes('HTTPS 加密') && html.modal.includes('更换域名') && html.modal.includes('上次操作失败：执行失败，已恢复原配置：&lt;x&gt;'));
+    assert(html.modal.includes('1 / 2') && html.modal.includes('&lt;b&gt;B&lt;/b&gt;') && html.modal.includes('data-action="pa-retry"') && html.modal.includes('data-action="pa-close"'));
+    await context.panelAddressAction('pa-close');
+    assert(html.modal.includes('尚未改用新地址：&lt;b&gt;B&lt;/b&gt;'));
+    await elements['pu-choice-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.at(-1))), ['/panel-address/close-legacy', {force: true}]);
+    context.responses['/panel-address'] = {...context.responses['/panel-address'], helper: false, pending: true};
+    context.setTimeout = () => {};
+    vm.runInContext('setTimeout = this.setTimeout;', context);
+    await context.panelAddressDialog();
+    assert(html.modal.includes('正在处理地址变更') && html.modal.includes('vaio-panel domain') && html.modal.includes('type="submit" class="primary" disabled'));
+    console.log('PASS panel address dialog: HTTP notice, bind payload, failure, migration, close legacy, busy and missing helper');
 })().catch(error => { console.error(error); process.exit(1); });

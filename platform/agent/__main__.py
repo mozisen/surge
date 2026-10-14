@@ -14,17 +14,19 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from vaio import __version__
+from vaio.common import validate_set_url_task
 from .bridge import Bridge, TransactionUnknown
 from .inventory import inventory, read_db, rows
 from .runtime import Runtime, active_users, atomic_write
 from .script_api import ScriptAPI
 
 
-def valid_url(url):
+def valid_url(url, allow_http=False):
     parsed = urlsplit(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.path not in ("", "/") or parsed.query or parsed.fragment or parsed.username:
         raise ValueError("面板地址格式无效")
-    if parsed.scheme != "https" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+    # HTTP only for panels installed without a domain (the panel marks the enrollment), or local development.
+    if parsed.scheme != "https" and not allow_http and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError("节点只接受 HTTPS 面板，开发环境可使用本机回环地址")
     return url.rstrip("/")
 
@@ -44,9 +46,10 @@ def post(url, payload, token=None):
 
 
 class Agent:
-    def __init__(self, config, state, cfg="/etc/vless-reality", bridge=None):
+    def __init__(self, config, state, cfg="/etc/vless-reality", bridge=None, config_path=None):
         self.config = config
-        self.url = valid_url(config["url"])
+        self.config_path = config_path
+        self.url = valid_url(config["url"], config.get("allow_http") is True)
         self.state = Path(state)
         self.state.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.cfg = cfg
@@ -67,8 +70,26 @@ class Agent:
     def api(self, suffix, payload):
         return post(self.url + "/api/agent/" + self.config["node_id"] + suffix, payload, self.config["token"])
 
+    def set_url(self, task):
+        """Switch to the panel's new HTTPS address once it answers with a valid certificate."""
+        url = validate_set_url_task({k: v for k, v in task.items() if k != "id"})["params"]["url"]
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(urllib.request.Request(url + "/healthz", headers={"User-Agent": "Vaio-Agent/" + __version__}), timeout=15) as response:
+                if response.status != 200:
+                    raise ValueError
+        except Exception:
+            raise ValueError("无法通过 HTTPS 访问新的面板地址（证书或网络），仍使用原地址")
+        config = {k: v for k, v in self.config.items() if k != "allow_http"}
+        config["url"] = url
+        if self.config_path:
+            atomic_write(self.config_path, json.dumps(config))
+        self.config, self.url = config, url
+        return {"steps": ["已验证新地址的 HTTPS 证书", "已保存新的面板地址"]}
+
     def run_task(self, task):
         try:
+            if task.get("action") == "agent_set_url":
+                return dict(status="succeeded", message="已改用新的面板地址", result=self.set_url(task))
             result = self.bridge.execute(task)
             return dict(status="succeeded", message="操作完成", result=result)
         except TransactionUnknown as error:
@@ -181,9 +202,11 @@ def main():
     args = parser.parse_args()
     if args.command == "enroll":
         data = json.load(sys.stdin)
-        url = valid_url(data["url"])
+        allow_http = data.get("allow_http") is True
+        url = valid_url(data["url"], allow_http)
         result = post(url + "/api/enroll", {"node_id": data["node_id"], "enroll_token": data["enroll_token"]})
-        atomic_write(args.config, json.dumps({"url": url, "node_id": result["node_id"], "token": result["token"]}))
+        atomic_write(args.config, json.dumps({"url": url, "node_id": result["node_id"], "token": result["token"],
+                                              **({"allow_http": True} if allow_http else {})}))
         print("节点注册完成")
     elif args.command == "prepare":
         import re
@@ -195,7 +218,7 @@ def main():
         Runtime(args.cfg, args.state).upstream("_snell_update_counter_port", args.instance, str(found[0]["port"]))
     else:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-        Agent(json.loads(Path(args.config).read_text()), args.state, args.cfg).run()
+        Agent(json.loads(Path(args.config).read_text()), args.state, args.cfg, config_path=args.config).run()
 
 
 if __name__ == "__main__":
