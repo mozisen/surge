@@ -1,9 +1,11 @@
 import importlib.util
 import io
+import os
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from vaio.server import agent_archive
 from vaio import __version__
@@ -31,6 +33,36 @@ class UpgradeTests(unittest.TestCase):
             load('update_panel').extract(payload.getvalue(), root)
             self.assertEqual((root/'vaio/server.py').read_bytes(), b'code')
             self.assertFalse((root/'vless-server.sh').exists())
+
+    def test_vaio_panel_repository_root_extracts(self):
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode='w:gz') as archive:
+            for name, content in [('vaio-panel-abc/requirements.txt', b'Flask'), ('vaio-panel-abc/vaio/server.py', b'code'),
+                                  ('vaio-panel-abc/scripts/vaio-panel', b'#!/bin/sh')]:
+                item = tarfile.TarInfo(name)
+                item.size = len(content)
+                item.mode = 0o755 if name.endswith('vaio-panel') else 0o644
+                archive.addfile(item, io.BytesIO(content))
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            load('update_panel').extract(payload.getvalue(), root)
+            self.assertEqual((root/'vaio/server.py').read_bytes(), b'code')
+            self.assertTrue(os.access(root/'scripts/vaio-panel', os.X_OK))
+        empty = io.BytesIO()
+        with tarfile.open(fileobj=empty, mode='w:gz') as archive:
+            item = tarfile.TarInfo('x/README.md'); item.size = 1
+            archive.addfile(item, io.BytesIO(b'x'))
+        with tempfile.TemporaryDirectory() as folder, self.assertRaisesRegex(ValueError, 'requirements.txt'):
+            load('update_panel').extract(empty.getvalue(), Path(folder))
+
+    def test_update_defaults_to_vaio_panel_and_rejects_other_repositories(self):
+        module = load('update_panel')
+        source = Path(module.__file__).read_text()
+        self.assertIn('default="mozisen/vaio-panel"', source)
+        self.assertIn('default="main"', source)
+        with patch('sys.argv', ['update-panel', '--repo', 'evil/panel']), patch.object(module.os, 'geteuid', return_value=0), \
+                self.assertRaisesRegex(SystemExit, '仓库只能是'):
+            module.main()
 
     def test_agent_bundle_extracts_and_reports_version(self):
         with tempfile.TemporaryDirectory() as folder:

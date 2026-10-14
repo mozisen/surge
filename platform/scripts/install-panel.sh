@@ -28,15 +28,20 @@ if nginx -T 2>/dev/null | grep -F "server_name $VAIO_DOMAIN" >/dev/null; then
 fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
-SOURCE_REF=${VAIO_SOURCE_REF:-codex/platform-api}
+# 正式版来自 mozisen/vaio-panel（仓库根即面板）；预览版可用 VAIO_SOURCE_REPO=mozisen/surge（platform/ 目录）。
+SOURCE_REPO=${VAIO_SOURCE_REPO:-mozisen/vaio-panel}
+SOURCE_REF=${VAIO_SOURCE_REF:-main}
+case "$SOURCE_REPO" in mozisen/vaio-panel|mozisen/surge) ;; *) echo '源码仓库只能是 mozisen/vaio-panel 或 mozisen/surge'; exit 1 ;; esac
 printf '%s' "$SOURCE_REF" | grep -Eq '^[A-Za-z0-9._/-]+$' || { echo '源码版本格式无效'; exit 1; }
-curl -fSL --max-time 180 "https://github.com/mozisen/surge/archive/$SOURCE_REF.tar.gz" -o "$WORK/panel.tar.gz"
+curl -fSL --max-time 180 "https://github.com/$SOURCE_REPO/archive/$SOURCE_REF.tar.gz" -o "$WORK/panel.tar.gz"
 mkdir "$WORK/source"
 tar -xzf "$WORK/panel.tar.gz" -C "$WORK/source" --strip-components=1
 id vaio-panel >/dev/null 2>&1 || useradd --system --home-dir /var/lib/vaio-panel --shell /usr/sbin/nologin vaio-panel
 install -d -m 755 /opt/vaio-panel
-[ -f "$WORK/source/platform/requirements.txt" ] || { echo '源码包缺少 platform 目录'; exit 1; }
-cp -R "$WORK/source/platform/." /opt/vaio-panel/
+if [ -f "$WORK/source/requirements.txt" ]; then SOURCE_DIR="$WORK/source"
+elif [ -f "$WORK/source/platform/requirements.txt" ]; then SOURCE_DIR="$WORK/source/platform"
+else echo '源码包缺少面板文件（requirements.txt）'; exit 1; fi
+cp -R "$SOURCE_DIR/." /opt/vaio-panel/
 python3 -m venv /opt/vaio-panel/.venv
 /opt/vaio-panel/.venv/bin/pip install -q -r /opt/vaio-panel/requirements.txt
 install -d -m 700 /etc/vaio-panel

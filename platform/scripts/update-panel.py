@@ -33,13 +33,18 @@ def extract(payload, target):
             total += item.size
             if path.is_absolute() or ".." in path.parts or not (item.isfile() or item.isdir()) or total > 64*1024*1024:
                 raise ValueError("更新包路径或大小无效")
-        if not any(Path(item.name).parts[1:] == ('platform', 'requirements.txt') for item in members):
-            raise ValueError("更新包缺少 platform/requirements.txt")
+        # mozisen/vaio-panel: the repository root is the panel; mozisen/surge (previews): the platform/ directory.
+        if any(Path(item.name).parts[1:] == ('requirements.txt',) for item in members):
+            prefix = ()
+        elif any(Path(item.name).parts[1:] == ('platform', 'requirements.txt') for item in members):
+            prefix = ('platform',)
+        else:
+            raise ValueError("更新包缺少 requirements.txt（vaio-panel 根目录或 surge 的 platform/）")
         for item in members:
             parts = Path(item.name).parts[1:]
-            if not parts or parts[0] != 'platform':
+            if not parts or parts[:len(prefix)] != prefix:
                 continue
-            parts = parts[1:]
+            parts = parts[len(prefix):]
             if not parts:
                 continue
             path = target.joinpath(*parts)
@@ -53,13 +58,16 @@ def extract(payload, target):
 
 def main():
     parser = argparse.ArgumentParser(description="升级面板，保留数据并自动检查恢复")
-    parser.add_argument("--ref", default="codex/platform-api", help="surge GitHub 分支、提交 SHA 或版本标签")
+    parser.add_argument("--repo", default="mozisen/vaio-panel", help="GitHub 仓库：mozisen/vaio-panel（正式版）或 mozisen/surge（预览版）")
+    parser.add_argument("--ref", default="main", help="分支、提交 SHA 或版本标签，例如 main、v1.0.0")
     parser.add_argument("--archive", help="管理员提供的本地 GitHub 格式源码包，用于离线部署")
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit("请使用 root 运行")
     if not re.fullmatch(r"[A-Za-z0-9_./-]{1,120}", args.ref):
         raise SystemExit("版本标识无效")
+    if args.repo not in ("mozisen/vaio-panel", "mozisen/surge"):
+        raise SystemExit("仓库只能是 mozisen/vaio-panel 或 mozisen/surge")
     os.umask(0o022)
     root = Path("/opt/vaio-panel")
     if not root.exists() or not Path("/etc/vaio-panel/panel.env").exists():
@@ -77,8 +85,9 @@ def main():
         with sqlite3.connect(database) as db:
             if db.execute("SELECT 1 FROM tasks WHERE status IN ('queued','running') LIMIT 1").fetchone():
                 raise RuntimeError("有待执行或运行中任务，请完成后再升级")
-        sha = args.ref if args.archive else json.loads(download("https://api.github.com/repos/mozisen/surge/commits/" + quote(args.ref, safe='')))["sha"]
-        payload = Path(args.archive).read_bytes() if args.archive else download("https://api.github.com/repos/mozisen/surge/tarball/" + sha)
+        api = "https://api.github.com/repos/" + args.repo
+        sha = args.ref if args.archive else json.loads(download(api + "/commits/" + quote(args.ref, safe='')))["sha"]
+        payload = Path(args.archive).read_bytes() if args.archive else download(api + "/tarball/" + sha)
         identity = str(time.time_ns())
         stage = Path('/opt/vaio-panel-releases') / identity
         stage.mkdir(parents=True)
