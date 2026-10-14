@@ -34,7 +34,11 @@
 - 经用户确认，vaio-panel 的两个提交与标签改写为作者 `mozi`（GitHub noreply 邮箱，关联 mozisen），文件内容（tree）不变，日期与说明不变，强制推送 `main` 与 `v1.0.0`、`v1.0.0：`、`v1.1.0` 三个标签。
 - 新哈希：1.0.0 `264cba0` → `08537b7`，1.1.0 `bf8cdd2` → `359e780`。上文记录的旧哈希已不在远端。surge 仓库的提交按项目规则不改写。
 
-## 1.2.0（surge 已完成，待发布到 vaio-panel）
+## 1.2.0（2026-10-14 发布到 vaio-panel）
+
+- 发布结果：在 vaio-panel `main` 上追加提交 `8979537`「Vaio Panel 1.2.0」（来源 surge `365822e`，作者 mozi），标签 `v1.2.0`。发布目录本地独立通过 unittest 205 项（跳过 3 项）与三个 cjs 测试；vaio-panel 的 Actions（main 与标签各一次）全部通过。
+- 1.2.0 的 GitHub Release 需在网页由标签 `v1.2.0` 创建。面板内的「面板更新」只读取版本标签，不依赖 Release。
+
 
 - 服务器列表显示节点程序当前 / 最新版本，「一键更新节点程序」（`POST /api/nodes/upgrade-all`，返回已排队与跳过原因）。
 - 面板更新：`vaio/updates.py` 读取 vaio-panel 的 `vX.Y.Z` 标签（缓存 6 小时，失败 30 分钟后重试）；`GET/POST /api/panel-update`，面板写 `/var/lib/vaio-panel/panel-update-request.json`，`vaio-panel-update.path` 触发 root 运行 `update-panel.py --from-request`（与命令更新相同的备份、测试、健康检查与恢复），状态写 `panel-update-status.json`。新装由 `install-panel.sh` 安装辅助服务，升级由 `update-panel.py` 补装；1.1.0 的更新器不认识该服务，因此 1.2.0 面板在打开「面板更新」时通过已有的地址辅助程序（`install_update_helper`）补装。
