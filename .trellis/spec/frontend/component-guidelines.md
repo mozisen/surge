@@ -125,3 +125,7 @@ Statuses that are not task states (`userStates`, `syncStates`) render through `s
 
 - `modal(title, body, wide, kind, back)`: pass `back` to show a left arrow next to the close button; there is no in-form back button.
 - The install parameter step is one page: `.install-top` holds inline `服务器` / `内核` fields (label left, auto-width select menu), then a one-line `#protocol-guidance`, then a two-column `.install-grid` (one column under 760px). Group wrappers (`#certificate-fields`, `#reality-fields`, `#snell-fields`) are `.install-group` with `display: contents` so their fields flow into the grid; keep every field id stable because `updateFields()` toggles them. No section headings, no `<details>`; generated credentials use the placeholder 「留空自动生成」.
+
+## Control height
+
+- Buttons (including `button.small` and tabs), inputs, and dialog select menus are all 40px tall. Exceptions: buttons inside tables (`td button`, 32px), list filter menus and the filter search box (32px, kept compact on request), and the dialog close/back icon buttons (36px). Under `(pointer: coarse)` everything is at least 44px.

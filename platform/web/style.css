@@ -131,7 +131,7 @@ button {
     align-items: center;
     justify-content: center;
     gap: 8px;
-    min-height: 38px;
+    min-height: 40px;
     padding: 0 14px;
     border: 1px solid var(--line);
     border-radius: var(--r-control);
@@ -195,9 +195,10 @@ button.quiet:hover {
     border-color: transparent;
 }
 
+/* 按钮与输入框统一 40px；表格里的小按钮、筛选按钮与弹窗图标按钮另有尺寸。 */
 button.small {
-    min-height: 32px;
-    padding: 0 10px;
+    min-height: 40px;
+    padding: 0 12px;
     font-size: 13px;
 }
 
@@ -758,7 +759,7 @@ input[type="checkbox"] {
 }
 
 .tabs button {
-    min-height: 44px;
+    min-height: 40px;
     margin-bottom: -1px;
     padding: 0 2px;
     border: 0;
@@ -2537,7 +2538,7 @@ dialog.install .install-warning {
 .inline-field .select-menu .filter-trigger {
     width: auto;
     max-width: 100%;
-    min-height: 34px;
+    min-height: 40px;
     font-weight: 600;
 }
 .install-guidance {
@@ -2665,9 +2666,6 @@ dialog.install .install-warning {
     font-size: 12px;
     font-weight: 600;
     color: var(--ink-2);
-}
-.relay-hop-head button {
-    min-height: 26px;
 }
 .relay-hop-row {
     display: grid;

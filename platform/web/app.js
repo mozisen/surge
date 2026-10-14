@@ -1292,8 +1292,7 @@ async function relayDialog() {
     // 默认取两台不同的服务器：中转优先选不是落地候选第一位的那台
     const firstRelay = relayServers.find(n => landingServers.some(l => l.id !== n.id)) || relayServers[0];
     const hops = [{node_id: firstRelay.id, backend: 'realm', listen_port: ''}];
-    const firstLanding = landingServers.find(x => x.id !== firstRelay.id);
-    if (!firstLanding) return modal('暂无可用服务器', '<p>中转服务器和落地服务器不能是同一台，至少需要两台服务器。</p>');
+    const firstLanding = landingServers.find(x => x.id !== firstRelay.id) || landingServers[0];
     modal('添加中转线路', `<form id="relay-form"><div class="install-top"><div class="inline-field"><label for="relay-user">用户</label><select id="relay-user">${users.map(u => option(u.id, u.name, users[0]?.id)).join('')}${option('', '不指定用户', users.length ? null : '')}</select></div></div>
 <div class="relay-flow"><section class="relay-box"><h3>中转服务器</h3><div id="relay-hops"></div><button type="button" class="small" id="relay-add-hop">${icon('plus')}添加一层中转</button></section>
 <div class="relay-arrow" aria-hidden="true">${icon('arrow')}</div>
@@ -1305,19 +1304,15 @@ async function relayDialog() {
     // 入口端口默认等于落地协议（或仅转发时的落地端口）的端口，仍可手动修改。
     const landingPort = () => portOnly() ? Number($('#relay-landing-port').value) || '' : Number(($('#relay-landing-protocol').value || '').split(':')[2]) || '';
     const renderHops = () => {
-        $('#relay-hops').innerHTML = hops.map((h, i) => `<div class="relay-hop"><div class="relay-hop-head"><span>第 ${i + 1} 层</span>${hops.length > 1 ? `<button type="button" class="quiet small" data-hop-remove="${i}" aria-label="删除第 ${i + 1} 层">删除</button>` : ''}</div><label for="relay-hop-node-${i}">服务器</label><select id="relay-hop-node-${i}" data-hop="${i}" data-field="node_id">${relayServers.map(n => option(n.id, relayServerLabel(n, i), h.node_id, relayTaken(n.id, i))).join('')}</select><div class="relay-hop-row"><div><label for="relay-hop-backend-${i}">转发方式</label><select id="relay-hop-backend-${i}" data-hop="${i}" data-field="backend">${option('realm', 'Realm', h.backend)}${option('nftables', 'nftables', h.backend)}</select></div><div><label for="relay-hop-port-${i}">入口端口</label><input id="relay-hop-port-${i}" data-hop="${i}" data-field="listen_port" type="number" min="1" max="65535" value="${esc(h.listen_port)}" required></div></div></div>`).join('<div class="relay-hop-arrow" aria-hidden="true">↓</div>');
+        $('#relay-hops').innerHTML = hops.map((h, i) => `<div class="relay-hop"><div class="relay-hop-head"><span>第 ${i + 1} 层</span>${hops.length > 1 ? `<button type="button" class="quiet small" data-hop-remove="${i}" aria-label="删除第 ${i + 1} 层">删除</button>` : ''}</div><label for="relay-hop-node-${i}">服务器</label><select id="relay-hop-node-${i}" data-hop="${i}" data-field="node_id">${relayServers.map(n => option(n.id, n.name, h.node_id)).join('')}</select><div class="relay-hop-row"><div><label for="relay-hop-backend-${i}">转发方式</label><select id="relay-hop-backend-${i}" data-hop="${i}" data-field="backend">${option('realm', 'Realm', h.backend)}${option('nftables', 'nftables', h.backend)}</select></div><div><label for="relay-hop-port-${i}">入口端口</label><input id="relay-hop-port-${i}" data-hop="${i}" data-field="listen_port" type="number" min="1" max="65535" value="${esc(h.listen_port)}" required></div></div></div>`).join('<div class="relay-hop-arrow" aria-hidden="true">↓</div>');
         document.querySelectorAll('#relay-hops select').forEach(enhanceSelect);
-        $('#relay-add-hop').disabled = hops.length >= 5 || !relayServers.some(n => !relayTaken(n.id, -1));
-        // 落地服务器不能与任何一层中转相同
-        [...$('#relay-landing-node').options].forEach(o => { o.disabled = hops.some(h => h.node_id === o.value); });
+        $('#relay-add-hop').disabled = hops.length >= 5;
     };
-    // 同一条线路里服务器不能重复：其他层或落地已用的服务器不可选
-    function relayTaken(id, index) {
-        return id === $('#relay-landing-node').value || hops.some((h, j) => j !== index && h.node_id === id);
-    }
-    function relayServerLabel(n, index) {
-        return n.name + (n.id === $('#relay-landing-node').value ? '（已是落地）' : hops.some((h, j) => j !== index && h.node_id === n.id) ? '（已在其他层）' : '');
-    }
+    // 同一条线路里服务器不能重复：下拉不互斥（只有两台服务器时也能自由选择），提交时提示
+    const relayDuplicate = () => {
+        const ids = [...hops.map(h => h.node_id), $('#relay-landing-node').value];
+        return new Set(ids).size !== ids.length;
+    };
     const followPort = () => { hops.forEach(h => { h.listen_port = landingPort(); }); renderHops(); };
     const renderProtocol = () => {
         const only = portOnly();
@@ -1349,8 +1344,7 @@ async function relayDialog() {
         renderHops();
     });
     $('#relay-add-hop').onclick = () => {
-        const free = relayServers.find(n => !relayTaken(n.id, -1));
-        if (!free) return;
+        const free = relayServers.find(n => !hops.some(h => h.node_id === n.id) && n.id !== $('#relay-landing-node').value) || relayServers[0];
         hops.push({node_id: free.id, backend: 'realm', listen_port: landingPort()});
         renderHops();
     };
@@ -1364,6 +1358,7 @@ async function relayDialog() {
         button.disabled = true;
         const host = $('#relay-landing-host').value.trim(), nodeId = $('#relay-landing-node').value;
         try {
+            if (relayDuplicate()) throw new Error('同一条线路中服务器不能重复，中转服务器也不能是落地服务器，请重新选择');
             let landing;
             if (portOnly()) landing = {node_id: nodeId, port: Number($('#relay-landing-port').value), host, transport: $('#relay-landing-transport').value};
             else {
