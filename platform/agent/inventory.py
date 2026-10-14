@@ -100,6 +100,25 @@ def inventory(cfg, status=service_status):
             "traffic_status": db.get("meta", {}).get("last_traffic_sync_status", "unavailable"), "at": time.time()}
 
 
+def _global_ip(value, version):
+    import ipaddress
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return address.version == version and address.is_global
+
+
+def public_addresses():
+    """Node public IPv4/IPv6 for relay targets (cached five minutes by addresses.discover)."""
+    from .addresses import discover
+    try:
+        found = discover()
+    except Exception:
+        return {}
+    return {k: found[k] for k in ("ipv4", "ipv6") if found.get(k)}
+
+
 def account_state(account, today=None):
     """Same precedence as the script: manual > expired > quota > platform_quota."""
     today = (today or datetime.date.today()).isoformat()
@@ -210,6 +229,9 @@ def sanitize_snapshot(snapshot):
     clean["user_authority"] = "platform" if snapshot.get("user_authority") == "platform" else "script"
     clean["upgrade_version"] = 1 if snapshot.get("upgrade_version") == 1 else 0
     clean["share_version"] = 2 if snapshot.get("share_version") == 2 else 0
+    addresses = snapshot.get("addresses")
+    clean["addresses"] = {k: v for k, v in addresses.items() if k in ("ipv4", "ipv6") and isinstance(v, str) and _global_ip(v, 4 if k == "ipv4" else 6)} \
+        if isinstance(addresses, dict) else {}
     clean["forward_version"] = 1 if snapshot.get("forward_version") == 1 else 0
     clean["forwards"] = sanitize_forwards(snapshot.get("forwards")) if clean["forward_version"] else []
     upgrade = snapshot.get("last_upgrade")

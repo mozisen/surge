@@ -570,7 +570,7 @@ def create_app(config=None):
             if not isinstance(detail, dict) or len(json.dumps(detail)) > 32000:
                 raise ValueError("结果过大")
             # Keep only intentionally supported result fields; raw logs never enter the panel DB.
-            detail = {k: v for k, v in detail.items() if k in ("connection", "config_details", "backup", "steps", "affected", "accounts")}
+            detail = {k: v for k, v in detail.items() if k in ("connection", "config_details", "backup", "steps", "affected", "accounts", "rule")}
             if task["action"] != "share":
                 detail.pop("connection", None)
                 detail.pop("config_details", None)
@@ -580,6 +580,9 @@ def create_app(config=None):
                 platform_users.task_finished(db, task, data["status"], message)
             if task["action"] == "install":
                 platform_users.install_finished(db, task, data["status"])
+            if task["action"] == "forward_apply":
+                from . import relays
+                relays.task_finished(db, task, data["status"], detail, message=message)
             audit(db, "task." + data["status"], node_id, task_id)
         return jsonify(ok=True)
 
@@ -884,6 +887,49 @@ def create_app(config=None):
                 entry["rule"] = rule
             return validate_forward_task({"action": "forward_apply", "params": {"ops": [entry]}})
         return node_task(node_id, "forward_apply", request_body, check)
+
+    @app.get("/api/relays")
+    @admin
+    def relay_list():
+        from . import relays
+        with store.connect() as db:
+            nodes = {n["id"]: n for n in db.execute("SELECT * FROM nodes")}
+            lines = [relays.describe(db, line, nodes) for line in db.execute("SELECT * FROM relay_lines ORDER BY created DESC")]
+        return jsonify(relays=lines)
+
+    def relay_change(event, action):
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = action(db)
+            audit(db, event, None, result if isinstance(result, str) else "")
+        return result
+
+    @app.post("/api/relays")
+    @admin
+    def relay_create():
+        from . import relays
+        data = body()
+        return jsonify(id=relay_change("relay.created", lambda db: relays.create(db, data))), 201
+
+    @app.post("/api/relays/<line_id>/delete")
+    @admin
+    def relay_delete(line_id):
+        from . import relays
+        relay_change("relay.deleted", lambda db: relays.remove(db, line_id) or line_id)
+        return jsonify(ok=True)
+
+    @app.post("/api/relays/<line_id>/retry")
+    @admin
+    def relay_retry(line_id):
+        from . import relays
+        relay_change("relay.retried", lambda db: relays.retry(db, line_id) or line_id)
+        return jsonify(ok=True)
+
+    @app.post("/api/relays/<line_id>/share")
+    @admin
+    def relay_share(line_id):
+        from . import relays
+        return jsonify(id=relay_change("relay.share", lambda db: relays.share(db, line_id))), 201
 
     @app.post("/api/nodes/<node_id>/upgrade")
     @admin

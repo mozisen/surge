@@ -2600,6 +2600,94 @@ dialog.install .install-warning {
 }
 
 /* 端口转发表格：操作按钮不换行，窄屏由表格横向滚动。 */
-#forward-results .action-row {
+#forward-results .action-row,
+#relay-results .action-row {
     flex-wrap: nowrap;
+}
+
+/* 中转管理：线路链与编辑界面的两个框（中间箭头连接）。 */
+.relay-chain {
+    line-height: 1.7;
+}
+.relay-chain-arrow {
+    margin: 0 6px;
+    color: var(--muted);
+}
+.relay-flow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    margin-top: 14px;
+}
+.relay-box {
+    min-width: 0;
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-panel);
+    background: var(--surface);
+}
+.relay-box > h3 {
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: var(--ink);
+}
+.relay-box label {
+    margin: 10px 0 6px;
+    font-size: 12px;
+}
+.relay-arrow {
+    display: flex;
+    align-items: center;
+    align-self: center;
+    color: var(--ink);
+}
+.relay-arrow svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.relay-hop {
+    padding: 10px 0 2px;
+}
+.relay-hop + .relay-hop-arrow + .relay-hop,
+.relay-hop-arrow + .relay-hop {
+    border-top: 1px dashed var(--line);
+}
+.relay-hop-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-2);
+}
+.relay-hop-head button {
+    min-height: 26px;
+}
+.relay-hop-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+}
+.relay-hop-arrow {
+    text-align: center;
+    color: var(--muted);
+    line-height: 1;
+}
+#relay-add-hop {
+    margin-top: 12px;
+}
+@media (max-width: 760px) {
+    .relay-flow {
+        grid-template-columns: 1fr;
+    }
+    .relay-arrow {
+        justify-content: center;
+        transform: rotate(90deg);
+    }
 }

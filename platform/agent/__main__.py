@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -112,6 +113,7 @@ class Agent:
             snapshot["accounts_version"] = 1 if snapshot["script_api"].get("accounts_api") == 1 else 0
             snapshot["forwards"] = snapshot["script_api"].pop("forwards", [])
             snapshot["forward_version"] = 1 if snapshot["script_api"].get("forward_api") == 1 else 0
+        snapshot["addresses"] = dict(getattr(self, "addresses", {}))
         task = self.api("/poll", {"snapshot": snapshot, "ready": future is None}).get("task")
         if task and future is None:
             task_id = task["id"]
@@ -124,10 +126,20 @@ class Agent:
                 future = executor.submit(self.run_task, task)
         return future
 
+    def watch_addresses(self):
+        """Public IPv4/IPv6 for relay targets, refreshed in the background so polls never wait on the network."""
+        from .inventory import public_addresses
+        while True:
+            found = public_addresses()
+            if found:
+                self.addresses = found
+            time.sleep(300)
+
     def run(self):
         # Prevent two processes from consuming the same identity / journal.
         with open(self.state / ".agent.lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            threading.Thread(target=self.watch_addresses, daemon=True, name="vaio-addresses").start()
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future, maintenance, delay, last_maintenance = None, None, 10, 0
                 while True:

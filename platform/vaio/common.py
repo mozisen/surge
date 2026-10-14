@@ -81,7 +81,7 @@ def validate_task(data):
     allowed = {"install": {"sni", "name"} | ADVANCED_INSTALL_FIELDS, "update": {"port"},
                "user_add": {"name", "quota_gb", "reset_day", "expire_date"},
                "user_update": {"name", "quota_gb", "reset_day", "expire_date", "enabled", "reset_credentials"},
-               "user_delete": {"name"}, "share": {"name", "host"}}
+               "user_delete": {"name"}, "share": {"name", "host", "port"}}
     if set(params) - allowed.get(action, set()):
         raise ValueError("不支持的参数")
     if action in ("user_add", "user_update", "user_delete"):
@@ -108,6 +108,7 @@ def validate_task(data):
             raise ValueError("到期日期格式应为 YYYY-MM-DD")
     if action == "share":
         if "host" in params: require_text(params.get("host"), "连接地址", 253, r"[A-Za-z0-9.:-]+")
+        if "port" in params: port(params["port"])  # relay entry port shown instead of the instance port
         require_text(params.get("name"), "用户名", 32, r"[A-Za-z0-9_-]+")
     if action in MUTATIONS:
         require_text(data.get("revision"), "配置版本", 64, r"[0-9a-f]{64}")

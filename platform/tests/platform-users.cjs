@@ -33,7 +33,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -369,4 +369,38 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.at(-1))), ['/nodes/a/forwards', {op: 'delete', id: 'abcdef012345'}]);
     await assert.rejects(context.forwardAction('fw-edit', {dataset: {node: 'a', id: 'missing'}}), /不存在/);
     console.log('PASS port forwarding page: rows, filters, writable servers, dialog fields, add/toggle/delete payloads');
+
+    // 中转管理：筛选、线路链与操作按钮、新建弹窗载荷
+    const lineA = {id: 'l1', user_id: 'u1', user_name: '<b>alice</b>', state: 'active', entry: {host: '9.9.9.1', port: 30001},
+        landing: {node_id: 'c', node_name: '落地', core: 'singbox', protocol: 'hy2', port: 8443, host: '8.8.4.9'},
+        hops: [{node_id: 'a', node_name: '香港', backend: 'realm', transport: 'udp', listen_port: 30001, target: '9.9.9.2:30002', status: 'active'},
+               {node_id: 'b', node_name: '东京', backend: 'nftables', transport: 'tcp+udp', listen_port: 30002, target: '8.8.4.9:8443', status: 'active'}]};
+    const lineB = {...lineA, id: 'l2', user_name: 'bob', state: 'partial', hops: [{...lineA.hops[0], node_id: 'd', node_name: '洛杉矶', status: 'failed'}]};
+    assert.deepStrictEqual([lineA, lineB].filter(l => context.relayMatches(l, {node: 'b', q: ''})).map(l => l.id), ['l1']);
+    assert.deepStrictEqual([lineA, lineB].filter(l => context.relayMatches(l, {node: 'c', q: ''})).map(l => l.id), ['l1', 'l2']);
+    assert.deepStrictEqual([lineA, lineB].filter(l => context.relayMatches(l, {node: '', q: 'BOB'})).map(l => l.id), ['l2']);
+    const rtable = context.relayTable([lineA, lineB]);
+    assert(rtable.includes('&lt;b&gt;alice&lt;/b&gt;') && !rtable.includes('<b>alice') && rtable.includes('9.9.9.1:30001') && rtable.includes('Hysteria2'));
+    assert(rtable.includes('香港<span class="muted"> · Realm</span>') && rtable.includes('<strong>落地</strong>') && rtable.includes('失败'));
+    assert(rtable.includes('data-action="rl-share" data-id="l1"') && rtable.includes('data-action="rl-retry" data-id="l2"') && !rtable.includes('data-action="rl-share" data-id="l2"'));
+    for (const id of ['relay-node', 'relay-search', 'relay-results', 'relay-count']) element(id, {addEventListener(type, fn) { this.listener = fn; }});
+    context.responses['/relays'] = {relays: [lineA, lineB]};
+    await context.relaysPage();
+    assert.strictEqual(html.section, 'relays');
+    assert(html.shell.includes('<h1>中转管理</h1>') && html.shell.includes('data-action="rl-add"') && elements['relay-count'].textContent === '2');
+    elements['relay-node'].onchange({target: {value: 'b'}});
+    assert.strictEqual(elements['relay-count'].textContent, '1 / 2');
+    elements['relay-node'].onchange({target: {value: ''}});
+    posts.length = 0;
+    context.post = async (path, data) => { posts.push([path, data]); return {id: 'task-9'}; };
+    await context.relayAction('rl-retry', {dataset: {id: 'l2'}});
+    assert.strictEqual(posts.at(-1)[0], '/relays/l2/retry');
+    await context.relayAction('rl-delete', {dataset: {id: 'l1'}});
+    assert(html.modal.includes('香港 → 东京') && html.modal.includes('用户在落地协议上的账号保留'));
+    await elements['pu-choice-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.strictEqual(posts.at(-1)[0], '/relays/l1/delete');
+    await context.relayAction('rl-share', {dataset: {id: 'l1'}});
+    assert.strictEqual(posts.at(-1)[0], '/relays/l1/share');
+    await assert.rejects(context.relayAction('rl-share', {dataset: {id: 'missing'}}), /不存在/);
+    console.log('PASS relay page: server filter, chain, actions, retry/delete/share payloads');
 })().catch(error => { console.error(error); process.exit(1); });

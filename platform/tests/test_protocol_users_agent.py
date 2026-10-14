@@ -27,7 +27,7 @@ class FakeShare:
     def __init__(self):
         self.calls = []
 
-    def share(self, target, name, host):
+    def share(self, target, name, host, port=None):
         self.calls.append((target, name, host))
         return "vless://link@" + host
 

@@ -277,7 +277,8 @@ class Bridge:
                 if self.script_api is None:
                     raise ValueError("节点脚本接口不可用，无法生成连接信息")
                 host = task["params"].get("host") or (lambda a: a.get("ipv4") or a.get("ipv6"))(discover())
-                return {"connection": self.script_api.share({"core": core, "protocol": proto, "port": task["port"]}, task["params"]["name"], host)}
+                return {"connection": self.script_api.share({"core": core, "protocol": proto, "port": task["port"]}, task["params"]["name"], host,
+                                                            task["params"].get("port"))}
             if before and not mutable(core, proto, before):
                 raise ValueError("该实例首版仅支持查看")
             if before and proto.startswith("snell") and before.get("snell_id") and not re.fullmatch(r"[0-9a-f]{24}", str(before["snell_id"])):
@@ -290,6 +291,8 @@ class Bridge:
             if action == "share":
                 params = dict(task["params"])
                 display_row = dict(before)
+                if params.get("port"):
+                    display_row["port"] = params.pop("port")  # relay entry port replaces the instance port in the link
                 if not params.get('host'):
                     addresses = discover()
                     display_row.update(addresses)

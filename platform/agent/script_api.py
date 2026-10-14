@@ -63,10 +63,11 @@ class ScriptAPI:
         request = {'api_version': 1, 'request_id': self._request_id(request_id), 'action': 'forward_apply', 'params': params}
         return self._call(request, 300)[1]
 
-    def share(self, target, name, host):
-        """A member's connection link from the script (read-only; nothing is recorded)."""
+    def share(self, target, name, host, port=None):
+        """A member's connection link from the script (read-only; nothing is recorded).
+        host/port replace the address in the link (relay entry); credentials stay the landing instance's."""
         request = {'api_version': 1, 'request_id': str(uuid.uuid4()), 'action': 'account_share',
-                   'params': {'target': target, 'name': name, **({'host': host} if host else {})}}
+                   'params': {'target': target, 'name': name, **({'host': host} if host else {}), **({'port': port} if port else {})}}
         code, data = self._call(request, 30)
         if data['status'] != 'succeeded' or not isinstance(data.get('data'), dict) or not isinstance(data['data'].get('connection'), str):
             raise ValueError({'user_not_found': '用户不存在', 'unsupported_protocol': '该协议不支持用户管理'}.get(data.get('code'), '节点脚本无法生成连接信息'))

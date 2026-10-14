@@ -67,3 +67,9 @@ Questions to answer:
 
 - Adopted servers are platform-managed. `platform_users.auto_authority()` (called from the agent poll and the monitor scan) queues `set_authority platform` for adopted, online, non-maintenance nodes that report `authority_version=1`, are still script-managed and hold no script users; request keys `auto-authority:*` mark these tasks, and a failed one is retried only after `AUTO_AUTHORITY_RETRY` (1 h). Nodes with script users wait for the operator (detail-page notice → `authorityDialog`, name confirmation).
 - The detail page has no user-management block; tests that need a script-managed node must give it a script user.
+
+## Relay lines
+
+- `vaio/relays.py` owns `relay_lines` (hops JSON: node, stored forward rule, `forward_id`, `task_id`, status). Each hop is an ordinary `forward_apply` task whose `request_key` is `relay:<line>:<index>:<add|delete>:<nonce>`; `relays.task_finished()` (called from the agent result handler, which now keeps the `rule` result field) writes the outcome back. The line state is derived (creating / active / partial / removing), never stored.
+- Creation is all-or-nothing inside one transaction: every check (servers distinct, relay nodes forward-capable and idle, public address for the next hop, port conflicts from snapshots, landing instance present) runs before any task row or link change. Landing membership reuses `platform_users.add_link` / `member_op`.
+- Deleting always asks the node by the recorded `forward_id` (snapshots lag behind a just-created rule); a failure whose message says the rule no longer exists counts as removed. Node public addresses come from the agent's background watcher (`snapshot.addresses`, global unicast only after sanitizing).
