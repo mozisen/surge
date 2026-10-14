@@ -48,5 +48,5 @@
 ## 1.2.1（2026-10-14 发布到 vaio-panel）
 
 - 修复平台用户流量一直为 0：节点程序每分钟运行内置脚本 `--sync-traffic`（脚本的同步 cron 只随其 TG 功能安装，平台接管后从未同步）。节点需一键更新到 1.2.1 后生效。
-- 发布结果：vaio-panel `main` 追加提交 `f43a1c4`「Vaio Panel 1.2.1」（来源 surge `e0d6523`，作者 mozi），标签 `v1.2.1`。发布目录本地独立通过 unittest 211 项（跳过 3 项）
+- 发布结果：vaio-panel `main` 追加提交 `f43a1c4`「Vaio Panel 1.2.1」（来源 surge `e0d6523`，作者 mozi），标签 `v1.2.1`。发布目录本地独立通过 unittest 211 项（跳过 3 项）与三个 cjs 测试；vaio-panel 的 Actions（main 与标签）全部通过。
 - 诊断依据（经用户授权只读检查 vps.town）：victoria 无 sync-traffic cron、无同步日志；面板中 vps 与 victoria 的 traffic_status 均为 unavailable，用户 used 均为 0。**真实验收**：未执行（节点尚未更新到 1.2.1）。
