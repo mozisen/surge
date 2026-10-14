@@ -23,6 +23,7 @@ jobs:
         with:
           node-version: '22'
       - run: node --check web/app.js
+      - run: node tests/install-form.cjs && node tests/traffic-display.cjs && node tests/platform-users.cjs
       - run: git diff --check
   image:
     runs-on: ubuntu-latest
