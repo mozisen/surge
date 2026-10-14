@@ -44,3 +44,9 @@
 - 面板更新：`vaio/updates.py` 读取 vaio-panel 的 `vX.Y.Z` 标签（缓存 6 小时，失败 30 分钟后重试）；`GET/POST /api/panel-update`，面板写 `/var/lib/vaio-panel/panel-update-request.json`，`vaio-panel-update.path` 触发 root 运行 `update-panel.py --from-request`（与命令更新相同的备份、测试、健康检查与恢复），状态写 `panel-update-status.json`。新装由 `install-panel.sh` 安装辅助服务，升级由 `update-panel.py` 补装；1.1.0 的更新器不认识该服务，因此 1.2.0 面板在打开「面板更新」时通过已有的地址辅助程序（`install_update_helper`）补装。
 - 系统设置：账号与面板地址合并为一个对话框的两个标签。
 - 测试：新增 `tests/test_panel_update.py`，`tests/platform-users.cjs` 增加版本列、一键更新、面板更新与系统设置；卸载测试覆盖新单元。**真实验收**：未执行（未在 VPS 上实际从面板更新或批量升级节点）。
+
+## 1.2.1（2026-10-14 发布到 vaio-panel）
+
+- 修复平台用户流量一直为 0：节点程序每分钟运行内置脚本 `--sync-traffic`（脚本的同步 cron 只随其 TG 功能安装，平台接管后从未同步）。节点需一键更新到 1.2.1 后生效。
+- 发布结果：vaio-panel `main` 追加提交 `f43a1c4`「Vaio Panel 1.2.1」（来源 surge `e0d6523`，作者 mozi），标签 `v1.2.1`。发布目录本地独立通过 unittest 211 项（跳过 3 项）
+- 诊断依据（经用户授权只读检查 vps.town）：victoria 无 sync-traffic cron、无同步日志；面板中 vps 与 victoria 的 traffic_status 均为 unavailable，用户 used 均为 0。**真实验收**：未执行（节点尚未更新到 1.2.1）。
