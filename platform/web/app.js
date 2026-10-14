@@ -1296,17 +1296,29 @@ function nodeVersion(node) {
 
 let panelUpdate = null, panelUpdateChecked = false;
 function panelUpdateLabel() {
+    if (panelUpdate?.pending || panelUpdate?.status?.state === 'running') return '面板更新<span class="update-dot">更新中</span>';
     return panelUpdate?.newer ? `面板更新<span class="update-dot">新版本 ${esc(panelUpdate.latest)}</span>` : '面板更新';
 }
+function setPanelUpdate(d) {
+    panelUpdate = d;
+    const button = document.querySelector('[data-action="panel-update"]');
+    if (button) button.innerHTML = panelUpdateLabel();
+    watchPanelUpdate();
+}
+// While an update runs (the panel restarts during it), keep the sidebar label current even with the dialog closed.
+function watchPanelUpdate() {
+    if (watchPanelUpdate.timer || !(panelUpdate?.pending || panelUpdate?.status?.state === 'running')) return;
+    watchPanelUpdate.timer = setTimeout(() => {
+        watchPanelUpdate.timer = null;
+        api('/panel-update').then(setPanelUpdate).catch(() => watchPanelUpdate());
+    }, 5000);
+}
+
 // Once per page load, in the background: the server caches the GitHub answer, so this stays cheap.
 function checkPanelUpdate() {
     if (panelUpdateChecked) return;
     panelUpdateChecked = true;
-    api('/panel-update').then(d => {
-        panelUpdate = d;
-        const button = document.querySelector('[data-action="panel-update"]');
-        if (button) button.innerHTML = panelUpdateLabel();
-    }).catch(() => {});
+    api('/panel-update').then(setPanelUpdate).catch(() => {});
 }
 
 const panelUpdateRelease = 'https://github.com/mozisen/vaio-panel/releases';
@@ -1321,9 +1333,7 @@ async function panelUpdateDialog(refresh = false) {
         }
         throw err;
     }
-    panelUpdate = d;
-    const sidebar = document.querySelector('[data-action="panel-update"]');
-    if (sidebar) sidebar.innerHTML = panelUpdateLabel();
+    setPanelUpdate(d);
     const st = d.status, busy = d.pending || st?.state === 'running';
     const reload = d.current !== panelVersion;
     const statusLine = busy ? `<div class="notice">${esc(st?.state === 'running' ? st.message : '已提交更新，等待开始…')}</div>`
@@ -1349,7 +1359,7 @@ async function panelUpdateStart(b) {
     b.disabled = true;
     try {
         await post('/panel-update', {version: b.dataset.version});
-        panelUpdate = {...panelUpdate, pending: true};
+        setPanelUpdate({...panelUpdate, pending: true});
         toast('已开始更新面板到 ' + b.dataset.version);
         await panelUpdateDialog();
     } catch (err) { formError(err); b.disabled = false; }

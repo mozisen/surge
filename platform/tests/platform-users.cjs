@@ -490,9 +490,21 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     await context.panelUpdateStart({disabled: false, dataset: {version: 'v1.3.0'}});
     assert.deepStrictEqual(JSON.parse(JSON.stringify(posts)), [['/panel-update', {version: 'v1.3.0'}]]);
     assert(html.modal.includes('已提交更新') && !html.modal.includes('panel-update-start'));
+    assert(sidebarButton.innerHTML.includes('更新中') && !sidebarButton.innerHTML.includes('新版本'), 'sidebar shows the running update');
     context.responses['/panel-update'] = update({status: {state: 'running', message: '正在更新到 v1.3.0'}});
     await context.panelUpdateDialog();
-    assert(html.modal.includes('正在更新到 v1.3.0') && !html.modal.includes('panel-update-start'));
+    assert(html.modal.includes('正在更新到 v1.3.0') && !html.modal.includes('panel-update-start') && sidebarButton.innerHTML.includes('更新中'));
+    // Dialog closed: the background watch clears 更新中 once the update has finished.
+    const timers = [];
+    vm.runInContext('setTimeout = this.captureTimeout;', Object.assign(context, {captureTimeout: fn => { timers.push(fn); return timers.length; }}));
+    vm.runInContext('watchPanelUpdate.timer = null;', context);
+    context.responses['/panel-update'] = update({current: '1.3.0', latest: 'v1.3.0', newer: false, status: {state: 'succeeded', message: '已更新到 v1.3.0'}});
+    vm.runInContext('watchPanelUpdate()', context);
+    timers.shift()();
+    await new Promise(r => setImmediate(r));
+    assert.strictEqual(sidebarButton.innerHTML, '面板更新', 'label back to normal after the update');
+    assert.strictEqual(timers.length, 0, 'no more polling once finished');
+    vm.runInContext('setTimeout = this.setTimeout;', context);
     context.responses['/panel-update'] = update({helper: false});
     await context.panelUpdateDialog();
     assert(html.modal.includes('vaio-panel update --ref v1.3.0') && html.modal.includes('copy-command') && !html.modal.includes('panel-update-start'));
