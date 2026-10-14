@@ -2,7 +2,7 @@
 
 自托管的多服务器代理管理面板。主服务器运行面板，节点安装 Vaio 节点程序后主动通过 HTTPS 上线；面板统一管理服务器、协议实例、用户、流量、中转与端口转发。
 
-**当前版本：1.0.0（正式版）**。更新记录见 [CHANGELOG](CHANGELOG.md)。
+**当前版本：1.1.0（正式版）**。更新记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 功能
 
@@ -24,7 +24,21 @@
 (f=$(mktemp) && trap 'rm -f "$f"' EXIT HUP INT TERM && curl -fsSL https://raw.githubusercontent.com/mozisen/vaio-panel/main/scripts/install-panel.sh -o "$f" && sh "$f")
 ```
 
-按提示输入域名、管理员账号和密码。安装器配置运行环境、后台服务、Nginx 与 HTTPS；只用于首次安装，不会覆盖已有面板。指定版本可在命令前加 `VAIO_SOURCE_REF=v1.0.0`。
+按提示依次输入：
+
+- **域名**：已解析到本服务器的域名，安装器自动申请 Let's Encrypt 证书并启用 HTTPS（需放行 TCP 80）。**没有域名直接回车**，使用本机公网 IP 以 HTTP 访问（登录密码与节点通信不加密，建议之后绑定域名）。
+- **面板端口**：访问面板的端口，有域名时默认 443，用 IP 时默认 8080，可自定义（如 8443）。请在云安全组和防火墙放行。
+- 管理员账号和密码。
+
+安装完成后显示面板地址，例如 `https://panel.example.com:8443` 或 `http://1.2.3.4:8080`。只用于首次安装，不会覆盖已有面板。指定版本可在命令前加 `VAIO_SOURCE_REF=v1.1.0`。
+
+### 绑定或更换域名
+
+在面板左下角「面板地址」中填写域名和 HTTPS 端口，面板会自动申请证书、配置 Nginx 并切换到 HTTPS（失败自动恢复原配置），各节点会自动改用新地址。原来的 IP 地址（或旧域名）在点「关闭旧地址」前继续可用；节点都切换完成后再关闭。也可在服务器以 root 执行：
+
+```sh
+vaio-panel domain panel.example.com 8443
+```
 
 ## 升级面板
 
@@ -37,7 +51,7 @@ vaio-panel update --ref v1.0.0 # 升级到指定版本
 
 从 0.3.x 预览版（来自 `mozisen/surge`）升级：旧版更新器只认 surge 仓库，请先执行 `vaio-panel update --ref codex/platform-3.7.4`（该分支已是 1.0.0）；升级到 1.0.0 后，之后的 `vaio-panel update` 默认使用本仓库。
 
-主服务器命令：`vaio-panel status`、`restart`、`logs`、`account`（重置登录信息）、`update`、`backup`、`verify-backup`、`restore`。
+主服务器命令：`vaio-panel status`、`restart`、`logs`、`account`（重置登录信息）、`update`、`domain`（绑定域名）、`backup`、`verify-backup`、`restore`、`uninstall`。
 
 ## 接入节点
 
@@ -46,6 +60,24 @@ vaio-panel update --ref v1.0.0 # 升级到指定版本
 3. 节点上线后在服务器详情页「确认接管」；接管后用户统一由平台管理。
 
 节点要求：Python 3.9+、Bash 4.1+；支持 Debian/Ubuntu（apt）、Alpine（apk）与 dnf 系统，systemd 或 OpenRC。节点程序内置节点脚本副本（`vendor/vless-server.sh`），配置目录 `/etc/vless-reality`。节点命令：`vaio-agent status`、`vaio-agent logs`、`vaio-agent update`；也可在面板一键升级。
+
+## 卸载
+
+卸载面板（在主服务器以 root 执行）：
+
+```sh
+vaio-panel uninstall
+```
+
+删除面板服务、程序、配置、数据库与面板备份、Nginx 站点和系统用户 `vaio-panel`；证书、其他网站和各节点的代理与用户不受影响。需要保留数据可先导出：`vaio-panel uninstall --backup /root/vaio-panel-backup.tar.gz`。确认提示需输入 `UNINSTALL`，脚本中可加 `--yes` 跳过。
+
+卸载节点程序（在节点以 root 执行）：
+
+```sh
+vaio-agent uninstall
+```
+
+只删除节点程序（服务、`/opt/vaio-agent`、节点身份与日志）；节点脚本、代理配置和用户保留，代理照常运行，原来由节点程序执行的定时任务改回 `/usr/local/bin/vless-server.sh`。
 
 ## 容器部署（可选）
 

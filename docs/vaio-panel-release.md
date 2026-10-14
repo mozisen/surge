@@ -17,3 +17,10 @@
 2. 导出：`git archive <提交>:platform` 解包到空目录，确认 `python -m unittest discover -s tests` 与三个 cjs 测试在导出目录独立通过。
 3. 在导出目录提交（作者为仓库所有者），推送到 vaio-panel `main`，打标签 `v<版本>` 并推送；在 GitHub 由标签创建 Release，标为最新正式版。
 4. 在本文件记录版本、来源提交与验证结果。预览版不发布到 vaio-panel。
+
+## 1.1.0（开发中，未发布到 vaio-panel）
+
+- 安装：域名留空使用本机公网 IP（HTTP，`VAIO_ALLOW_HTTP=1`），自定义面板端口（域名默认 443、IP 默认 8080）；Nginx、证书与 `VAIO_PUBLIC_URL` 统一由 `scripts/panel-address.py`（root）生成，失败恢复原文件。
+- 面板地址：面板写 `/var/lib/vaio-panel/address-request.json`，`vaio-panel-address.path` 触发 root 辅助程序绑定或更换域名、关闭旧地址；面板以新地址启动时为已接管节点排队 `agent_set_url`（节点验证新地址 HTTPS 后改写配置）；旧 IP 或旧域名保留到「关闭旧地址」。1.0.0 升级时由 `update-panel.py` 补装辅助服务。
+- 卸载：`vaio-panel uninstall [--yes] [--backup 文件]`、`vaio-agent uninstall [--yes]`。
+- 测试：新增 `tests/test_panel_address.py`、`tests/test_uninstall.py`、`tests/platform-users.cjs` 面板地址一组；unittest 与 cjs 全部通过。**真实验收**：未执行（尚未在 VPS 上实际安装 IP 模式、绑定域名或卸载）。
