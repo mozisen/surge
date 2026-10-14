@@ -478,6 +478,9 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     assert(sidebarButton.innerHTML.includes('新版本 v1.3.0'));
     context.checkPanelUpdate();                     // only once per page load
     element('pu-update');
+    context.responses['/panel-update?refresh=1'] = update({latest: 'v1.3.1'});
+    await context.panelUpdateDialog(true);
+    assert(html.modal.includes('更新到 v1.3.1'), 'dialog opened by the admin re-checks');
     await context.panelUpdateDialog();
     assert(html.title === '面板更新' && html.modal.includes('可更新') && html.modal.includes('data-action="panel-update-start" data-version="v1.3.0"'));
     assert(html.modal.includes('https://github.com/mozisen/vaio-panel/releases'));

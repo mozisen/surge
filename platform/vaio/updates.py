@@ -6,7 +6,8 @@ import urllib.request
 
 REPOSITORY = "mozisen/vaio-panel"
 TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
-CACHE = 6 * 3600          # a successful check
+CACHE = 3600              # a successful check (background badge)
+FORCED = 60               # opening the update dialog re-checks, at most once a minute
 RETRY = 30 * 60           # after GitHub could not be reached
 
 
@@ -25,12 +26,14 @@ def fetch_latest():
     return max(versions, key=version_key) if versions else None
 
 
-def check(db, current, now=None, fetch=None):
-    """Cached result {latest, newer, checked}; a failed check is silent and retried later."""
+def check(db, current, now=None, fetch=None, force=False):
+    """Cached result {latest, newer, checked}; a failed check is silent and retried later.
+    force (the admin opened the update dialog) re-checks unless the last check is under a minute old."""
     now = time.time() if now is None else now
     row = db.execute("SELECT value FROM settings WHERE key='update_check'").fetchone()
     cached = json.loads(row[0]) if row else {}
-    if not cached or now - cached.get("at", 0) > (CACHE if cached.get("ok") else RETRY):
+    age = now - cached.get("at", 0)
+    if not cached or age > (FORCED if force else CACHE if cached.get("ok") else RETRY):
         try:
             cached = {"at": now, "ok": True, "latest": (fetch or fetch_latest)()}
         except Exception:

@@ -809,7 +809,7 @@ document.addEventListener('click', async e => {
         else if (action === 'resolve-task') resolveTask(b.dataset.id);
         else if (action === 'settings') await accountSettings();
         else if (action === 'settings-tab') await (b.dataset.tab === 'address' ? panelAddressDialog() : accountSettings());
-        else if (action === 'panel-update') await panelUpdateDialog();
+        else if (action === 'panel-update') await panelUpdateDialog(true);
         else if (action === 'panel-update-start') await panelUpdateStart(b);
         else if (action === 'upgrade-all') upgradeAllDialog();
         else if (action === 'upgrade-all-confirm') await upgradeAllStart(b);
@@ -1310,9 +1310,10 @@ function checkPanelUpdate() {
 }
 
 const panelUpdateRelease = 'https://github.com/mozisen/vaio-panel/releases';
-async function panelUpdateDialog() {
+// refresh: opened by the admin, so ask GitHub now instead of the cached answer.
+async function panelUpdateDialog(refresh = false) {
     let d;
-    try { d = await api('/panel-update'); } catch (err) {
+    try { d = await api('/panel-update' + (refresh ? '?refresh=1' : '')); } catch (err) {
         // The panel restarts during an update; keep waiting while the dialog is open.
         if (panelUpdate?.status?.state === 'running' || panelUpdate?.pending) {
             if ($('#modal').open && $('#pu-update')) setTimeout(() => { if ($('#modal').open && $('#pu-update')) panelUpdateDialog().catch(() => {}); }, 4000);
@@ -1341,7 +1342,7 @@ async function panelUpdateDialog() {
         }
     }
     modal('面板更新', `<div id="pu-update"><div class="kv"><span>当前版本</span><span class="mono">${esc(d.current)}</span></div><div class="kv"><span>最新版本</span><span>${latest}${d.newer ? ' <span class="badge running">可更新</span>' : d.latest ? ' <span class="muted">已是最新</span>' : ''}</span></div><div class="kv"><span>检查时间</span><span>${esc(checked)}</span></div><div class="kv"><span>版本说明</span><span><a href="${panelUpdateRelease}" target="_blank" rel="noopener">GitHub Releases</a></span></div>${statusLine}${manual}
-<p class="helper">每次打开面板会在后台检查 ${esc(d.repository)} 的正式版本。更新前自动备份数据并运行测试，新版无法启动会恢复原版本；更新期间面板会短暂重启，节点代理不受影响。有节点任务未完成时无法更新。</p><div class="error" role="alert"></div><div class="modal-foot">${foot}</div></div>`);
+<p class="helper">打开面板时在后台检查 ${esc(d.repository)} 的正式版本，打开此窗口时立即重新检查。更新前自动备份数据并运行测试，新版无法启动会恢复原版本；更新期间面板会短暂重启，节点代理不受影响。有节点任务未完成时无法更新。</p><div class="error" role="alert"></div><div class="modal-foot">${foot}</div></div>`);
     if (busy) setTimeout(() => { if ($('#modal').open && $('#pu-update')) panelUpdateDialog().catch(() => {}); }, 4000);
 }
 async function panelUpdateStart(b) {

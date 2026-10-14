@@ -1036,7 +1036,7 @@ def create_app(config=None):
         from . import updates
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            result = updates.check(db, __version__)
+            result = updates.check(db, __version__, force=request.args.get("refresh") == "1")
         try:
             status = json.loads((data_dir / "panel-update-status.json").read_text())
         except (OSError, ValueError):
