@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.10"
+readonly VERSION="3.7.4-preview.11"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -33235,6 +33235,8 @@ _api_account_apply() {
     local request="$1" results="$CFG/api-results" backups="$CFG/api-backups" fingerprint record prior backup
     local log check code account rev f data
     _api_account_validate "$request" || { _api_reply failed invalid_request; return 1; }
+    # 从未安装过协议的节点还没有 db.json：先建立空数据库（与菜单首次运行相同），接管切换才能执行。
+    [[ -f "$DB_FILE" ]] || init_db >/dev/null 2>&1 || true
     [[ -f "$DB_FILE" ]] || { _api_reply failed invalid_database; return 1; }
     mkdir -p "$results" "$backups" && chmod 700 "$results" "$backups" || { _api_reply failed storage_error; return 1; }
     fingerprint=$(jq -cS '{action, params}' <<< "$request" | _api_sha256)

@@ -152,3 +152,8 @@
 
 - 节点已注册 Vaio 节点程序（存在 `/etc/vaio-agent/config.json`，可用 `VAIO_AGENT_CONFIG` 覆盖路径）且为「以平台为准」时，「用户管理方式」菜单只提示由面板统一管理，不再提供切回「以脚本为准」。如需改回本机管理，需先在面板删除该服务器并卸载节点程序。未注册的节点行为不变；面板自身的 `set_authority` 接口不受影响。
 - 测试：`tests/user-authority.sh` 新增已注册节点不能切回一项。
+
+## 未安装协议的节点也能切到平台管理（3.7.4-preview.11）
+
+- `--api account_apply` 在节点还没有 `db.json`（从未安装过协议）时先调用 `init_db` 建立空数据库，再执行请求；此前面板的自动切换会以 `invalid_database`（「节点数据库格式无效」）失败。在测试面板「vps」（0 个协议）上发现。
+- 测试：`tests/accounts-api.sh` 新增没有 db.json 时切换为平台管理一项。

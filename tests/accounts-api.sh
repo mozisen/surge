@@ -23,7 +23,7 @@ for fn in _account_jq_defs _account_valid_id _account_valid_name _account_valid_
     _db_apply db_get_user_field db_list_users is_standalone_protocol _is_snell_users_protocol \
     _api_reply _api_inventory _api_dispatch _api_sha256 _api_account_validate _api_account_precheck _api_account_execute \
     _api_account_backup_files _api_account_restore _api_account_store _api_account_apply _api_account_result \
-    _api_txn_lock _api_txn_unlock db_authority_get _authority_rows _authority_new_secret _authority_apply \
+    init_db _api_txn_lock _api_txn_unlock db_authority_get _authority_rows _authority_new_secret _authority_apply \
     _proto_user_mode _proto_user_stats _proto_user_available _proto_user_modes_json _account_assign_single _api_account_share; do
     load "$fn"
 done
@@ -204,3 +204,10 @@ call '{"api_version":1,"request_id":"inv2","action":"inventory"}' $LINENO
 call '{"api_version":1,"request_id":"back","action":"account_apply","params":{"ops":[{"op":"set_authority","mode":"script"}]}}' $LINENO
 [[ "$(out '"\(.status)|\(.data.user_authority)"')" == "succeeded|script" ]] || fail $LINENO
 echo 'PASS set_authority: script mode rejects user writes, takeover clears credentials, switch back'
+
+# 11. 从未安装过协议的节点没有 db.json：切换为平台管理时先建立空数据库
+rm -f "$DB_FILE"
+call '{"api_version":1,"request_id":"fresh-take","action":"account_apply","params":{"ops":[{"op":"set_authority","mode":"platform"}]}}' $LINENO
+[[ "$(out '"\(.status)|\(.data.user_authority)"')" == "succeeded|platform" ]] || { cat "$fixture/out" "$fixture/err"; fail $LINENO; }
+[[ "$(q '"\(.meta.user_authority)|\(.xray | length)|\(.singbox | length)"')" == "platform|0|0" ]] || fail $LINENO
+echo 'PASS set_authority on a node without db.json creates an empty database first'
