@@ -157,3 +157,9 @@
 
 - `--api account_apply` 在节点还没有 `db.json`（从未安装过协议）时先调用 `init_db` 建立空数据库，再执行请求；此前面板的自动切换会以 `invalid_database`（「节点数据库格式无效」）失败。在测试面板「vps」（0 个协议）上发现。
 - 测试：`tests/accounts-api.sh` 新增没有 db.json 时切换为平台管理一项。
+
+## 中转线路导出（3.7.4-preview.12）
+
+- `--api account_share` 新增可选 `port`：设置后链接中的端口换成该值（`VAIO_SHARE_PORT`），配合 `host` 用于面板「中转管理」导出经中转的连接；凭据、SNI 等仍取落地实例。
+- Snell 导出此前忽略平台指定的地址，现在与其他协议一致遵循 `host`，并支持 `port`。
+- 测试：`tests/protocol-users.sh` 新增入口地址与端口覆盖、端口范围校验两项。

@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.11"
+readonly VERSION="3.7.4-preview.12"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -28599,6 +28599,7 @@ _gen_user_share_link() {
     local port sni short_id public_key path method domain host password username
     local security_mode encryption use_tls socks_sni
     port=$(echo "$cfg" | jq -r '.port // empty')
+    [[ -n "${VAIO_SHARE_PORT:-}" ]] && port="$VAIO_SHARE_PORT"
     sni=$(echo "$cfg" | jq -r '.sni // empty')
     short_id=$(echo "$cfg" | jq -r '.short_id // empty')
     public_key=$(echo "$cfg" | jq -r '.public_key // empty')
@@ -32846,12 +32847,17 @@ _snell_user_share() {
     row=$(_snell_rows "$proto" | jq -c --arg port "$port" --arg name "$name" '
         select((.port|tostring) == $port or any(.users[]?; .name == $name))' | head -n1)
     [[ -n "$row" ]] || return 1
-    IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
+    if [[ -n "${VAIO_SHARE_HOST:-}" ]]; then
+        # 平台导出（含中转线路）指定的连接地址
+        if [[ "$VAIO_SHARE_HOST" == *:* ]]; then ipv4=""; ipv6="$VAIO_SHARE_HOST"; else ipv4="$VAIO_SHARE_HOST"; ipv6=""; fi
+    else
+        IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
+    fi
     address="$ipv4"; [[ -n "$address" ]] || address="${ipv6:+[$ipv6]}"
     [[ -n "$address" ]] || return 1
     case "$proto" in snell) version=4 ;; snell-v5) version=5 ;; snell-v6) version=6 ;; esac
     local line conf obfs host id
-    line=$(gen_snell_surge_line "$name" "$address" "$(jq -r .port <<< "$row")" "$(jq -r .psk <<< "$row")" "$version" "$(jq -r '.mode // "default"' <<< "$row")" "$(jq -r '.tfo // "true"' <<< "$row")")
+    line=$(gen_snell_surge_line "$name" "$address" "${VAIO_SHARE_PORT:-$(jq -r .port <<< "$row")}" "$(jq -r .psk <<< "$row")" "$version" "$(jq -r '.mode // "default"' <<< "$row")" "$(jq -r '.tfo // "true"' <<< "$row")")
     id=$(jq -r '.snell_id // empty' <<< "$row")
     conf="$CFG/$proto.conf"
     [[ -z "$id" ]] || conf="$CFG/snell-users/$id.conf"
@@ -33302,21 +33308,24 @@ _api_account_apply() {
 
 # 成员连接信息：只读，不写记录。凭据只出现在本次输出中（Agent 作为 share 任务结果短暂保存）。
 _api_account_share() {
-    local request="$1" target core proto port name host credential link
-    jq -e '(.params | type == "object") and ((.params | keys) - ["target", "name", "host"] | length == 0) and
+    local request="$1" target core proto port name host entry_port credential link
+    jq -e '(.params | type == "object") and ((.params | keys) - ["target", "name", "host", "port"] | length == 0) and
         (.params.target | type == "object" and (keys == ["core", "port", "protocol"]) and (.core == "xray" or .core == "singbox") and
             (.protocol | type == "string" and test("^[a-z0-9-]{1,32}$")) and (.port | type == "number" and . == floor and . >= 1 and . <= 65535)) and
         (.params.name | type == "string" and test("^[A-Za-z0-9_-]{1,32}$")) and
-        ((.params.host // "") | type == "string" and test("^[A-Za-z0-9.:-]{0,253}$"))' <<< "$request" >/dev/null 2>&1 || {
+        ((.params.host // "") | type == "string" and test("^[A-Za-z0-9.:-]{0,253}$")) and
+        ((.params.port // 1) | type == "number" and . == floor and . >= 1 and . <= 65535)' <<< "$request" >/dev/null 2>&1 || {
         _api_reply failed invalid_request; return 1; }
     [[ -f "$DB_FILE" ]] || { _api_reply failed invalid_database; return 1; }
     core=$(jq -r .params.target.core <<< "$request"); proto=$(jq -r .params.target.protocol <<< "$request")
     port=$(jq -r .params.target.port <<< "$request"); name=$(jq -r .params.name <<< "$request"); host=$(jq -r '.params.host // ""' <<< "$request")
+    # 中转线路导出：地址与端口换成第一层中转入口（凭据仍取落地实例）。
+    entry_port=$(jq -r '.params.port // ""' <<< "$request")
     _proto_user_available "$proto" || { _api_reply failed unsupported_protocol; return 1; }
     credential=$(jq -r --arg c "$core" --arg p "$proto" --argjson port "$port" --arg n "$name" "$(_account_jq_defs)"'
         member_user({core: $c, protocol: $p, port: $port, name: $n}).uuid // ""' "$DB_FILE")
     [[ -n "$credential" ]] || { _api_reply failed user_not_found; return 1; }
-    link=$(VAIO_SHARE_HOST="$host" _gen_user_share_link "$core" "$proto" "$credential" "$name" "$port" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g') || true
+    link=$(VAIO_SHARE_HOST="$host" VAIO_SHARE_PORT="$entry_port" _gen_user_share_link "$core" "$proto" "$credential" "$name" "$port" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g') || true
     [[ -n "$link" ]] || { _api_reply failed share_unavailable; return 1; }
     _api_reply succeeded ok "$(jq -nc --arg l "$link" '{connection: $l}')"
 }

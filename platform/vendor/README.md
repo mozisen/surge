@@ -5,8 +5,8 @@
 - 仓库：https://github.com/mozisen/surge
 - 分支：`codex/platform-3.7.4`
 - 提交：与当前根目录脚本同一 Git 提交；使用下列摘要固定内容。
-- 版本：`3.7.4-preview.11`（未安装协议的节点也能切到平台管理）
-- SHA-256：`c03524907c1a7ea107ab03f2feba39465ee42ffbf813703667a508d8e047dcb5`
+- 版本：`3.7.4-preview.12`（导出连接支持中转入口端口）
+- SHA-256：`f3e8466b6cf1bffae24110643f57b4b5cbe9e980660d4a334e59605bfeb1af49`
 
 原快照未提供许可证，不对该文件另行声明许可证。
 
@@ -43,3 +43,5 @@ SS 单用户入站采集：按唯一端口和标签读取非清零计数，累�
 3.7.4-preview.10：节点已注册 Vaio 节点程序（存在 `/etc/vaio-agent/config.json`）且为平台模式时，「用户管理方式」菜单不再提供切回「以脚本为准」，提示由面板统一管理；未注册的节点不变。上一固定版本为 3.7.4-preview.9，SHA-256 为 `47c23156bf1b6b13d9cd034cdf3d1a3b75235d373dbf2ac3513eab6db1c684a3`。
 
 3.7.4-preview.11：`account_apply` 在节点还没有 `db.json`（从未安装过协议）时先建立空数据库，平台自动切换用户管理方式不再因「数据库无效」失败。上一固定版本为 3.7.4-preview.10，SHA-256 为 `6dc7d8d60c295dfef529dbe124df966cb7484dbf2af2ad7c7b786d5d98036c5a`。
+
+3.7.4-preview.12：`account_share` 新增可选 `port`（`VAIO_SHARE_PORT`），中转线路导出时地址与端口换成第一层中转入口，凭据仍取落地实例；Snell 导出也遵循平台指定的地址与端口。上一固定版本为 3.7.4-preview.11，SHA-256 为 `c03524907c1a7ea107ab03f2feba39465ee42ffbf813703667a508d8e047dcb5`。

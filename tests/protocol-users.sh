@@ -103,10 +103,15 @@ grep -q '已有用户（一用户一实例）' "$fixture/messages" || fail $LINE
 echo 'PASS single-user instance assignment rotates the credential and refuses occupied instances'
 
 # 5. 成员连接信息：指定地址，不探测公网；未知用户与不支持的协议被拒绝
-_gen_user_share_link() { printf '\033[32mLINK %s %s %s %s %s host=%s\033[0m\n' "$@" "$VAIO_SHARE_HOST"; }
+_gen_user_share_link() { printf '\033[32mLINK %s %s %s %s %s host=%s port=%s\033[0m\n' "$@" "$VAIO_SHARE_HOST" "${VAIO_SHARE_PORT:-}"; }
 api_id=s1
 out=$(_api_account_share '{"api_version":1,"request_id":"s1","action":"account_share","params":{"target":{"core":"xray","protocol":"snell-v5","port":9001},"name":"alice","host":"203.0.113.5"}}' || true)
-[[ "$(jq -r .data.connection <<< "$out")" == "LINK xray snell-v5 $(q '.xray["snell-v5"][0].psk') alice 9001 host=203.0.113.5" ]] || { echo "$out"; fail $LINENO; }
+[[ "$(jq -r .data.connection <<< "$out")" == "LINK xray snell-v5 $(q '.xray["snell-v5"][0].psk') alice 9001 host=203.0.113.5 port=" ]] || { echo "$out"; fail $LINENO; }
+# 中转线路：入口地址与端口覆盖，凭据仍取落地实例
+out=$(_api_account_share '{"api_version":1,"request_id":"s1","action":"account_share","params":{"target":{"core":"xray","protocol":"snell-v5","port":9001},"name":"alice","host":"198.51.100.7","port":30080}}' || true)
+[[ "$(jq -r .data.connection <<< "$out")" == "LINK xray snell-v5 $(q '.xray["snell-v5"][0].psk') alice 9001 host=198.51.100.7 port=30080" ]] || { echo "$out"; fail $LINENO; }
+out=$(_api_account_share '{"api_version":1,"request_id":"s1","action":"account_share","params":{"target":{"core":"xray","protocol":"snell-v5","port":9001},"name":"alice","port":70000}}' || true)
+[[ "$(jq -r .code <<< "$out")" == invalid_request ]] || fail $LINENO
 out=$(_api_account_share '{"api_version":1,"request_id":"s1","action":"account_share","params":{"target":{"core":"xray","protocol":"snell-v5","port":9001},"name":"nobody"}}' || true)
 [[ "$(jq -r .code <<< "$out")" == user_not_found ]] || fail $LINENO
 out=$(_api_account_share '{"api_version":1,"request_id":"s1","action":"account_share","params":{"target":{"core":"xray","protocol":"naive","port":443},"name":"alice"}}' || true)
