@@ -57,9 +57,10 @@ case "${1:-help}" in
     if [ -n "$backup" ]; then
       tar -czf "$backup" -C "$P/" var/lib/vaio-panel etc/vaio-panel && chmod 600 "$backup" && echo "已备份数据库与配置到 $backup" || { echo '备份失败，已停止卸载'; exit 1; }
     fi
-    systemctl stop vaio-panel-address.path vaio-panel-address.service vaio-panel 2>/dev/null || true
-    systemctl disable vaio-panel vaio-panel-address.path >/dev/null 2>&1 || true
-    rm -f "$P/etc/systemd/system/vaio-panel.service" "$P/etc/systemd/system/vaio-panel-address.service" "$P/etc/systemd/system/vaio-panel-address.path"
+    systemctl stop vaio-panel-address.path vaio-panel-address.service vaio-panel-update.path vaio-panel 2>/dev/null || true
+    systemctl disable vaio-panel vaio-panel-address.path vaio-panel-update.path >/dev/null 2>&1 || true
+    rm -f "$P/etc/systemd/system/vaio-panel.service" "$P/etc/systemd/system/vaio-panel-address.service" "$P/etc/systemd/system/vaio-panel-address.path" \
+          "$P/etc/systemd/system/vaio-panel-update.service" "$P/etc/systemd/system/vaio-panel-update.path"
     systemctl daemon-reload 2>/dev/null || true
     rm -f "$P/etc/nginx/sites-enabled/vaio-panel" "$P/etc/nginx/sites-available/vaio-panel"
     if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then systemctl reload nginx 2>/dev/null || true; fi

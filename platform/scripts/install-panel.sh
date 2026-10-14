@@ -112,6 +112,23 @@ PathExists=/var/lib/vaio-panel/address-request.json
 [Install]
 WantedBy=multi-user.target
 EOF
+# Root helper for updating the panel from the panel (the update itself is update-panel.py with backup and rollback).
+cat > /etc/systemd/system/vaio-panel-update.service <<'EOF'
+[Unit]
+Description=Vaio Panel update from the panel
+[Service]
+Type=oneshot
+TimeoutStartSec=1800
+ExecStart=/usr/bin/python3 /opt/vaio-panel/scripts/update-panel.py --from-request /var/lib/vaio-panel/panel-update-request.json
+EOF
+cat > /etc/systemd/system/vaio-panel-update.path <<'EOF'
+[Unit]
+Description=Vaio Panel update requests
+[Path]
+PathExists=/var/lib/vaio-panel/panel-update-request.json
+[Install]
+WantedBy=multi-user.target
+EOF
 # Nginx site, certificate (domain) and VAIO_PUBLIC_URL; restores its files on failure.
 if [ -n "$VAIO_DOMAIN" ]; then
   python3 /opt/vaio-panel/scripts/panel-address.py install --domain "$VAIO_DOMAIN" --port "$VAIO_PORT" || {
@@ -123,7 +140,7 @@ fi
 PANEL_URL=$(python3 /opt/vaio-panel/scripts/panel-address.py url)
 systemctl daemon-reload
 systemctl enable --now vaio-panel
-systemctl enable --now vaio-panel-address.path
+systemctl enable --now vaio-panel-address.path vaio-panel-update.path
 [ -z "$VAIO_DOMAIN" ] || systemctl enable --now certbot.timer
 curl --fail --retry 5 --retry-connrefused --retry-delay 1 --max-time 10 -sS http://127.0.0.1:18080/healthz >/dev/null
 echo "安装完成：$PANEL_URL"

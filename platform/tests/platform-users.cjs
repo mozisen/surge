@@ -33,7 +33,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;this.nodeVersion=nodeVersion;this.settingsTabs=settingsTabs;this.panelUpdateLabel=panelUpdateLabel;this.checkPanelUpdate=checkPanelUpdate;this.panelUpdateDialog=panelUpdateDialog;this.panelUpdateStart=panelUpdateStart;this.upgradeAllDialog=upgradeAllDialog;this.upgradeAllStart=upgradeAllStart;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -423,7 +423,7 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     element('pa-form'); element('pa-domain'); element('pa-port');
     context.responses['/panel-address'] = {url: 'http://1.2.3.4:8080', secure: false, legacy_open: false, helper: true, pending: false, status: null, migration: null};
     await context.panelAddressDialog();
-    assert(html.title === '面板地址' && html.modal.includes('HTTP 未加密') && html.modal.includes('绑定域名并切换 HTTPS') && !html.modal.includes('pa-close'));
+    assert(html.title === '系统设置' && html.modal.includes('data-tab="address" class="active"') && html.modal.includes('HTTP 未加密') && html.modal.includes('绑定域名并切换 HTTPS') && !html.modal.includes('pa-close'));
     elements['pa-domain'].value = ' panel.example.com '; elements['pa-port'].value = '8443';
     posts.length = 0;
     context.post = async (path, data) => { posts.push([path, data]); return {queued: 1}; };
@@ -445,4 +445,68 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     await context.panelAddressDialog();
     assert(html.modal.includes('正在处理地址变更') && html.modal.includes('vaio-panel domain') && html.modal.includes('type="submit" class="primary" disabled'));
     console.log('PASS panel address dialog: HTTP notice, bind payload, failure, migration, close legacy, busy and missing helper');
+
+    // 节点程序版本、一键更新节点程序
+    assert(context.nodeVersion({snapshot: {agent_version: '1.0.0'}, upgrade_available: true, panel_version: '1.2.0'}).includes('node-version outdated'));
+    assert(context.nodeVersion({snapshot: {agent_version: '1.0.0'}, upgrade_available: true, panel_version: '1.2.0'}).includes('最新 <span class="mono">1.2.0'));
+    assert(context.nodeVersion({snapshot: {agent_version: '1.2.0'}, upgrade_available: false, panel_version: '1.2.0'}).includes('已是最新'));
+    assert(context.nodeVersion({snapshot: {}}).includes('节点程序 —'));
+    assert(context.nodeVersion({snapshot: {agent_version: '<x>'}, upgrade_available: true, panel_version: '1'}).includes('&lt;x&gt;'));
+    context.panelVersion = '1.2.0';
+    context.nodes = [node('a', {upgrade_available: true, panel_version: '1.2.0'}), node('b', {upgrade_available: false, panel_version: '1.2.0'}),
+                     node('c', {adopted: false, upgrade_available: true, panel_version: '1.2.0'})];
+    context.upgradeAllDialog();
+    assert(html.title === '一键更新节点程序' && html.modal.includes('以下 1 台') && html.modal.includes('node-a') && !html.modal.includes('node-b') && !html.modal.includes('node-c'));
+    let refreshed = 0;
+    context.refresh = async () => { refreshed++; };
+    posts.length = 0;
+    context.post = async (path, data) => { posts.push([path, data]); return {queued: ['node-a'], skipped: [{name: '<b>', reason: '节点离线'}]}; };
+    await context.upgradeAllStart({disabled: false});
+    assert.strictEqual(posts[0][0], '/nodes/upgrade-all');
+    assert(html.modal.includes('已为 1 台服务器创建更新任务：node-a') && html.modal.includes('&lt;b&gt;') && html.modal.includes('节点离线') && refreshed === 1);
+    console.log('PASS node versions and one-click node upgrade');
+
+    // 面板更新：侧栏提示、对话框、开始更新、无辅助服务时的命令、更新中
+    const sidebarButton = element('panel-update-button', {matches: () => false});
+    context.document.querySelector = selector => selector === '[data-action="panel-update"]' ? sidebarButton : null;
+    const update = (extra = {}) => ({current: '1.2.0', latest: 'v1.3.0', newer: true, checked: 1, reachable: true, repository: 'mozisen/vaio-panel',
+        status: null, pending: false, helper: true, ...extra});
+    context.responses['/panel-update'] = update();
+    assert.strictEqual(context.panelUpdateLabel(), '面板更新');
+    context.checkPanelUpdate();
+    await new Promise(r => setImmediate(r));
+    assert(sidebarButton.innerHTML.includes('新版本 v1.3.0'));
+    context.checkPanelUpdate();                     // only once per page load
+    element('pu-update');
+    await context.panelUpdateDialog();
+    assert(html.title === '面板更新' && html.modal.includes('可更新') && html.modal.includes('data-action="panel-update-start" data-version="v1.3.0"'));
+    assert(html.modal.includes('https://github.com/mozisen/vaio-panel/releases'));
+    posts.length = 0;
+    context.post = async (path, data) => { posts.push([path, data]); return {ok: true}; };
+    context.responses['/panel-update'] = update({pending: true});
+    await context.panelUpdateStart({disabled: false, dataset: {version: 'v1.3.0'}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts)), [['/panel-update', {version: 'v1.3.0'}]]);
+    assert(html.modal.includes('已提交更新') && !html.modal.includes('panel-update-start'));
+    context.responses['/panel-update'] = update({status: {state: 'running', message: '正在更新到 v1.3.0'}});
+    await context.panelUpdateDialog();
+    assert(html.modal.includes('正在更新到 v1.3.0') && !html.modal.includes('panel-update-start'));
+    context.responses['/panel-update'] = update({helper: false});
+    await context.panelUpdateDialog();
+    assert(html.modal.includes('vaio-panel update --ref v1.3.0') && html.modal.includes('copy-command') && !html.modal.includes('panel-update-start'));
+    context.responses['/panel-update'] = update({helper: false, installing: true});
+    await context.panelUpdateDialog();
+    assert(html.modal.includes('正在自动安装更新辅助服务') && html.modal.includes('vaio-panel update --ref v1.3.0'));
+    context.responses['/panel-update'] = update({current: '1.3.0', latest: 'v1.3.0', newer: false, status: {state: 'succeeded', message: '已更新到 v1.3.0'}});
+    await context.panelUpdateDialog();
+    assert(html.modal.includes('请刷新页面') && html.modal.includes('已是最新'));
+    context.responses['/panel-update'] = update({latest: null, newer: false, reachable: false});
+    context.panelVersion = '1.2.0';
+    await context.panelUpdateDialog();
+    assert(html.modal.includes('暂时无法连接 GitHub') && html.modal.includes('未知') && !html.modal.includes('panel-update-start'));
+    console.log('PASS panel update: sidebar badge, dialog, start payload, running, manual command, reload, unreachable');
+
+    // 系统设置：账号与面板地址两个标签
+    const tabs = context.settingsTabs('account');
+    assert(tabs.includes('data-tab="account" class="active"') && tabs.includes('data-tab="address" class=""') && tabs.includes('账号') && tabs.includes('面板地址'));
+    console.log('PASS system settings tabs');
 })().catch(error => { console.error(error); process.exit(1); });

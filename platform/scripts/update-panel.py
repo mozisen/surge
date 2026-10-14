@@ -56,23 +56,58 @@ def extract(payload, target):
                 path.chmod(0o755 if item.mode & 0o111 else 0o644)
 
 
-ADDRESS_UNITS = {
+HELPER_UNITS = {
     "vaio-panel-address.service": "[Unit]\nDescription=Vaio Panel address change\n[Service]\nType=oneshot\n"
                                   "ExecStart=/usr/bin/python3 /opt/vaio-panel/scripts/panel-address.py apply\n",
     "vaio-panel-address.path": "[Unit]\nDescription=Vaio Panel address change requests\n[Path]\n"
                                "PathExists=/var/lib/vaio-panel/address-request.json\n[Install]\nWantedBy=multi-user.target\n",
+    "vaio-panel-update.service": "[Unit]\nDescription=Vaio Panel update from the panel\n[Service]\nType=oneshot\nTimeoutStartSec=1800\n"
+                                 "ExecStart=/usr/bin/python3 /opt/vaio-panel/scripts/update-panel.py --from-request /var/lib/vaio-panel/panel-update-request.json\n",
+    "vaio-panel-update.path": "[Unit]\nDescription=Vaio Panel update requests\n[Path]\n"
+                              "PathExists=/var/lib/vaio-panel/panel-update-request.json\n[Install]\nWantedBy=multi-user.target\n",
 }
 
 
 def ensure_address_helper(units=Path("/etc/systemd/system")):
-    """Panels installed before 1.1.0 lack the root helper that changes the panel address; add it once."""
-    if all((units / name).exists() for name in ADDRESS_UNITS):
+    """Root helpers the panel triggers through request files (address change, self-update); added to older installs once."""
+    if all((units / name).exists() for name in HELPER_UNITS):
         return False
-    for name, content in ADDRESS_UNITS.items():
+    for name, content in HELPER_UNITS.items():
         (units / name).write_text(content)
     subprocess.run(['systemctl', 'daemon-reload'], check=False, timeout=60)
-    subprocess.run(['systemctl', 'enable', '--now', 'vaio-panel-address.path'], check=False, timeout=60)
+    for path_unit in ('vaio-panel-address.path', 'vaio-panel-update.path'):
+        subprocess.run(['systemctl', 'enable', '--now', path_unit], check=False, timeout=60)
     return True
+
+
+def update_status(path, state, message, **extra):
+    path.write_text(json.dumps({"state": state, "message": message, "at": time.time(), **extra}, ensure_ascii=False))
+    try:
+        shutil.chown(path, "vaio-panel", "vaio-panel")
+    except (LookupError, PermissionError, OSError):
+        pass
+
+
+def from_request(request_path):
+    """Update requested from the panel: read and remove the request, run the normal update, report the outcome."""
+    request_path = Path(request_path)
+    status_path = request_path.with_name("panel-update-status.json")
+    try:
+        ref = json.loads(request_path.read_text()).get("ref", "")
+    except (OSError, ValueError):
+        ref = ""
+    request_path.unlink(missing_ok=True)
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", ref or ""):
+        update_status(status_path, "failed", "更新请求无效")
+        return 1
+    update_status(status_path, "running", "正在更新到 " + ref + "（下载、测试、切换，期间面板会重启）", ref=ref)
+    try:
+        run_update("mozisen/vaio-panel", ref, None)
+    except BaseException as error:
+        update_status(status_path, "failed", "更新失败，已保留或恢复原版本：" + (str(error) or type(error).__name__)[:300], ref=ref)
+        return 1
+    update_status(status_path, "succeeded", "已更新到 " + ref, ref=ref)
+    return 0
 
 
 def main():
@@ -80,13 +115,24 @@ def main():
     parser.add_argument("--repo", default="mozisen/vaio-panel", help="GitHub 仓库：mozisen/vaio-panel（正式版）或 mozisen/surge（预览版）")
     parser.add_argument("--ref", default="main", help="分支、提交 SHA 或版本标签，例如 main、v1.0.0")
     parser.add_argument("--archive", help="管理员提供的本地 GitHub 格式源码包，用于离线部署")
+    parser.add_argument("--from-request", help=argparse.SUPPRESS)
+    parser.add_argument("--install-helpers", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit("请使用 root 运行")
+    if args.install_helpers:
+        ensure_address_helper()
+        return
+    if args.from_request:
+        raise SystemExit(from_request(args.from_request))
     if not re.fullmatch(r"[A-Za-z0-9_./-]{1,120}", args.ref):
         raise SystemExit("版本标识无效")
     if args.repo not in ("mozisen/vaio-panel", "mozisen/surge"):
         raise SystemExit("仓库只能是 mozisen/vaio-panel 或 mozisen/surge")
+    run_update(args.repo, args.ref, args.archive)
+
+
+def run_update(repo, ref, archive):
     os.umask(0o022)
     root = Path("/opt/vaio-panel")
     if not root.exists() or not Path("/etc/vaio-panel/panel.env").exists():
@@ -104,9 +150,9 @@ def main():
         with sqlite3.connect(database) as db:
             if db.execute("SELECT 1 FROM tasks WHERE status IN ('queued','running') LIMIT 1").fetchone():
                 raise RuntimeError("有待执行或运行中任务，请完成后再升级")
-        api = "https://api.github.com/repos/" + args.repo
-        sha = args.ref if args.archive else json.loads(download(api + "/commits/" + quote(args.ref, safe='')))["sha"]
-        payload = Path(args.archive).read_bytes() if args.archive else download(api + "/tarball/" + sha)
+        api = "https://api.github.com/repos/" + repo
+        sha = ref if archive else json.loads(download(api + "/commits/" + quote(ref, safe='')))["sha"]
+        payload = Path(archive).read_bytes() if archive else download(api + "/tarball/" + sha)
         identity = str(time.time_ns())
         stage = Path('/opt/vaio-panel-releases') / identity
         stage.mkdir(parents=True)

@@ -204,9 +204,10 @@ function login() {
 }
 
 function shell(content, section) {
+    checkPanelUpdate();
     const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器管理'], ['instances', 'globe', '节点管理'], ['relays', 'relay', '中转管理'], ['forwards', 'forward', '端口转发'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '通知配置'], ['backups', 'server', '备份恢复'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
     const nav = links.map(([id, ico, text]) => `<a href="#${id}" class="${section===id?'active':''}"${section===id?' aria-current="page"':''}>${icon(ico)}${text}</a>`).join('');
-    $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="pa-open">面板地址</button><button class="quiet small" data-action="account">账号设置</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
+    $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="settings">系统设置</button><button class="quiet small" data-action="panel-update">${panelUpdateLabel()}</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
 }
 
 // Readout value: number large, unit set apart in small muted type.
@@ -245,7 +246,7 @@ function card(node) {
         instances = s.instances || [];
     const memory = m.memory_total ? m.memory_used / m.memory_total * 100 : null;
     const disk = m.disk_total ? m.disk_used / m.disk_total * 100 : null;
-    return `<article class="node-row ${esc(node.status)}"><div class="node-state">${badge(node.status)}</div><div class="node-name"><h3><a href="#nodes/${node.id}">${esc(node.name)}</a></h3><div class="node-sub"><span>${esc(node.group_name)}</span><span>${esc(s.hostname || '等待首次连接')}</span></div></div><div class="node-meters">${meter('内存', memory)}${meter('磁盘', disk)}</div><div class="node-traffic"><span>接收 ${trafficValue(m.network_rx)}</span><span>发送 ${trafficValue(m.network_tx)}</span></div><div class="protocol-chips">${[...new Set(instances.map(i=>i.protocol))].slice(0,3).map(p=>`<span>${esc(p.toUpperCase())}</span>`).join('')||'<span class="none">暂无协议</span>'}</div><div class="node-count">${instances.length} 个实例 ${icon('arrow')}</div></article>`;
+    return `<article class="node-row ${esc(node.status)}"><div class="node-state">${badge(node.status)}</div><div class="node-name"><h3><a href="#nodes/${node.id}">${esc(node.name)}</a></h3><div class="node-sub"><span>${esc(node.group_name)}</span><span>${esc(s.hostname || '等待首次连接')}</span></div></div><div class="node-meters">${meter('内存', memory)}${meter('磁盘', disk)}</div><div class="node-traffic"><span>接收 ${trafficValue(m.network_rx)}</span><span>发送 ${trafficValue(m.network_tx)}</span></div>${nodeVersion(node)}<div class="node-count">${instances.length} 个实例 ${icon('arrow')}</div></article>`;
 }
 
 function nodeCards() {
@@ -258,7 +259,7 @@ function taskTable(list) {
 }
 
 function overview(section) {
-    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器管理'}</h1><p class="subtext">${section==='overview'?'服务器、协议与任务，尽在一个工作空间。':'连接、分组并管理你的所有服务器。'}</p></div><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="trash">回收站</button>${filterMenu('group-filter', '筛选分组', [['', '全部分组'], ...[...new Set(nodes.map(n=>n.group_name).filter(Boolean))].map(g=>[g, g])], groupFilter)}<div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>最近任务</h2><a href="#tasks">查看全部 →</a></div><div class="panel">${taskTable(tasks.slice(0,5))}</div>`:''}`, section);
+    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器管理'}</h1><p class="subtext">${section==='overview'?'服务器、协议与任务，尽在一个工作空间。':'连接、分组并管理你的所有服务器。'}</p></div><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="upgrade-all"${nodes.some(n=>n.adopted&&n.upgrade_available)?'':' disabled title="所有节点程序已是最新"'}>一键更新节点程序</button><button class="quiet small" data-action="trash">回收站</button>${filterMenu('group-filter', '筛选分组', [['', '全部分组'], ...[...new Set(nodes.map(n=>n.group_name).filter(Boolean))].map(g=>[g, g])], groupFilter)}<div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>最近任务</h2><a href="#tasks">查看全部 →</a></div><div class="panel">${taskTable(tasks.slice(0,5))}</div>`:''}`, section);
     $('#group-filter').onchange = e => { groupFilter = e.target.value; $('#node-results').innerHTML = nodeCards(); };
     $('#search').addEventListener('input', e => {
         search = e.target.value;
@@ -374,7 +375,7 @@ function enrollment(data) {
 
 async function accountSettings() {
     const session = await api('/session');
-    modal('账号设置', `<form id="account-form"><label for="account-name">管理员账号</label><input id="account-name" name="username" value="${esc(session.username)}" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.\\-]{3,32}" autocomplete="username"><p class="helper">3–32 位字母、数字、点、下划线或短横线。</p><label for="current-password">当前密码</label><input id="current-password" name="current_password" type="password" required autocomplete="current-password"><label for="new-password">新密码</label><input id="new-password" name="new_password" type="password" minlength="8" maxlength="128" autocomplete="new-password"><p class="helper">留空表示只修改账号；新密码至少 8 位。</p><label for="confirm-password">确认新密码</label><input id="confirm-password" name="confirm_password" type="password" maxlength="128" autocomplete="new-password"><p>保存后所有已登录会话退出，请使用新的账号信息重新登录。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存修改</button></div></form>`);
+    modal('系统设置', `${settingsTabs('account')}<form id="account-form"><label for="account-name">管理员账号</label><input id="account-name" name="username" value="${esc(session.username)}" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.\\-]{3,32}" autocomplete="username"><p class="helper">3–32 位字母、数字、点、下划线或短横线。</p><label for="current-password">当前密码</label><input id="current-password" name="current_password" type="password" required autocomplete="current-password"><label for="new-password">新密码</label><input id="new-password" name="new_password" type="password" minlength="8" maxlength="128" autocomplete="new-password"><p class="helper">留空表示只修改账号；新密码至少 8 位。</p><label for="confirm-password">确认新密码</label><input id="confirm-password" name="confirm_password" type="password" maxlength="128" autocomplete="new-password"><p>保存后所有已登录会话退出，请使用新的账号信息重新登录。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存修改</button></div></form>`);
     $('#account-form').onsubmit = async e => {
         e.preventDefault();
         const button = $('[type=submit]', e.target);
@@ -806,7 +807,12 @@ document.addEventListener('click', async e => {
         else if (action === 'upgrade-agent' && selected.snapshot.upgrade_version === 1 && selected.status === 'online') upgradeDialog(selected);
         else if (action === 'upgrade-agent') { currentCommand=selected.update_command; modal('升级节点程序', `<p>在节点以 root 执行，升级前自动检查任务，保留节点身份、现有协议与用户；新版未上线会恢复旧程序。</p><textarea readonly rows="5">${esc(currentCommand)}</textarea><p class="helper">维护中断时，请在节点核对状态后运行 vaio-agent resume。此操作不会更新代理内核。</p><div class="modal-foot"><button class="primary" data-action="copy-command">复制升级命令</button></div>`); }
         else if (action === 'resolve-task') resolveTask(b.dataset.id);
-        else if (action === 'account') await accountSettings();
+        else if (action === 'settings') await accountSettings();
+        else if (action === 'settings-tab') await (b.dataset.tab === 'address' ? panelAddressDialog() : accountSettings());
+        else if (action === 'panel-update') await panelUpdateDialog();
+        else if (action === 'panel-update-start') await panelUpdateStart(b);
+        else if (action === 'upgrade-all') upgradeAllDialog();
+        else if (action === 'upgrade-all-confirm') await upgradeAllStart(b);
         else if (action === 'add-node') addNode();
         else if (action === 'task') showTask(b.dataset.id);
         else if (action === 'cancel-task') {
@@ -1241,7 +1247,7 @@ async function panelAddressDialog() {
         : st?.state === 'succeeded' ? `<div class="notice">${esc(st.message)}</div>` : '';
     const failedNodes = (m?.nodes || []).filter(n => !['succeeded', 'queued', 'running'].includes(n.status));
     const migration = m && m.total ? `<section class="pa-migration"><h3>节点改用新地址 <span class="count">${m.done} / ${m.total}</span></h3>${m.nodes.map(n => `<div class="kv"><span>${esc(n.name)}</span><span>${esc(panelMigrationText[n.status] || n.status)}${n.status === 'failed' && n.message ? `<br><span class="muted">${esc(n.message)}</span>` : ''}</span></div>`).join('')}<div class="action-row">${failedNodes.length ? '<button type="button" data-action="pa-retry">重新通知未切换的节点</button>' : ''}${d.legacy_open ? '<button type="button" data-action="pa-close">关闭旧地址</button>' : ''}</div><p class="helper">节点需升级到 1.1.0 及以上才能自动改用新地址；旧地址（未加密的 IP 地址或原域名）在关闭前继续可用。</p></section>` : (d.legacy_open ? '<div class="action-row"><button type="button" data-action="pa-close">关闭旧地址</button></div>' : '');
-    modal('面板地址', `<div class="kv"><span>当前地址</span><span class="mono">${esc(d.url)}</span></div><div class="kv"><span>连接</span><span>${d.secure ? 'HTTPS 加密' : 'HTTP 未加密'}</span></div>${statusLine}
+    modal('系统设置', `${settingsTabs('address')}<div class="kv"><span>当前地址</span><span class="mono">${esc(d.url)}</span></div><div class="kv"><span>连接</span><span>${d.secure ? 'HTTPS 加密' : 'HTTP 未加密'}</span></div>${statusLine}
 <form id="pa-form"><div class="install-grid"><div><label for="pa-domain">域名</label><input id="pa-domain" maxlength="253" placeholder="panel.example.com" required></div><div><label for="pa-port">HTTPS 端口</label><input id="pa-port" type="number" min="1" max="65535" value="443" required></div></div>
 <p class="helper">先把域名解析到本服务器，并放行 TCP 80（申请证书）与该端口。提交后自动申请证书、配置 Nginx 并重启面板，失败会恢复原配置；完成后请用新地址访问，节点会自动收到新地址。</p>
 ${d.helper ? '' : '<div class="notice warn">此面板缺少地址辅助服务（升级到 1.1.0 后自动安装）。也可在服务器以 root 执行：vaio-panel domain 域名 端口</div>'}
@@ -1274,6 +1280,92 @@ async function panelAddressAction(action) {
             toast('正在关闭旧地址');
         });
     }
+}
+
+// ---------------------------------------------------------------- 系统设置、面板更新、一键更新节点程序
+function settingsTabs(active) {
+    return `<div class="tabs settings-tabs">${[['account', '账号'], ['address', '面板地址']].map(([id, text]) => `<button type="button" data-action="settings-tab" data-tab="${id}" class="${active === id ? 'active' : ''}"${active === id ? ' aria-current="page"' : ''}>${text}</button>`).join('')}</div>`;
+}
+
+// Node program version against the panel's (nodes upgrade to the panel's own version).
+function nodeVersion(node) {
+    const v = node.snapshot.agent_version;
+    if (!v) return '<div class="node-version"><span class="muted">节点程序 —</span></div>';
+    return `<div class="node-version${node.upgrade_available ? ' outdated' : ''}"><span>节点程序 <span class="mono">${esc(v)}</span></span><span class="muted">${node.upgrade_available ? '最新 <span class="mono">' + esc(node.panel_version) + '</span>' : '已是最新'}</span></div>`;
+}
+
+let panelUpdate = null, panelUpdateChecked = false;
+function panelUpdateLabel() {
+    return panelUpdate?.newer ? `面板更新<span class="update-dot">新版本 ${esc(panelUpdate.latest)}</span>` : '面板更新';
+}
+// Once per page load, in the background: the server caches the GitHub answer, so this stays cheap.
+function checkPanelUpdate() {
+    if (panelUpdateChecked) return;
+    panelUpdateChecked = true;
+    api('/panel-update').then(d => {
+        panelUpdate = d;
+        const button = document.querySelector('[data-action="panel-update"]');
+        if (button) button.innerHTML = panelUpdateLabel();
+    }).catch(() => {});
+}
+
+const panelUpdateRelease = 'https://github.com/mozisen/vaio-panel/releases';
+async function panelUpdateDialog() {
+    let d;
+    try { d = await api('/panel-update'); } catch (err) {
+        // The panel restarts during an update; keep waiting while the dialog is open.
+        if (panelUpdate?.status?.state === 'running' || panelUpdate?.pending) {
+            if ($('#modal').open && $('#pu-update')) setTimeout(() => { if ($('#modal').open && $('#pu-update')) panelUpdateDialog().catch(() => {}); }, 4000);
+            return;
+        }
+        throw err;
+    }
+    panelUpdate = d;
+    const sidebar = document.querySelector('[data-action="panel-update"]');
+    if (sidebar) sidebar.innerHTML = panelUpdateLabel();
+    const st = d.status, busy = d.pending || st?.state === 'running';
+    const reload = d.current !== panelVersion;
+    const statusLine = busy ? `<div class="notice">${esc(st?.state === 'running' ? st.message : '已提交更新，等待开始…')}</div>`
+        : reload ? `<div class="notice"><div>面板已更新到 ${esc(d.current)}，请刷新页面加载新界面。</div><button type="button" onclick="location.reload()">刷新页面</button></div>`
+        : st?.state === 'failed' ? `<div class="notice warn">${esc(st.message)}</div>` : '';
+    const latest = d.latest ? `<span class="mono">${esc(d.latest)}</span>` : '<span class="muted">未知</span>';
+    const checked = d.reachable ? date(d.checked) : '暂时无法连接 GitHub，稍后自动重试';
+    let foot = '<button type="button" data-action="close">关闭</button>';
+    let manual = '';
+    if (d.newer && !busy && !reload) {
+        if (d.helper) foot += `<button type="button" class="primary" data-action="panel-update-start" data-version="${esc(d.latest)}">更新到 ${esc(d.latest)}</button>`;
+        else {
+            currentCommand = 'vaio-panel update --ref ' + d.latest;
+            manual = `<div class="notice warn">${d.installing ? '正在自动安装更新辅助服务，稍后重新打开即可在面板中直接更新。也可' : '此面板缺少更新辅助服务。请'}在面板服务器以 root 执行：</div><textarea readonly rows="1">${esc(currentCommand)}</textarea>`;
+            foot += '<button type="button" class="primary" data-action="copy-command">复制更新命令</button>';
+        }
+    }
+    modal('面板更新', `<div id="pu-update"><div class="kv"><span>当前版本</span><span class="mono">${esc(d.current)}</span></div><div class="kv"><span>最新版本</span><span>${latest}${d.newer ? ' <span class="badge running">可更新</span>' : d.latest ? ' <span class="muted">已是最新</span>' : ''}</span></div><div class="kv"><span>检查时间</span><span>${esc(checked)}</span></div><div class="kv"><span>版本说明</span><span><a href="${panelUpdateRelease}" target="_blank" rel="noopener">GitHub Releases</a></span></div>${statusLine}${manual}
+<p class="helper">每次打开面板会在后台检查 ${esc(d.repository)} 的正式版本。更新前自动备份数据并运行测试，新版无法启动会恢复原版本；更新期间面板会短暂重启，节点代理不受影响。有节点任务未完成时无法更新。</p><div class="error" role="alert"></div><div class="modal-foot">${foot}</div></div>`);
+    if (busy) setTimeout(() => { if ($('#modal').open && $('#pu-update')) panelUpdateDialog().catch(() => {}); }, 4000);
+}
+async function panelUpdateStart(b) {
+    b.disabled = true;
+    try {
+        await post('/panel-update', {version: b.dataset.version});
+        panelUpdate = {...panelUpdate, pending: true};
+        toast('已开始更新面板到 ' + b.dataset.version);
+        await panelUpdateDialog();
+    } catch (err) { formError(err); b.disabled = false; }
+}
+
+function upgradeAllDialog() {
+    const outdated = nodes.filter(n => n.adopted && n.upgrade_available);
+    modal('一键更新节点程序', `<p>将以下 ${outdated.length} 台服务器的节点程序与节点脚本更新到面板版本 <span class="mono">${esc(panelVersion)}</span>：</p><div class="upgrade-list">${outdated.map(n => `<div class="kv"><span>${esc(n.name)}</span><span class="mono">${esc(n.snapshot.agent_version)} → ${esc(n.panel_version)}</span></div>`).join('')}</div><p class="helper">更新会保留节点身份、协议与用户，新版未上线会自动恢复旧程序；不会更新代理内核。离线、维护中或有未完成任务的服务器会跳过。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="button" class="primary" data-action="upgrade-all-confirm">开始更新</button></div>`);
+}
+async function upgradeAllStart(b) {
+    b.disabled = true;
+    let r;
+    try { r = await post('/nodes/upgrade-all'); } catch (err) { formError(err); b.disabled = false; return; }
+    const queued = r.queued.length ? `<p>已为 ${r.queued.length} 台服务器创建更新任务：${r.queued.map(esc).join('、')}。进度见任务记录。</p>` : '<p>没有服务器可以立即更新。</p>';
+    const skipped = r.skipped.length ? `<h3>已跳过</h3>${r.skipped.map(x => `<div class="kv"><span>${esc(x.name)}</span><span>${esc(x.reason)}</span></div>`).join('')}` : '';
+    modal('一键更新节点程序', `${queued}${skipped}<div class="modal-foot"><button type="button" data-action="close" onclick="location.hash='tasks'">查看任务</button><button type="button" class="primary" data-action="close">完成</button></div>`);
+    await refresh();
 }
 
 // ---------------------------------------------------------------- 中转管理（用户 → 中转服务器 … → 落地协议）

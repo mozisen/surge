@@ -49,7 +49,7 @@ class Uninstall(unittest.TestCase):
         gone = ['opt/vaio-panel/vaio/server.py', 'opt/vaio-panel-releases/1/vaio/server.py', 'opt/vaio-panel-before-1/x', 'etc/vaio-panel/panel.env',
                 'var/lib/vaio-panel/panel.sqlite', 'var/backups/vaio-panel/1/panel.sqlite', 'etc/nginx/sites-available/vaio-panel',
                 'etc/nginx/sites-enabled/vaio-panel', 'etc/systemd/system/vaio-panel.service', 'etc/systemd/system/vaio-panel-address.path',
-                'etc/systemd/system/vaio-panel-address.service', 'usr/local/bin/vaio-panel']
+                'etc/systemd/system/vaio-panel-address.service', 'etc/systemd/system/vaio-panel-update.path', 'usr/local/bin/vaio-panel']
         self.make(*keep, *gone)
         backup = Path(self.tmp.name) / 'final.tar.gz'
         result = self.run_script('vaio-panel', '--yes', '--backup', str(backup))
@@ -61,7 +61,7 @@ class Uninstall(unittest.TestCase):
         with tarfile.open(backup) as archive:
             self.assertIn('var/lib/vaio-panel/panel.sqlite', archive.getnames())
         calls = self.log.read_text()
-        self.assertIn('systemctl stop vaio-panel-address.path vaio-panel-address.service vaio-panel', calls)
+        self.assertIn('systemctl stop vaio-panel-address.path vaio-panel-address.service vaio-panel-update.path vaio-panel', calls)
         self.assertIn('userdel vaio-panel', calls)
         self.assertNotIn('vaio-agent', calls)
 

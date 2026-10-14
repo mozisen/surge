@@ -246,6 +246,10 @@ def apply():
         request = {}
     REQUEST.unlink(missing_ok=True)
     action = request.get("action") if isinstance(request, dict) else None
+    if action == "install_update_helper":
+        # Panels upgraded by a 1.1.0 updater lack the self-update units; this helper already runs the new code.
+        subprocess.run([sys.executable, str(Path(__file__).resolve().with_name("update-panel.py")), "--install-helpers"], check=False, timeout=300)
+        return
     status("running", action, "正在处理")
     try:
         if action == "set_domain":

@@ -1030,6 +1030,78 @@ def create_app(config=None):
             count = queue_url_migration(db, app.config["PUBLIC_URL"], retry=True)
         return jsonify(queued=count)
 
+    @app.get("/api/panel-update")
+    @admin
+    def panel_update():
+        from . import updates
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = updates.check(db, __version__)
+        try:
+            status = json.loads((data_dir / "panel-update-status.json").read_text())
+        except (OSError, ValueError):
+            status = None
+        helper = Path("/etc/systemd/system/vaio-panel-update.path").exists() or app.config.get("UPDATE_HELPER", False)
+        installing = False
+        if not helper and (Path("/etc/systemd/system/vaio-panel-address.path").exists() or app.config.get("ADDRESS_HELPER", False)):
+            # Upgraded by a 1.1.0 updater: ask the root address helper (already running the new code) to add the update units.
+            installing = True
+            if not (data_dir / "address-request.json").exists():
+                address_request({"action": "install_update_helper"})
+        return jsonify(**result, repository=updates.REPOSITORY, status=status, pending=(data_dir / "panel-update-request.json").exists(),
+                       helper=helper, installing=installing)
+
+    @app.post("/api/panel-update")
+    @admin
+    def panel_update_start():
+        from . import updates
+        data = body()
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = updates.check(db, __version__)
+            if set(data) != {"version"} or data["version"] != result["latest"] or not result["newer"]:
+                raise ValueError("只能更新到检测到的最新版本，请刷新后重试")
+            if db.execute("SELECT 1 FROM tasks WHERE status IN ('queued','running') LIMIT 1").fetchone():
+                raise ValueError("有待执行或运行中的节点任务，请等待完成后再更新面板")
+            request_file = data_dir / "panel-update-request.json"
+            if request_file.exists():
+                raise ValueError("面板更新已在进行中")
+            staged = data_dir / ("panel-update-request.%d.tmp" % os.getpid())
+            staged.write_text(json.dumps({"ref": data["version"]}))
+            os.replace(staged, request_file)
+            audit(db, "panel.update_requested", None, __version__ + " → " + data["version"])
+        return jsonify(ok=True)
+
+    @app.post("/api/nodes/upgrade-all")
+    @admin
+    def nodes_upgrade_all():
+        """One-click upgrade for every node that can take it now; the rest are listed with the reason."""
+        if body():
+            raise ValueError("升级不接受参数")
+        queued, skipped = [], []
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for node in db.execute("SELECT * FROM nodes WHERE deleted IS NULL AND revoked=0 ORDER BY created").fetchall():
+                snapshot = json.loads(node["snapshot"])
+                version = snapshot.get("agent_version")
+                if not node["adopted"] or not version or version == __version__:
+                    continue
+                reason = ("节点离线" if not node["last_seen"] or time.time() - node["last_seen"] > 45 else
+                          "节点正在维护" if node["maintenance"] else
+                          "节点程序不支持一键升级，请先用命令升级一次" if snapshot.get("upgrade_version") != 1 else
+                          "有未完成或待核对的任务" if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status IN ('queued','running','unknown')", (node["id"],)).fetchone()
+                          else None)
+                if reason:
+                    skipped.append({"name": node["name"], "reason": reason})
+                    continue
+                task_id = str(uuid.uuid4())
+                db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
+                           (task_id, node["id"], "agent_upgrade", json.dumps(validate_upgrade_task({"action": "agent_upgrade", "params": {}})),
+                            "queued", time.time(), "system:" + task_id))
+                audit(db, "task.queued", node["id"], task_id + " agent_upgrade（一键更新全部节点）")
+                queued.append(node["name"])
+        return jsonify(queued=queued, skipped=skipped)
+
     @app.post("/api/nodes/<node_id>/upgrade")
     @admin
     def node_upgrade(node_id):

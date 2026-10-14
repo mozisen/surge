@@ -1000,8 +1000,42 @@ input[type="checkbox"] {
     white-space: nowrap;
 }
 
-.node-row .protocol-chips {
+.node-version {
     grid-area: protos;
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    color: var(--ink-2);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.node-version.outdated > span:first-child {
+    color: var(--ink);
+    font-weight: 600;
+}
+
+.node-version.outdated > span:last-child {
+    color: var(--ink);
+}
+
+.update-dot {
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: var(--r-badge);
+    background: var(--ink);
+    color: var(--surface, #fff);
+    font-size: 11px;
+    line-height: 18px;
+    font-weight: 500;
+}
+
+.settings-tabs {
+    margin: -4px 0 16px;
+}
+
+.upgrade-list {
+    margin: 8px 0 12px;
 }
 
 .protocol-chips {
@@ -2020,6 +2054,32 @@ dialog.install .install-warning {
     .account-actions button {
         width: auto;
         min-height: 44px;
+    }
+
+    /* Three footer actions share the top bar with the brand: drop the subtitle, shrink the update badge to a dot. */
+    .sidebar > .brand span {
+        display: none;
+    }
+
+    .account-actions button {
+        padding: 0 8px;
+    }
+
+    .update-dot {
+        width: 7px;
+        height: 7px;
+        margin-left: 4px;
+        padding: 0;
+        overflow: hidden;
+        border-radius: 50%;
+        font-size: 0;
+        line-height: 0;
+    }
+
+    .node-version {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0 12px;
     }
 
     .nav {
