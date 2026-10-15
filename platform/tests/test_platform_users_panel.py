@@ -50,7 +50,7 @@ class SimNode:
                 u = self.protocol_users[(m["core"], m["protocol"], m["port"])].get(m["name"])
                 members.append({**m, "used": u["used"] if u else None, "enabled": u.get("enabled", True) if u else None, "disable_reason": ""})
             accounts[identity] = {**{k: a[k] for k in ("name", "note", "enabled", "expire_date", "quota", "reset_day", "rev", "mtime")},
-                                  "cycle": "", "cycle_used": 0, "platform_user_id": a.get("platform_user_id"),
+                                  "cycle": "", "cycle_used": a.get("cycle_used", 0), "platform_user_id": a.get("platform_user_id"),
                                   "platform_block": a.get("platform_block", ""), "state": "", "members": members}
         return {"revision": "a" * 64, "instances": instances, "metrics": {}, "accounts_version": self.version, "accounts": accounts,
                 "authority_version": self.authority_version, "user_authority": self.authority, "upgrade_version": self.version, "agent_version": "0.3.0-preview.11"}
@@ -127,7 +127,9 @@ class SimNode:
                 t = op["target"]
                 self.protocol_users[(t["core"], t["protocol"], t["port"])][op["name"]] = {"used": 0, "account_id": identity}
                 account["members"].append({**t, "name": op["name"]})
-            elif kind in ("reset_credentials", "member_remove", "reset_usage"):
+            elif kind == "reset_usage":
+                account["cycle_used"] = 0
+            elif kind in ("reset_credentials", "member_remove"):
                 pass
         return "succeeded", "操作完成"
 
@@ -384,6 +386,23 @@ class PlatformUsersPanel(unittest.TestCase):
                              headers=self.headers)
         self.assertEqual(r.status_code, 400)
         self.assertIn("已有协议账号", r.json["error"])
+
+    def test_reset_usage_clears_the_node_counts_too(self):
+        user, a, b = self.linked_pair(quota_gb=1)
+        self.account(a)[1]["cycle_used"] = 2 * 1073741824          # the node stopped the user by its own count
+        self.post('/users/' + user + '/reset-usage', {})
+        a.settle(); b.settle()
+        self.assertEqual((self.account(a)[1]["cycle_used"], self.account(b)[1]["cycle_used"]), (0, 0))
+        self.assertIn("reset_usage", [op["op"] for t in a.tasks for op in t["params"]["ops"]])
+
+    def test_node_over_quota_while_panel_is_not_is_reset(self):
+        # Usage reset on a panel before 1.5.1 left the node counts: the next plan clears them once.
+        user, a, b = self.linked_pair(quota_gb=1)
+        self.account(a)[1]["cycle_used"] = 2 * 1073741824
+        a.settle(); a.settle()
+        self.assertEqual(self.account(a)[1]["cycle_used"], 0)
+        self.assertEqual(sum(op["op"] == "reset_usage" for t in a.tasks for op in t["params"]["ops"]), 1)
+        self.assertNotIn("reset_usage", [op["op"] for t in b.tasks for op in t["params"]["ops"]])
 
     def test_failed_link_heals_when_node_shows_the_account(self):
         user, a, b = self.linked_pair()

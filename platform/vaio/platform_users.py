@@ -384,7 +384,11 @@ def rollover(db, now=None):
 
 
 def reset_usage(db, user_id):
+    """Clear this cycle's usage on the panel and on every linked node: each node account also counts
+    its own usage against the quota and would otherwise keep the user stopped there."""
     db.execute("UPDATE platform_links SET cycle_used=0 WHERE user_id=?", (user_id,))
+    for link in db.execute("SELECT * FROM platform_links WHERE user_id=? AND removing IS NULL", (user_id,)).fetchall():
+        queue_op(db, link["id"], {"op": "reset_usage", "account_id": link["account_id"]})
 
 
 # ---------------------------------------------------------------- planning
@@ -423,6 +427,11 @@ def plan(db, node, now=None):
             block = "quota" if state_of(user, usage(db, user["id"]), datetime.date.fromtimestamp(now)) in ("expired", "quota") else ""
             if account.get("platform_block", "") != block:
                 ops.append({"op": "block", "account_id": link["account_id"], "platform_block": block})
+            # A node that counts the user over quota while the panel does not (usage reset on the panel
+            # before 1.5.1, or a missed reset): clear the node's count so its members come back.
+            queued_reset = db.execute("SELECT 1 FROM platform_pending WHERE link_id=? AND op LIKE '%\"reset_usage\"%'", (link["id"],)).fetchone()
+            if user["quota"] and (account.get("cycle_used") or 0) >= user["quota"] and not block and not queued_reset:
+                ops.append({"op": "reset_usage", "account_id": link["account_id"]})
             for row in db.execute("SELECT * FROM platform_pending WHERE link_id=? AND task_id IS NULL ORDER BY id", (link["id"],)).fetchall():
                 ops.append(json.loads(row["op"]))
                 pending_ids.append(row["id"])
