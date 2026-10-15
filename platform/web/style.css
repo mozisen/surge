@@ -2760,3 +2760,142 @@ dialog.install .install-warning {
     margin: 0 0 8px;
     font-size: 14px;
 }
+
+/* Platform user's own page: one column, no admin navigation. */
+.portal {
+    min-height: 100vh;
+    background: var(--canvas);
+}
+
+.portal-head {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 60px;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+}
+
+.portal-head .brand {
+    padding: 0;
+}
+
+.portal-account {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+}
+
+.portal-account > span {
+    margin-right: 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.portal-main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 32px 24px 40px;
+}
+
+.portal-member {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0;
+}
+
+.portal-card {
+    padding: 8px 20px 16px;
+}
+
+.portal-card .action-row {
+    margin-top: 12px;
+}
+
+.login-block {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+@media (max-width: 760px) {
+    .portal-head {
+        padding: 0 8px 0 16px;
+    }
+
+    .portal-account > span {
+        display: none;
+    }
+
+    .portal-main {
+        padding: 20px 16px 32px;
+    }
+
+    .login-block {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    /* Tables become one card per row, each cell labelled. */
+    .portal table,
+    .portal tbody,
+    .portal tr,
+    .portal td {
+        display: block;
+        width: 100%;
+    }
+
+    .portal thead {
+        display: none;
+    }
+
+    .portal tr {
+        padding: 10px 16px;
+    }
+
+    .portal tr + tr {
+        border-top: 1px solid var(--line-soft);
+    }
+
+    .portal td {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 4px 0;
+        border: 0;
+        text-align: left;
+    }
+
+    .portal td::before {
+        content: attr(data-label);
+        color: var(--muted);
+        font-size: 12px;
+    }
+
+    .portal td::before {
+        flex: 0 0 84px;
+    }
+
+    .portal td > * {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .portal td:not([data-label]) {
+        display: block;
+    }
+
+    .portal td:not([data-label])::before {
+        content: none;
+    }
+}

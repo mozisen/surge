@@ -131,6 +131,12 @@ class Portal(unittest.TestCase):
             task = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         self.assertEqual((task['node_id'], json.loads(task['request'])['params']), ('n1', {'name': 'alice'}))
         self.assertIn('进行中', user.post('/api/me/share', json={'relay_id': 'line-a'}, headers=h).json['error'])
+        with self.store.connect() as db:                                         # never picked up: stops blocking
+            db.execute("UPDATE tasks SET created=created-121 WHERE id=?", (task_id,))
+        stale = user.post('/api/me/share', json={'relay_id': 'line-a'}, headers=h)
+        self.assertEqual(stale.status_code, 201)
+        with self.store.connect() as db:
+            db.execute("DELETE FROM tasks WHERE id=?", (stale.json['id'],))
         self.assertEqual(user.get('/api/me/tasks/' + task_id).json['status'], 'queued')
         self.finish(task_id, {'connection': 'vless://alice@hk', 'config_details': 'PRIVATE KEY'})
         view = user.get('/api/me/tasks/' + task_id).json

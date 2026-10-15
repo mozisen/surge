@@ -33,7 +33,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;this.nodeVersion=nodeVersion;this.settingsTabs=settingsTabs;this.panelUpdateLabel=panelUpdateLabel;this.checkPanelUpdate=checkPanelUpdate;this.panelUpdateDialog=panelUpdateDialog;this.panelUpdateStart=panelUpdateStart;this.upgradeAllDialog=upgradeAllDialog;this.upgradeAllStart=upgradeAllStart;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;this.nodeVersion=nodeVersion;this.settingsTabs=settingsTabs;this.panelUpdateLabel=panelUpdateLabel;this.checkPanelUpdate=checkPanelUpdate;this.panelUpdateDialog=panelUpdateDialog;this.panelUpdateStart=panelUpdateStart;this.upgradeAllDialog=upgradeAllDialog;this.upgradeAllStart=upgradeAllStart;this.portalPage=portalPage;this.telegramCard=telegramCard;this.loginBlock=loginBlock;this.portalAction=portalAction;this.portalShareWait=portalShareWait;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -524,4 +524,42 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     const tabs = context.settingsTabs('account');
     assert(tabs.includes('data-tab="account" class="active"') && tabs.includes('data-tab="address" class=""') && tabs.includes('账号') && tabs.includes('面板地址'));
     console.log('PASS system settings tabs');
+
+    // 用户自助页：只渲染自己的数据、转义、导出、TG 卡片、管理员登录区
+    const me = {name: '<alice>', state: 'quota', used: 10 * 1073741824, quota: 10 * 1073741824, expire_date: '', reset_day: 1, version: '1.3.0',
+        links: [{id: 'l1', node_name: 'hk<b>', online: true, cycle_used: 1073741824, members: [{core: 'xray', protocol: 'vless', port: 443, enabled: true}, {core: 'singbox', protocol: 'hy2', port: 8443, enabled: false}]},
+                {id: 'l2', node_name: 'jp', online: false, cycle_used: 0, members: [{core: 'xray', protocol: 'vless', port: 443, enabled: true}]}],
+        relays: [{id: 'r1', chain: ['jp', 'hk'], entry: '9.9.9.9:30001', protocol: 'vless', state: 'active', port_only: false},
+                 {id: 'r2', chain: ['jp', 'hk'], entry: '', protocol: '', state: 'creating', port_only: true}],
+        telegram: {bound: false, username: '', bound_at: null, code_pending: false, bot: {enabled: true, username: 'vaio_bot'}}};
+    let page = context.portalPage(me);
+    assert(page.includes('&lt;alice&gt;') && !page.includes('<alice>') && page.includes('hk&lt;b&gt;'), 'escaped');
+    assert(page.includes('流量已用尽') && !page.includes('class="nav"') && !page.includes('data-action="settings"'), 'no admin navigation');
+    assert(page.includes('data-action="me-share" data-link="l1" data-core="xray" data-protocol="vless" data-port="443"'));
+    assert(!page.includes('data-protocol="hy2"') && page.includes('已停用'), 'disabled member has no export');
+    assert(/data-link="l2"[^>]*disabled/.test(page) && page.includes('离线'), 'offline server export disabled');
+    assert(page.includes('data-action="me-share-relay" data-id="r1"') && !page.includes('data-id="r2"') && page.includes('仅转发端口'));
+    assert(page.includes('https://t.me/vaio_bot') && page.includes('data-action="me-tg-code"'));
+    let card = context.telegramCard({bound: true, username: 'tg_alice', bound_at: 5, bot: {enabled: true, username: 'vaio_bot'}});
+    assert(card.includes('已绑定 @tg_alice') && card.includes('me-tg-unbind') && !card.includes('me-tg-code'));
+    card = context.telegramCard({bound: false, bot: {enabled: false, username: ''}});
+    assert(card.includes('管理员尚未启用') && !card.includes('me-tg-code'));
+    assert(context.telegramCard({bound: false, code_pending: true, bot: {enabled: true, username: ''}}).includes('重新生成绑定码'));
+    posts.length = 0;
+    context.post = async (path, data) => { posts.push([path, data]); return {id: 'task-7', code: 'ABCDEF012345'}; };
+    context.responses['/me/tasks/task-7'] = {status: 'succeeded', message: '', connection: 'vless://x<y>'};
+    element('me-share', {innerHTML: ''});
+    context.$ = selector => selector === '#modal' ? {open: true} : elements[selector.replace(/^#/, '')] || elements[selector];
+    await context.portalAction('me-share', {dataset: {link: 'l1', core: 'xray', protocol: 'vless', port: '443'}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), ['/me/share', {link_id: 'l1', core: 'xray', protocol: 'vless', port: 443}]);
+    assert(elements['me-share'].innerHTML.includes('vless://x&lt;y&gt;') && elements['me-share'].innerHTML.includes('/api/me/tasks/task-7/qr'));
+    context.responses['/me/tasks/task-7'] = {status: 'failed', message: '节点<错误>', connection: ''};
+    await context.portalShareWait('task-7', Date.now());
+    assert(elements['me-share'].innerHTML.includes('读取失败：节点&lt;错误&gt;'));
+    await context.portalAction('me-share-relay', {dataset: {id: 'r1'}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.at(-1))), ['/me/share', {relay_id: 'r1'}]);
+    assert(context.loginBlock({login_enabled: false, name: 'a'}).includes('设置密码并开启登录'));
+    const loginHtml = context.loginBlock({login_enabled: true, name: '<a>'});
+    assert(loginHtml.includes('重置密码') && loginHtml.includes('pu-login-off') && loginHtml.includes('&lt;a&gt;'));
+    console.log('PASS user page: own data only, escaping, exports, relay export, telegram states, admin login block');
 })().catch(error => { console.error(error); process.exit(1); });

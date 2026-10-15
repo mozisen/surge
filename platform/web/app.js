@@ -119,7 +119,7 @@ async function api(path, options = {}) {
     });
     const data = await response.json();
     if (!response.ok) {
-        if (response.status === 401 && path !== '/login') {
+        if (response.status === 401 && path !== '/login' && path !== '/session') {
             authenticated = false;
             login();
         }
@@ -181,7 +181,7 @@ function formError(error) {
 
 function login() {
     $('#modal').close();
-    $('#app').innerHTML = `<main class="login-page"><header class="login-header">${brand}</header><section class="login-form"><form class="login-box" id="login-form"><h2>登录控制台</h2><p class="subtext">输入管理员账号和密码。</p><label for="username">管理员账号</label><input id="username" required autocomplete="username" value="admin" maxlength="32"><label for="password">管理员密码</label><input id="password" type="password" required autocomplete="current-password" placeholder="输入管理员密码"><button class="primary" type="submit">登录 ${icon('arrow')}</button><div class="error" role="alert"></div></form></section></main>`;
+    $('#app').innerHTML = `<main class="login-page"><header class="login-header">${brand}</header><section class="login-form"><form class="login-box" id="login-form"><h2>登录</h2><p class="subtext">管理员或已开通登录的用户，输入账号和密码。</p><label for="username">账号</label><input id="username" required autocomplete="username" maxlength="32"><label for="password">密码</label><input id="password" type="password" required autocomplete="current-password" placeholder="输入管理员密码"><button class="primary" type="submit">登录 ${icon('arrow')}</button><div class="error" role="alert"></div></form></section></main>`;
     $('#login-form').addEventListener('submit', async e => {
         e.preventDefault();
         const button = $('button', e.target);
@@ -193,6 +193,7 @@ function login() {
             });
             csrf = data.csrf;
             panelVersion = data.version;
+            if (data.role === 'user') return await portal();
             authenticated = true;
             await refresh();
         } catch (err) {
@@ -780,6 +781,7 @@ document.addEventListener('click', async e => {
             $('#modal').close();
             activeTaskId = null;
         } else if (action.startsWith('pu-')) await userAction(action, b);
+        else if (action.startsWith('me-')) await portalAction(action, b);
         else if (action.startsWith('fw-')) await forwardAction(action, b);
         else if (action.startsWith('rl-')) await relayAction(action, b);
         else if (action.startsWith('pa-')) await panelAddressAction(action, b);
@@ -791,6 +793,7 @@ document.addEventListener('click', async e => {
         else if (action === 'logout') {
             await post('/logout');
             authenticated = false;
+            portalState = null;
             csrf = '';
             $('#modal').close();
             login();
@@ -929,7 +932,8 @@ async function boot() {
         authenticated = true;
         await refresh();
     } catch {
-        login();
+        // Not an admin: a signed-in platform user gets their own page.
+        try { await portal(); } catch { login(); }
     }
 }
 let refreshTicks = 0;
@@ -1000,6 +1004,7 @@ async function userDetail(id) {
     shell(`<div class="heading"><div><a class="back-link" href="#users">返回用户管理</a><h1>${esc(user.name)} ${stateBadge(userStates, user.state)}</h1><div class="detail-info"><span>到期 ${esc(user.expire_date || '永不过期')}</span><span>${user.reset_day ? '每月 ' + user.reset_day + ' 日重置' : '累计不重置'}</span>${user.note ? `<span>${esc(user.note)}</span>` : ''}</div></div><div class="action-row"><button data-action="pu-edit">编辑</button><button data-action="pu-reset-usage">重置用量</button><button data-action="pu-reset-credentials" ${user.links.length ? '' : 'disabled'}>重置全部凭据</button><button class="danger" data-action="pu-delete">删除</button></div></div>
     ${user.deleting ? '<div class="notice warn">正在从各节点解除，完成后删除此用户。</div>' : ''}
     <div class="stats">${stat('本周期用量', bytes(user.used).split(' ')[0], user.quota ? '配额 ' + bytes(user.quota) : '不限流量', bytes(user.used).split(' ')[1] || '')}${stat('剩余', user.quota ? bytes(Math.max(0, user.quota - user.used)).split(' ')[0] : '不限', user.quota ? '达到配额后停用全部节点' : '未设置配额', user.quota ? bytes(Math.max(0, user.quota - user.used)).split(' ')[1] || '' : '')}${stat('关联节点', user.links.length, user.links.filter(l => l.sync === 'synced').length + ' 个已同步')}${stat('统计周期', user.cycle === 'total' ? '累计' : esc(user.cycle), user.reset_day ? '按面板时区切换' : '不自动重置')}</div>
+    ${loginBlock(user)}
     <div class="panel"><div class="panel-head"><h2>关联节点 <span class="count">${user.links.length}</span></h2><button class="primary small" data-action="pu-link" ${user.deleting ? 'disabled' : ''}>${icon('plus')}关联节点</button></div><div class="table-wrap"><table><thead><tr><th>节点</th><th>协议</th><th>同步</th><th class="num">本周期用量</th><th>操作</th></tr></thead><tbody>${links || '<tr><td colspan="5">尚未关联节点。关联后会在节点上创建统一用户，或认领节点上已有的统一用户。</td></tr>'}</tbody></table></div></div>
     <p class="helper">每个协议的凭据独立。同步任务出现在任务记录中，结果未确认时不会自动重试，请核对后标记已核对。</p>`, 'users');
 }
@@ -1133,6 +1138,8 @@ async function userAction(action, b) {
     else if (action === 'pu-edit') userForm(currentUser);
     else if (action === 'pu-link') linkDialog();
     else if (action === 'pu-members') membersDialog(b.dataset.link);
+    else if (action === 'pu-login-set') loginPasswordDialog(currentUser);
+    else if (action === 'pu-login-off') choiceDialog('关闭登录', '关闭后该用户无法登录自己的页面，已登录的设备立即退出。可随时重新设置密码开启。', [], async () => { await post('/users/' + currentUser.id + '/login', {enabled: false}); toast('已关闭登录'); await userDetail(currentUser.id); });
     else if (action === 'pu-reset-usage') choiceDialog('重置用量', '清零该用户在所有节点上的本周期用量，超额停用的节点会自动恢复。', [], async () => { await post('/users/' + currentUser.id + '/reset-usage'); toast('用量已清零'); await userDetail(currentUser.id); });
     else if (action === 'pu-reset-credentials') choiceDialog('重置全部凭据', '为该用户在所有节点的每个协议生成新凭据，旧连接全部失效，之后请重新导出连接信息。', [], async () => { await post('/users/' + currentUser.id + '/reset-credentials', {}); toast('已提交，节点在线时自动同步'); await userDetail(currentUser.id); });
     else if (action === 'pu-unlink') choiceDialog('解除节点关联', '解除后面板不再管理该节点上的这个用户。', [['release', '保留节点上的统一用户，改为在节点本地管理'], ['delete', '删除节点上的统一用户和全部协议账号（旧连接失效）']], async mode => { await post('/links/' + b.dataset.link + '/remove', {mode}); toast('已提交，节点在线时自动执行'); await userDetail(currentUser.id); });
@@ -1280,6 +1287,110 @@ async function panelAddressAction(action) {
             toast('正在关闭旧地址');
         });
     }
+}
+
+// ---------------------------------------------------------------- 用户自助（平台用户登录后只看自己的账号）
+let portalState = null;
+const relayStateText = {creating: '创建中', active: '正常', partial: '部分失败', removing: '删除中'};
+
+function loginBlock(user) {
+    return user.login_enabled
+        ? `<div class="notice login-block"><div><strong>已开启登录</strong><br>该用户可用用户名 <span class="mono">${esc(user.name)}</span> 和密码登录，查看自己的用量、连接信息和 Telegram 绑定。</div><div class="action-row"><button data-action="pu-login-set">重置密码</button><button data-action="pu-login-off">关闭登录</button></div></div>`
+        : `<div class="notice login-block"><div><strong>未开启登录</strong><br>设置密码后，用户可以在登录页用用户名登录，自助查看用量、导出连接和绑定 Telegram。</div><div class="action-row"><button data-action="pu-login-set">设置密码并开启登录</button></div></div>`;
+}
+
+function loginPasswordDialog(user) {
+    modal(user.login_enabled ? '重置登录密码' : '开启登录', `<form id="pu-login-form"><p>用户 <strong>${esc(user.name)}</strong> 将用此密码登录。保存后该用户已登录的设备会退出，请把新密码告知用户。</p><label for="pu-login-password">登录密码</label><input id="pu-login-password" type="text" minlength="8" maxlength="128" required autocomplete="off" spellcheck="false"><p class="helper">8–128 位。用户登录后可以自己修改。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存</button></div></form>`);
+    $('#pu-login-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target); button.disabled = true;
+        try {
+            await post('/users/' + user.id + '/login', {password: $('#pu-login-password').value});
+            $('#modal').close(); toast('已开启登录'); await userDetail(user.id);
+        } catch (err) { formError(err); button.disabled = false; }
+    };
+}
+
+async function portal() {
+    const me = await api('/me');
+    csrf = me.csrf;
+    panelVersion = me.version;
+    portalState = me;
+    if ($('#modal').open && $('#me-share')) return;          // keep an open connection dialog
+    $('#app').innerHTML = portalPage(me);
+    clearTimeout(portal.timer);
+    portal.timer = setTimeout(() => { if (portalState) portal().catch(() => {}); }, 30000);
+}
+
+function portalPage(me) {
+    const quota = me.quota ? bytes(me.quota) : '不限流量';
+    const left = me.quota ? bytes(Math.max(0, me.quota - me.used)) : '不限';
+    const percent = me.quota ? Math.min(100, me.used / me.quota * 100) : null;
+    const links = me.links.map(l => `<tr><td data-label="服务器"><span>${esc(l.node_name)}${l.online ? '' : ' <span class="muted">离线</span>'}</span></td><td data-label="协议 · 端口"><div>${l.members.map(m => `<div class="portal-member"><span>${esc(names[m.protocol] || m.protocol)} <span class="muted mono">${m.port}</span>${m.enabled ? '' : ' <span class="muted">已停用</span>'}</span>${m.enabled ? `<button class="small" data-action="me-share" data-link="${esc(l.id)}" data-core="${esc(m.core)}" data-protocol="${esc(m.protocol)}" data-port="${m.port}"${l.online ? '' : ' disabled'}>连接信息</button>` : ''}</div>`).join('') || '<span class="muted">等待服务器创建</span>'}</div></td><td class="num" data-label="本周期用量">${bytes(l.cycle_used)}</td></tr>`).join('');
+    const relays = me.relays.map(r => `<tr><td class="relay-chain" data-label="线路"><span>${r.chain.map(esc).join('<span class="relay-chain-arrow" aria-hidden="true">→</span>')}</span></td><td class="mono" data-label="入口">${esc(r.entry || '—')}</td><td data-label="落地协议">${r.port_only ? '仅转发端口' : esc(names[r.protocol] || r.protocol)}</td><td data-label="状态"><span class="badge ${r.state === 'active' ? 'running' : 'stopped'}">${esc(relayStateText[r.state] || r.state)}</span></td><td>${r.state === 'active' && !r.port_only ? `<button class="small" data-action="me-share-relay" data-id="${esc(r.id)}">连接信息</button>` : ''}</td></tr>`).join('');
+    return `<div class="portal"><header class="portal-head"><div class="brand">Vaio <span>我的账号</span></div><div class="portal-account"><span class="muted">${esc(me.name)}</span><button class="quiet small" data-action="me-password">修改密码</button><button class="quiet small" data-action="logout">退出</button></div></header><main class="portal-main">
+<div class="heading"><div><h1>${esc(me.name)} ${stateBadge(userStates, me.state)}</h1><p class="subtext">我的账号 · 用量每分钟同步</p></div></div>
+<div class="stats">${stat('本周期用量', bytes(me.used).split(' ')[0], '配额 ' + quota, bytes(me.used).split(' ')[1] || '')}${stat('剩余', left.split(' ')[0], percent == null ? '未设置配额' : '已用 ' + percent.toFixed(0) + '%', me.quota ? left.split(' ')[1] || '' : '')}${stat('到期', me.expire_date || '永久', me.expire_date ? '到期后所有协议停用' : '不会到期')}${stat('流量重置', me.reset_day ? me.reset_day + ' 日' : '不重置', me.reset_day ? '每月该日清零用量' : '累计计算')}</div>
+<div class="section-label"><h2>我的协议 <span class="count">${me.links.reduce((n, l) => n + l.members.length, 0)}</span></h2></div><div class="panel table-wrap"><table><thead><tr><th>服务器</th><th>协议 · 端口</th><th class="num">本周期用量</th></tr></thead><tbody>${links || '<tr><td colspan="3">还没有可用的协议，请联系管理员。</td></tr>'}</tbody></table></div>
+${me.relays.length ? `<div class="section-label"><h2>中转线路 <span class="count">${me.relays.length}</span></h2></div><div class="panel table-wrap"><table><thead><tr><th>线路</th><th>入口</th><th>落地协议</th><th>状态</th><th></th></tr></thead><tbody>${relays}</tbody></table></div><p class="helper">经中转的流量计入落地服务器上的协议用量。</p>` : ''}
+${telegramCard(me.telegram)}
+<div class="footer-note"><span>面板版本 ${esc(me.version)} · 连接信息请勿分享给他人</span></div></main></div>`;
+}
+
+function telegramCard(tg) {
+    const bot = tg.bot || {};
+    const botLine = bot.enabled ? (bot.username ? `<a href="https://t.me/${encodeURIComponent(bot.username)}" target="_blank" rel="noopener">@${esc(bot.username)}</a>` : '已启用') : '未启用';
+    let body;
+    if (!bot.enabled) body = '<p class="muted">管理员尚未启用 Telegram 机器人，启用后可以在这里绑定，用机器人查询流量和到期时间。</p>';
+    else if (tg.bound) body = `<div class="kv"><span>绑定状态</span><span>已绑定${tg.username ? ' @' + esc(tg.username) : ''}</span></div>${tg.bound_at ? `<div class="kv"><span>绑定时间</span><span>${date(tg.bound_at)}</span></div>` : ''}<div class="action-row"><button data-action="me-tg-unbind">解除绑定</button></div>`;
+    else body = `<div class="kv"><span>绑定状态</span><span>未绑定${tg.code_pending ? '（已生成绑定码，尚未使用）' : ''}</span></div><p class="helper">生成绑定码后，私聊机器人发送 <span class="mono">/bind 绑定码</span>；绑定后可发送 /traffic 查询流量，/status 查询到期时间。</p><div class="action-row"><button class="primary" data-action="me-tg-code">${tg.code_pending ? '重新生成绑定码' : '生成绑定码'}</button></div>`;
+    return `<div class="section-label"><h2>Telegram</h2></div><section class="panel portal-card"><div class="kv"><span>机器人</span><span>${botLine}</span></div>${body}</section>`;
+}
+
+async function portalShare(payload) {
+    const r = await post('/me/share', payload);
+    modal('连接信息', `<div id="me-share"><p class="muted">正在从服务器读取连接信息…</p></div><div class="modal-foot"><button data-action="close">关闭</button></div>`, true);
+    await portalShareWait(r.id, Date.now());
+}
+async function portalShareWait(id, started) {
+    if (!$('#modal').open || !$('#me-share')) return;
+    const t = await api('/me/tasks/' + encodeURIComponent(id));
+    const box = $('#me-share');
+    if (t.status === 'succeeded' && t.connection) {
+        box.innerHTML = `<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(t.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/me/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240"><p class="helper">10 分钟后失效，需要时重新读取。</p>`;
+    } else if (['failed', 'unknown', 'cancelled'].includes(t.status) || t.status === 'succeeded') {
+        box.innerHTML = `<p class="error">读取失败：${esc(t.message || '服务器没有返回连接信息')}</p>`;
+    } else if (Date.now() - started > 90000) {
+        box.innerHTML = '<p class="error">服务器暂未响应，请稍后再试。</p>';
+    } else {
+        setTimeout(() => portalShareWait(id, started).catch(err => { if ($('#me-share')) $('#me-share').innerHTML = `<p class="error">${esc(err.message)}</p>`; }), 2000);
+    }
+}
+
+function portalPasswordDialog() {
+    modal('修改密码', `<form id="me-password-form"><label for="me-current">当前密码</label><input id="me-current" type="password" required autocomplete="current-password"><label for="me-new">新密码</label><input id="me-new" type="password" minlength="8" maxlength="128" required autocomplete="new-password"><label for="me-confirm">确认新密码</label><input id="me-confirm" type="password" maxlength="128" required autocomplete="new-password"><p class="helper">8–128 位。保存后所有设备需要重新登录。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存</button></div></form>`);
+    $('#me-password-form').onsubmit = async e => {
+        e.preventDefault();
+        if ($('#me-new').value !== $('#me-confirm').value) return formError(new Error('两次输入的新密码不一致'));
+        const button = $('[type=submit]', e.target); button.disabled = true;
+        try {
+            await post('/me/password', {current_password: $('#me-current').value, new_password: $('#me-new').value, confirm_password: $('#me-confirm').value});
+            portalState = null; csrf = '';
+            $('#modal').close(); login(); toast('密码已修改，请重新登录');
+        } catch (err) { formError(err); button.disabled = false; }
+    };
+}
+
+async function portalAction(action, b) {
+    if (action === 'me-share') await portalShare({link_id: b.dataset.link, core: b.dataset.core, protocol: b.dataset.protocol, port: Number(b.dataset.port)});
+    else if (action === 'me-share-relay') await portalShare({relay_id: b.dataset.id});
+    else if (action === 'me-password') portalPasswordDialog();
+    else if (action === 'me-tg-code') {
+        const r = await post('/me/tg-code');
+        const bot = portalState?.telegram?.bot?.username;
+        modal('Telegram 绑定码', `<p>私聊${bot ? ` <a href="https://t.me/${encodeURIComponent(bot)}" target="_blank" rel="noopener">@${esc(bot)}</a>` : '机器人'}，发送：</p><textarea id="connection" readonly rows="1">/bind ${esc(r.code)}</textarea><button data-action="copy-connection">复制</button><p class="helper">24 小时内有效，只能使用一次；重新生成后旧绑定码失效。</p><div class="modal-foot"><button class="primary" data-action="close">完成</button></div>`);
+        await portal();
+    } else if (action === 'me-tg-unbind') choiceDialog('解除 Telegram 绑定', '解除后不再收到提醒，也不能用机器人查询；之后可以重新生成绑定码绑定。', [], async () => { await post('/me/tg-unbind'); toast('已解除绑定'); await portal(); });
 }
 
 // ---------------------------------------------------------------- 系统设置、面板更新、一键更新节点程序

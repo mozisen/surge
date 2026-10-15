@@ -41,9 +41,14 @@ def view(db, user, now=None):
                          "bound_at": tg["bound_at"] if tg else None, "code_pending": bool(tg and tg["code_expires"] and tg["code_expires"] > now)}}
 
 
-def busy(db, user_id):
-    return db.execute("SELECT 1 FROM tasks WHERE request_key LIKE ? AND status IN ('queued','running')",
-                      ("user-share:" + user_id + ":%",)).fetchone()
+BUSY = 120
+
+
+def busy(db, user_id, now=None):
+    """One export at a time; a request a server never picked up (it went offline) stops blocking after two minutes."""
+    now = time.time() if now is None else now
+    return db.execute("SELECT 1 FROM tasks WHERE request_key LIKE ? AND status IN ('queued','running') AND created>?",
+                      ("user-share:" + user_id + ":%", now - BUSY)).fetchone()
 
 
 def share_link(db, user, data, now=None):
