@@ -1491,11 +1491,15 @@ const vkey = v => (v || '').split('.').map(Number);
 const newer = (a, b) => { const x = vkey(a), y = vkey(b); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
 // Updatable: a newer latest version, or Sing-box without per-user statistics (the statistics build replaces it).
 function coreUpdatable(core, item) {
+    // Snell v5 and v6 are separate cores: a version of the other major line is never an update.
+    const major = {'snell-v5': '5.', 'snell-v6': '6.'}[core];
+    if (major && !String(item?.latest || '').startsWith(major)) return false;
     return !!item?.latest && (newer(item.latest, item.current) || (core === 'singbox' && !item.stats));
 }
 // "current → latest", "1.14.2 → 统计版" (same version, statistics build), or "current · 已是最新".
 function coreVersionText(core, item) {
-    if (!item.latest) return `${esc(item.current)} · 最新版本获取中`;
+    const major = {'snell-v5': '5.', 'snell-v6': '6.'}[core];
+    if (!item.latest || (major && !item.latest.startsWith(major))) return `${esc(item.current)} · 最新版本获取中`;
     if (!coreUpdatable(core, item)) return `${esc(item.current)} · 已是最新`;
     return `${esc(item.current)} → ${item.latest === item.current ? '统计版' : esc(item.latest)}`;
 }

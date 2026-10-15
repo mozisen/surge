@@ -22,15 +22,18 @@ def fake_binary(path, text):
 
 class Runtime:
     """Records what the update does; installs by rewriting the fake binary."""
-    def __init__(self, root, install_to=None, fail_install=False, start_fails=(), latest="25.3.6"):
+    def __init__(self, root, install_to=None, fail_install=False, start_fails=(), latest="25.3.6", lookups=None):
         self.root, self.calls, self.running = root, [], {"vless-reality", "vless-snellu-aaaaaaaaaaaaaaaaaaaaaaaa"}
         self.install_to, self.fail_install, self.start_fails, self.latest_version = install_to, fail_install, set(start_fails), latest
+        self.lookups = lookups or {}
 
     def sync_traffic(self):
         self.calls.append(("sync",))
 
     def upstream_output(self, operation, *args):
         self.calls.append(("lookup", operation) + args)
+        if operation in self.lookups:
+            return self.lookups[operation]
         return "\x1b[32m[INFO]\x1b[0m checking\n" + self.latest_version + "\n"
 
     def upstream(self, operation, *args):
@@ -91,8 +94,14 @@ class Cores(unittest.TestCase):
         runtime = Runtime(self.root)
         self.assertEqual(cores.latest(runtime, "xray"), "25.3.6")
         self.assertIn(("lookup", "_get_latest_version", "XTLS/Xray-core", "true"), runtime.calls)
-        self.assertEqual(cores.latest(runtime, "snell-v6"), "25.3.6")
-        self.assertIn(("lookup", "_get_snell_v6_stable_version", "true"), runtime.calls)
+        # Snell: the release notes list 6.x above 5.x; each core only takes its own major version.
+        notes = "6.0.0\n6.0.0b4\n5.0.1\n5.0.0\n4.1.1\n"
+        runtime = Runtime(self.root, lookups={"_get_snell_versions_from_kb": notes, "_get_snell_v6_stable_version": "无\n"})
+        self.assertEqual(cores.latest(runtime, "snell-v5"), "5.0.1")
+        self.assertEqual(cores.latest(runtime, "snell-v6"), "6.0.0")
+        self.assertIn(("lookup", "_get_snell_versions_from_kb", "50"), runtime.calls)
+        runtime = Runtime(self.root, lookups={"_get_snell_versions_from_kb": "6.1.0\n6.0.0\n", "_get_snell_v6_stable_version": ""})
+        self.assertEqual(cores.latest(runtime, "snell-v5"), "")                 # no 5.x listed: no update offered
         snap = cores.snapshot({"xray": ("25.1.30", False), "singbox": ("1.14.2", True), "snell-v5": ("", False)}, {"xray": "25.3.6", "singbox": "1.14.2"}, "1.14.3")
         self.assertEqual(snap, {"xray": {"current": "25.1.30", "latest": "25.3.6"},
                                 "singbox": {"current": "1.14.2", "latest": "1.14.2", "stats": True, "official": "1.14.3"}})
@@ -135,7 +144,7 @@ class Cores(unittest.TestCase):
         fake_binary(self.bins["snell-server-v6"], "snell-server v6.0.0")
         unit = "vless-snellu-" + "a" * 24
         runtime = Runtime(self.root, install_to=lambda: fake_binary(self.bins["snell-server-v6"], "snell-server v6.1.0"),
-                          start_fails={unit}, latest="6.1.0")
+                          start_fails={unit}, lookups={"_get_snell_versions_from_kb": "6.1.0\n5.0.1\n", "_get_snell_v6_stable_version": "6.0.0\n"})
         runtime.start_fails_once = True
         original_service = runtime.service
         def service(name, action):                  # fails with the new binary, works again with the old one
@@ -158,6 +167,15 @@ class Cores(unittest.TestCase):
         runtime.running.discard("vless-reality")
         cores.update(runtime, self.cfg, self.state, "xray", wait=0)
         self.assertNotIn(("start", "vless-reality"), runtime.calls)
+
+    def test_snell_v5_never_gets_v6(self):
+        fake_binary(self.bins["snell-server-v5"], "snell-server v5.0.1")
+        runtime = Runtime(self.root, lookups={"_get_snell_versions_from_kb": "6.0.0\n5.0.1\n"})
+        self.assertFalse(cores.update(runtime, self.cfg, self.state, "snell-v5")["changed"])
+        self.assertFalse([c for c in runtime.calls if c[0] == "install"])
+        runtime = Runtime(self.root, lookups={"_get_snell_versions_from_kb": "6.0.0\n"})
+        with self.assertRaisesRegex(ValueError, "最新稳定版本"):
+            cores.update(runtime, self.cfg, self.state, "snell-v5")
 
     def test_restore_failure_is_unknown(self):
         fake_binary(self.bins["xray"], "Xray 25.1.30 x")
@@ -250,6 +268,7 @@ class PanelAPI(unittest.TestCase):
         self.node("maint", newer, maintenance=1)
         self.node("old", {}, version=0)
         self.node("unknown", {"xray": {"current": "25.1.30"}})
+        self.node("snell", {"snell-v5": {"current": "5.0.1", "latest": "6.0.0"}})       # reported by a 1.4.1 node
         r = self.client.post('/api/nodes/core-update-all', json={'core': 'xray'}, headers=self.h).json
         self.assertEqual(r['queued'], ['ok'])
         self.assertEqual({s['name']: s['reason'] for s in r['skipped']}, {
@@ -258,6 +277,10 @@ class PanelAPI(unittest.TestCase):
         self.assertEqual(again['queued'], [])
         self.assertIn({'name': 'ok', 'reason': '有未完成或待核对的任务'}, again['skipped'])
         self.assertEqual(self.client.post('/api/nodes/core-update-all', json={'core': 'x'}, headers=self.h).status_code, 400)
+        r = self.client.post('/api/nodes/core-update-all', json={'core': 'snell-v5'}, headers=self.h).json
+        self.assertEqual(r['queued'], [])
+        self.assertIn({'name': 'snell', 'reason': '暂未获取到最新稳定版本'}, r['skipped'])
+        self.assertIn('最新稳定版本', self.client.post('/api/nodes/snell/core-update', json={'core': 'snell-v5'}, headers=self.h).json['error'])
 
 
 if __name__ == '__main__':

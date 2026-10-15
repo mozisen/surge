@@ -103,7 +103,7 @@ class Runtime:
 
     def upstream_output(self, operation, *args):
         """Read-only script lookups (latest core versions); returns stdout."""
-        if operation not in {"_get_latest_version", "_get_snell_v6_stable_version"}:
+        if operation not in {"_get_latest_version", "_get_snell_v6_stable_version", "_get_snell_versions_from_kb"}:
             raise ValueError("未授权的脚本操作")
         return self.command(["bash", "-c", 'source "$1"; shift; "$@"', "vaio", str(self.library()), operation, *args], timeout=120, capture=True)
 

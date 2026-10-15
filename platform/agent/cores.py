@@ -69,16 +69,29 @@ def stats_latest(directory=None, fetch=None):
     return max(versions, key=version_key) if versions else ""
 
 
+MAJOR = {"snell-v5": 5, "snell-v6": 6}
+
+
+def same_major(core, version):
+    """Snell v5 and v6 are separate cores: never offer a version of the other one."""
+    key = version_key(version)
+    return bool(key) and (core not in MAJOR or key[0] == MAJOR[core])
+
+
 def latest(runtime, core):
     """Latest stable version this node can install; "" when unknown."""
     if core == "singbox":
         return stats_latest()
-    if core == "snell-v6":
-        output = runtime.upstream_output("_get_snell_v6_stable_version", "true")
+    if core in MAJOR:
+        # The release notes list every Snell line together (6.x above 5.x): keep this core's major version only.
+        lines = runtime.upstream_output("_get_snell_versions_from_kb", "50").splitlines()
+        if core == "snell-v6":
+            lines += runtime.upstream_output("_get_snell_v6_stable_version", "true").splitlines()
     else:
-        output = runtime.upstream_output("_get_latest_version", {"xray": "XTLS/Xray-core", "snell-v5": "surge-networks/snell"}[core], "true")
-    found = [m[1] for m in (re.fullmatch(r"v?(\d+\.\d+\.\d+)", line.strip()) for line in output.splitlines()) if m]
-    return found[-1] if found else ""
+        lines = runtime.upstream_output("_get_latest_version", "XTLS/Xray-core", "true").splitlines()
+    found = [m[1] for m in (re.fullmatch(r"v?(\d+\.\d+\.\d+)", line.strip()) for line in lines) if m]
+    found = [v for v in found if same_major(core, v)]
+    return max(found, key=version_key) if found else ""
 
 
 def official_singbox(runtime):
@@ -109,7 +122,7 @@ def update(runtime, cfg, state, core, sync=True, wait=2.0):
     if not current:
         raise ValueError(label + " 未安装")
     target = latest(runtime, core)
-    if not version_key(target):
+    if not same_major(core, target):
         raise ValueError("无法获取 " + label + " 的最新稳定版本" + ("（统计版预编译包）" if core == "singbox" else ""))
     if target == current and (core != "singbox" or stats):
         return {"core": core, "from": current, "to": current, "changed": False}

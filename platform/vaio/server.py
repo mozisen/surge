@@ -1315,7 +1315,8 @@ def create_app(config=None):
         item = (snapshot.get("cores") or {}).get(core)
         if not item:
             return "未安装此内核"
-        if not item.get("latest"):
+        major = {"snell-v5": "5.", "snell-v6": "6."}.get(core)
+        if not item.get("latest") or (major and not item["latest"].startswith(major)):
             return "暂未获取到最新稳定版本" + ("（统计版预编译包）" if core == "singbox" else "")
         if item["latest"] == item["current"] and (core != "singbox" or item.get("stats")):
             return "已是最新版本"
