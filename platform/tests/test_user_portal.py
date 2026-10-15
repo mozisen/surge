@@ -47,8 +47,9 @@ class Portal(unittest.TestCase):
         return client, {'X-CSRF-Token': csrf}
 
     def enable(self, user_id, password='user-password-1'):
+        """Set the user's password through 编辑用户 (as the admin does)."""
         client, h = self.admin()
-        r = client.post('/api/users/%s/login' % user_id, json={'password': password}, headers=h)
+        r = client.post('/api/users/%s' % user_id, json={'password': password}, headers=h)
         self.assertEqual(r.status_code, 200, r.json)
 
     def user(self, name='alice', password='user-password-1'):
@@ -57,9 +58,12 @@ class Portal(unittest.TestCase):
         self.assertEqual((r.status_code, r.json.get('role')), (200, 'user'), r.json)
         return client, {'X-CSRF-Token': r.json['csrf']}
 
-    def test_login_roles_and_disabled_login(self):
+    def test_login_roles_and_password_reset(self):
         client = self.app.test_client()
-        self.assertEqual(client.post('/api/login', json={'username': 'alice', 'password': 'user-password-1'}).status_code, 401)  # login off
+        # Users from before 1.3.1 got a random password at upgrade: nobody can sign in until the admin sets one.
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM platform_users WHERE password_hash IS NULL").fetchone()[0], 0)
+        self.assertEqual(client.post('/api/login', json={'username': 'alice', 'password': 'user-password-1'}).status_code, 401)
         self.enable(self.alice)
         self.assertEqual(self.app.test_client().post('/api/login', json={'username': 'admin', 'password': ADMIN_PASSWORD}).json['role'], 'admin')
         self.assertEqual(client.post('/api/login', json={'username': 'alice', 'password': 'wrong-password'}).status_code, 401)
@@ -67,19 +71,31 @@ class Portal(unittest.TestCase):
         self.assertEqual(user.get('/api/me').json['name'], 'alice')
         self.assertEqual(user.get('/api/session').status_code, 401)            # not an admin session
         admin, ah = self.admin()
-        self.assertTrue(next(u for u in admin.get('/api/users').json['users'] if u['name'] == 'alice')['login_enabled'])
-        self.assertEqual(admin.post('/api/users/%s/login' % self.alice, json={'enabled': False}, headers=ah).status_code, 200)
-        self.assertEqual(user.get('/api/me').status_code, 401)                 # sessions end at once
-        self.assertEqual(client.post('/api/login', json={'username': 'alice', 'password': 'user-password-1'}).status_code, 401)
-        for bad in ({'password': 'short'}, {'password': 'x' * 129}, {'enabled': True}, {}):
-            self.assertEqual(admin.post('/api/users/%s/login' % self.alice, json=bad, headers=ah).status_code, 400)
+        # Editing other fields keeps the password and the session; a new password ends the sessions.
+        self.assertEqual(admin.post('/api/users/%s' % self.alice, json={'note': 'x'}, headers=ah).status_code, 200)
+        self.assertEqual(user.get('/api/me').status_code, 200)
+        r = admin.post('/api/users/%s' % self.alice, json={'password': 'reset-password-9'}, headers=ah)
+        self.assertEqual(r.json['changed'], ['password'])
+        self.assertEqual(user.get('/api/me').status_code, 401)
+        self.user(password='reset-password-9')
+        for bad in ({'password': 'short'}, {'password': 'x' * 129}, {'password': 5}):
+            self.assertEqual(admin.post('/api/users/%s' % self.alice, json=bad, headers=ah).status_code, 400)
+        self.assertEqual(admin.post('/api/users/%s/login' % self.alice, json={'enabled': False}, headers=ah).status_code, 404)  # removed
 
-    def test_admin_name_cannot_be_a_user_login(self):
+    def test_create_with_password(self):
         admin, h = self.admin()
-        with self.store.connect() as db:
-            other = platform_users.create_user(db, {'name': 'admin'})
-        self.assertIn('同名', admin.post('/api/users/%s/login' % other, json={'password': 'user-password-1'}, headers=h).json['error'])
-        self.enable(self.alice)
+        self.assertIn('密码', admin.post('/api/users', json={'name': 'carol', 'password': 'short'}, headers=h).json['error'])
+        dave = admin.post('/api/users', json={'name': 'dave'}, headers=h)            # no password: random, cannot sign in
+        self.assertEqual(dave.status_code, 201)
+        self.assertEqual(self.app.test_client().post('/api/login', json={'username': 'dave', 'password': ''}).status_code, 401)
+        r = admin.post('/api/users', json={'name': 'carol', 'quota_gb': 1, 'password': 'carol-password'}, headers=h)
+        self.assertEqual(r.status_code, 201, r.json)
+        self.user('carol', 'carol-password')
+
+    def test_admin_name_cannot_be_a_user(self):
+        admin, h = self.admin()
+        self.assertIn('管理员', admin.post('/api/users', json={'name': 'Admin', 'password': 'user-password-1'}, headers=h).json['error'])
+        self.assertIn('管理员', admin.post('/api/users/%s' % self.alice, json={'name': 'admin'}, headers=h).json['error'])
         r = admin.post('/api/account', json={'username': 'alice', 'current_password': ADMIN_PASSWORD, 'new_password': '', 'confirm_password': ''}, headers=h)
         self.assertIn('平台用户', r.json['error'])
 

@@ -47,9 +47,15 @@ class Store:
                                      ("deleted", "REAL"), ("maintenance", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in columns:
                     db.execute("ALTER TABLE nodes ADD COLUMN " + name + " " + definition)
-            # Platform users who may sign in to their own page (NULL: login off).
+            # Every platform user can sign in to their own page. Users from before 1.3.1 get a random password
+            # the admin resets in 编辑用户 (nobody knows it, so nobody can sign in until then).
             if "password_hash" not in {row[1] for row in db.execute("PRAGMA table_info(platform_users)")}:
                 db.execute("ALTER TABLE platform_users ADD COLUMN password_hash TEXT")
+            from werkzeug.security import generate_password_hash
+            import secrets
+            for (user_id,) in db.execute("SELECT id FROM platform_users WHERE password_hash IS NULL").fetchall():
+                db.execute("UPDATE platform_users SET password_hash=? WHERE id=?",
+                           (generate_password_hash(secrets.token_urlsafe(24), method="pbkdf2:sha256:600000"), user_id))
             db.execute("PRAGMA user_version=2")
         os.chmod(self.path, 0o600)
 

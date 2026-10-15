@@ -124,10 +124,14 @@ def create_user(db, data, now=None):
     if db.execute("SELECT 1 FROM platform_users WHERE lower(name)=lower(?)", (fields["name"],)).fetchone():
         raise ValueError("用户名已存在")
     identity = str(uuid.uuid4())
+    # Login is always on; a random password until the admin sets one (server.py does at creation).
+    from werkzeug.security import generate_password_hash
+    import secrets
+    password_hash = generate_password_hash(secrets.token_urlsafe(24), method="pbkdf2:sha256:600000")
     row = {"note": "", "enabled": True, "expire_date": "", "quota": 0, "reset_day": 0, **fields}
-    db.execute("INSERT INTO platform_users(id,name,note,enabled,expire_date,quota,reset_day,cycle,mtime,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+    db.execute("INSERT INTO platform_users(id,name,note,enabled,expire_date,quota,reset_day,cycle,mtime,created,updated,password_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                (identity, row["name"], row["note"], int(row["enabled"]), row["expire_date"], row["quota"], row["reset_day"],
-                cycle_key(row["reset_day"], datetime.date.fromtimestamp(now)), json.dumps({k: int(now) for k in ACCOUNT_FIELDS}), now, now))
+                cycle_key(row["reset_day"], datetime.date.fromtimestamp(now)), json.dumps({k: int(now) for k in ACCOUNT_FIELDS}), now, now, password_hash))
     return identity
 
 
@@ -542,4 +546,4 @@ def describe(db, user, nodes, now=None):
                       "account": account, "members": (account or {}).get("members", [])})
     return {"id": user["id"], **fields_of(user), "cycle": user["cycle"], "used": used,
             "state": state_of(user, used, datetime.date.fromtimestamp(now)), "deleting": user["deleting"],
-            "mtime": json.loads(user["mtime"]), "links": links, "login_enabled": user["password_hash"] is not None}
+            "mtime": json.loads(user["mtime"]), "links": links}

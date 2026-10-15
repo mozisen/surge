@@ -336,8 +336,8 @@ def create_app(config=None):
                 count = attempt["count"] + 1 if attempt and attempt["until"] > now else 1
                 db.execute("INSERT OR REPLACE INTO attempts VALUES('account',?,?)", (count, now + 900))
                 return jsonify(error="当前密码错误"), 400
-            if db.execute("SELECT 1 FROM platform_users WHERE name=? AND password_hash IS NOT NULL", (username,)).fetchone():
-                raise ValueError("该账号名已被开启登录的平台用户使用，请换一个")
+            if db.execute("SELECT 1 FROM platform_users WHERE lower(name)=lower(?)", (username,)).fetchone():
+                raise ValueError("该账号名已被平台用户使用，请换一个")
             db.execute("INSERT OR REPLACE INTO settings VALUES('username',?)", (username,))
             if password:
                 db.execute("UPDATE settings SET value=? WHERE key='password'",
@@ -789,7 +789,14 @@ def create_app(config=None):
     def platform_user_create():
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            identity = platform_users.create_user(db, body())
+            data = body()
+            # The form always sends a password; without one the user gets create_user's random password.
+            password = data.pop("password", None) if isinstance(data, dict) else None
+            password = user_password(password) if password is not None else None
+            check_admin_name(db, data.get("name") if isinstance(data, dict) else None)
+            identity = platform_users.create_user(db, data)
+            if password:
+                db.execute("UPDATE platform_users SET password_hash=? WHERE id=?", (password, identity))
             audit(db, "platform.user_created", detail=identity)
         return jsonify(id=identity), 201
 
@@ -816,13 +823,29 @@ def create_app(config=None):
     @admin
     def platform_user_update(user_id):
         data = body()
+        password = data.pop("password", None) if isinstance(data, dict) else None
+        password = user_password(password) if password else None
         def action(db):
-            admin_name = db.execute("SELECT value FROM settings WHERE key='username'").fetchone()
-            if isinstance(data, dict) and data.get("name") == (admin_name[0] if admin_name else "admin") and \
-                    db.execute("SELECT 1 FROM platform_users WHERE id=? AND password_hash IS NOT NULL", (user_id,)).fetchone():
-                raise ValueError("已开启登录的用户不能与管理员账号同名")
-            return {"changed": sorted(platform_users.update_user(db, user_id, data))}
+            if isinstance(data, dict) and "name" in data:
+                check_admin_name(db, data["name"])
+            changed = sorted(platform_users.update_user(db, user_id, data)) if data else []
+            if password:
+                # A reset password signs the user out everywhere.
+                db.execute("UPDATE platform_users SET password_hash=? WHERE id=?", (password, user_id))
+                db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+                changed.append("password")
+            return {"changed": changed}
         return platform_change(user_id, "platform.user_updated", action)
+
+    def user_password(password):
+        if not isinstance(password, str) or not 8 <= len(password) <= 128:
+            raise ValueError("登录密码需为 8–128 位")
+        return generate_password_hash(password, method="pbkdf2:sha256:600000")
+
+    def check_admin_name(db, name):
+        admin_name = db.execute("SELECT value FROM settings WHERE key='username'").fetchone()
+        if isinstance(name, str) and name.lower() == (admin_name[0] if admin_name else "admin").lower():
+            raise ValueError("用户名不能与管理员账号相同")
 
     @app.post("/api/users/<user_id>/delete")
     @admin
@@ -832,26 +855,6 @@ def create_app(config=None):
             db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
             return {"deleted": platform_users.delete_user(db, user_id, mode)}
         return platform_change(user_id, "platform.user_deleted", action)
-
-    @app.post("/api/users/<user_id>/login")
-    @admin
-    def platform_user_login(user_id):
-        """Turn the user's own page login on (set or reset the password) or off; either way their sessions end."""
-        data = body()
-        if data == {"enabled": False}:
-            password_hash = None
-        elif set(data) == {"password"} and isinstance(data["password"], str) and 8 <= len(data["password"]) <= 128:
-            password_hash = generate_password_hash(data["password"], method="pbkdf2:sha256:600000")
-        else:
-            raise ValueError("密码需为 8–128 位")
-        def action(db):
-            user = db.execute("SELECT name FROM platform_users WHERE id=?", (user_id,)).fetchone()
-            admin_name = db.execute("SELECT value FROM settings WHERE key='username'").fetchone()
-            if password_hash and user["name"] == (admin_name[0] if admin_name else "admin"):
-                raise ValueError("该用户与管理员账号同名，不能开启登录")
-            db.execute("UPDATE platform_users SET password_hash=? WHERE id=?", (password_hash, user_id))
-            db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
-        return platform_change(user_id, "platform.login_set" if password_hash else "platform.login_disabled", action)
 
     @app.post("/api/users/<user_id>/links")
     @admin
