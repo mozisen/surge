@@ -223,7 +223,15 @@ def member_op(db, link, data):
     action = data.get("action")
     if action == "add":
         node = db.execute("SELECT snapshot FROM nodes WHERE id=?", (link["node_id"],)).fetchone()
-        check_member_target(json.loads(node["snapshot"]) if node else {}, target)
+        snapshot = json.loads(node["snapshot"]) if node else {}
+        check_member_target(snapshot, target)
+        # One account per user per instance: a second one would collide on the user name.
+        key = (target["core"], target["protocol"], target["port"])
+        account = (snapshot.get("accounts") or {}).get(link["account_id"]) or {}
+        queued = [json.loads(r["op"]) for r in db.execute("SELECT op FROM platform_pending WHERE link_id=?", (link["id"],))]
+        if any((m.get("core"), m.get("protocol"), m.get("port")) == key for m in account.get("members", []) if isinstance(m, dict)) or \
+                any(o.get("op") == "member_add" and (o["target"]["core"], o["target"]["protocol"], o["target"]["port"]) == key for o in queued):
+            raise ValueError("该用户在此实例已有协议账号")
         user = db.execute("SELECT name FROM platform_users WHERE id=?", (link["user_id"],)).fetchone()
         op = {"op": "member_add", "account_id": link["account_id"], "target": target, "name": data.get("name") or user["name"]}
     elif action == "claim":

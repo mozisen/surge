@@ -96,13 +96,20 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     vm.runInContext('currentUser = this.currentUser;', context);
     element('pu-member-action', {value: 'add'}); element('pu-member-target'); element('pu-remove-set'); element('pu-member-help'); element('pu-member-form');
     context.membersDialog('l1');
-    assert(elements['pu-member-target'].innerHTML.includes('VLESS') && !elements['pu-member-target'].innerHTML.includes('SS2022'));
+    // alice already has VLESS 443 here: no second account there; single-user SS2022 is taken.
+    assert(!elements['pu-member-target'].innerHTML.includes('VLESS') && !elements['pu-member-target'].innerHTML.includes('SS2022') && elements['pu-member-target'].innerHTML.includes('没有可选目标'));
+    const ownedLink = user.links[0].members;
+    user.links[0].members = [];
+    context.membersDialog('l1');
+    assert(elements['pu-member-target'].innerHTML.includes('VLESS'), 'listed once the user has no account there');
+    user.links[0].members = ownedLink;
+    context.membersDialog('l1');
     elements['pu-member-action'].value = 'claim'; elements['pu-member-action'].onchange();
     const claim = elements['pu-member-target'].innerHTML;
     assert(claim.includes('old') && claim.includes('solo') && !claim.includes('alice'));
     elements['pu-member-action'].value = 'remove'; elements['pu-member-action'].onchange();
     assert(!elements['pu-remove-set'].hidden && elements['pu-member-target'].innerHTML.includes('alice'));
-    console.log('PASS member dialog: add lists multi-user protocols, claim lists unowned users, remove lists members');
+    console.log('PASS member dialog: add lists multi-user protocols without the user\'s own, claim lists unowned users, remove lists members');
 
     // 关联对话框：已关联、离线、旧版和脚本管理的节点不可选
     element('pu-node', {value: ''}); element('pu-instances'); element('pu-link-form');

@@ -377,6 +377,14 @@ class PlatformUsersPanel(unittest.TestCase):
         self.assertEqual(len(creates), 1)
         self.assertEqual([l["sync"] for l in self.user(user)["links"]], ["synced"])
 
+    def test_no_second_account_on_the_same_instance(self):
+        user, a, b = self.linked_pair()
+        link = [l for l in self.user(user)["links"] if l["node_id"] == a.id][0]
+        r = self.client.post('/api/links/' + link["id"] + '/members', json={"action": "add", "target": {"core": "xray", "protocol": "vless", "port": 443}},
+                             headers=self.headers)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("已有协议账号", r.json["error"])
+
     def test_failed_link_heals_when_node_shows_the_account(self):
         user, a, b = self.linked_pair()
         with self.store.connect() as db:

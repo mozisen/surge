@@ -1130,7 +1130,9 @@ function membersDialog(linkId) {
     modal('协议 · ' + link.node_name, `<form id="pu-member-form"><label for="pu-member-action">操作</label><select id="pu-member-action"><option value="add">新建协议账号</option><option value="claim">归入已有协议用户</option><option value="remove">移除协议</option></select><label for="pu-member-target">目标</label><select id="pu-member-target"></select><div id="pu-remove-set" hidden><label class="field-check"><input type="radio" name="pu-remove-mode" value="release" checked>保留为普通协议用户</label><label class="field-check"><input type="radio" name="pu-remove-mode" value="delete">同时删除该协议用户（旧连接失效）</label></div><p class="helper" id="pu-member-help"></p><div class="error" role="alert"></div><div class="modal-foot"><button type="submit" class="primary">提交</button></div></form>`);
     const update = () => {
         const action = $('#pu-member-action').value;
-        const list = action === 'add' ? instances.filter(memberAddable).map(i => ({core: i.core, protocol: i.protocol, port: i.port, single: i.user_mode === 'single'}))
+        // New accounts only on instances where this user has none yet.
+        const owned = new Set((link.members || []).map(m => m.core + '|' + m.protocol + '|' + m.port));
+        const list = action === 'add' ? instances.filter(i => memberAddable(i) && !owned.has(i.core + '|' + i.protocol + '|' + i.port)).map(i => ({core: i.core, protocol: i.protocol, port: i.port, single: i.user_mode === 'single'}))
             : action === 'claim' ? claimable : link.members;
         $('#pu-member-target').innerHTML = list.map(t => `<option value="${esc(JSON.stringify(t))}">${memberText(t)}${t.single ? '（分配空实例）' : ''}</option>`).join('') || '<option value="">没有可选目标</option>';
         $('#pu-remove-set').hidden = action !== 'remove';
