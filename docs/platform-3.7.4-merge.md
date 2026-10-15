@@ -70,3 +70,10 @@
 ## 统一用户管理：脚本 3.7.4-preview.3 / preview.4，面板 0.3.0-preview.11
 
 脚本新增可独立运行的节点级统一用户和事务写接口 `--api account_apply`；Agent 上报统一用户并执行 `platform_apply`；面板新增「用户管理」，跨节点合计流量、双向同步。版本、改动和测试结果见 `docs/platform-user-management.md`。2026-10-12 已将测试面板 vps.town 升级到 `6b819ef`（0.3.0-preview.11），并在数据库副本上完成接口验收；节点未操作。
+
+## 脚本 3.7.4-preview.13：Sing-box 只用统计版预编译包（面板 1.4.1）
+
+- 改动：Sing-box 的全新安装、核心管理更新（菜单改为「最新统计版 / 指定统计版版本」）、指定版本、`install_singbox ... true` 与统计修复，都只使用 `mozisen/surge` 分支 `singbox-stats-binaries` 中本机（`linux-架构-libc`）已发布的版本；不再安装或提示官方版本，官方最新版本只在版本信息里作参考。未发布统计包的版本（例如官方 1.14.3）在下载或停服务之前被拒绝。只有本机架构没有预编译包（如 armv7）时才安装官方版本并提示无用户统计。版本缓存与菜单状态使用伪仓库 `mozisen/singbox-stats`。
+- 统计修复的版本检查由「必须是官方最新 1.14 稳定版」改为「当前版本必须有已发布的统计包」，否则提示先更新到最新统计版。
+- 同步：`platform/vendor/vless-server.sh`、`UPSTREAM_SHA`（`4e0fa100…`）与 `platform/vendor/README.md`；面板与节点程序 1.4.1（一键更新节点程序时推送新脚本）。
+- 测试：`bash -n` 通过；shell 回归全部通过（`singbox-stats-live.sh` 需真实统计核心，未运行）；改写 `tests/stats-platform.sh`（按本机平台列出统计版并按数字排序、缓存回退、修复门槛）与 `tests/singbox-stats-update.sh`（所有安装 / 更新入口只用统计版、未发布版本拒绝、无平台包才退回官方）。`_install_singbox_stats_fresh` 直接写 `/usr/local/bin`，未在本机运行。unittest 245 项（跳过 2 项）与三个 cjs 通过。**真实节点验收**：未执行。
