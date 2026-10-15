@@ -38,6 +38,8 @@ class Store:
             from .relays import SCHEMA as RELAY_SCHEMA, migrate as relay_migrate
             db.executescript(RELAY_SCHEMA)
             relay_migrate(db)
+            from .daily import SCHEMA as DAILY_SCHEMA, backfill as daily_backfill
+            db.executescript(DAILY_SCHEMA)
             db.execute("BEGIN IMMEDIATE")
             # 2: platform users. Older databases (and restored v1 backups) gain the tables above.
             if db.execute("PRAGMA user_version").fetchone()[0] > 2:
@@ -56,6 +58,7 @@ class Store:
             for (user_id,) in db.execute("SELECT id FROM platform_users WHERE password_hash IS NULL").fetchall():
                 db.execute("UPDATE platform_users SET password_hash=? WHERE id=?",
                            (generate_password_hash(secrets.token_urlsafe(24), method="pbkdf2:sha256:600000"), user_id))
+            daily_backfill(db)
             db.execute("PRAGMA user_version=2")
         os.chmod(self.path, 0o600)
 

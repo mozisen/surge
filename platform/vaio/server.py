@@ -622,7 +622,9 @@ def create_app(config=None):
                 return jsonify(error="节点身份已失效"), 401
             db.execute("UPDATE nodes SET last_seen=?,snapshot=? WHERE id=?", (time.time(), json.dumps(snapshot), node_id))
             platform_users.ingest(db, node_id, snapshot)
-            db.execute("INSERT OR IGNORE INTO samples VALUES(?,?,?)", (node_id, int(time.time() // 60), json.dumps(snapshot.get("metrics", {}))))
+            if db.execute("INSERT OR IGNORE INTO samples VALUES(?,?,?)", (node_id, int(time.time() // 60), json.dumps(snapshot.get("metrics", {})))).rowcount:
+                from . import daily
+                daily.record(db, node_id, snapshot.get("metrics", {}))
             # Ambiguous tasks are never automatically replayed.
             db.execute("UPDATE tasks SET status='unknown',message='执行结果未确认；请核对节点后重新操作',finished=? WHERE node_id=? AND status='running' AND started<?",
                        (time.time(), node_id, time.time() - 2100))
@@ -1009,6 +1011,17 @@ def create_app(config=None):
                 entry["rule"] = rule
             return validate_forward_task({"action": "forward_apply", "params": {"ops": [entry]}})
         return node_task(node_id, "forward_apply", request_body, check)
+
+    @app.get("/api/summary")
+    @admin
+    def overview_summary():
+        """Counts and traffic for the overview cards."""
+        from . import daily
+        with store.connect() as db:
+            users = db.execute("SELECT COUNT(*) FROM platform_users WHERE deleting IS NULL").fetchone()[0]
+            relays = db.execute("SELECT COUNT(*) FROM relay_lines WHERE removing=0").fetchone()[0]
+            traffic = daily.totals(db)
+        return jsonify(users=users, relays=relays, **traffic)
 
     @app.get("/api/relays")
     @admin
