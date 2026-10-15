@@ -110,3 +110,9 @@
 - 修复关联用户重复新建导致「同步失败：节点上已存在同一统一用户」；节点脚本 3.7.4-preview.14 的 Snell v5 只取 5.x 版本。
 - 发布结果：vaio-panel `main` 追加提交 `97bbf45`「Vaio Panel 1.4.3」（来源 surge `66301d9`，作者 mozi），标签 `v1.4.3`。发布目录 unittest 253 项（跳过 3 项）在普通与模拟已安装辅助服务环境下均通过，三个 cjs 测试通过；vaio-panel Actions（main 与标签）通过。已在网页创建 Release「Vaio Panel 1.4.3」，为最新版本。
 - **真实验收**：未执行。
+
+## 1.4.4（2026-10-15 发布到 vaio-panel）
+
+- 新建协议账号不再列出用户已有账号的实例，接口拒绝同一实例重复建账号。
+- 发布结果：vaio-panel `main` 追加提交 `2316877`「Vaio Panel 1.4.4」（来源 surge `1c550a7`，作者 mozi），标签 `v1.4.4`。发布目录 unittest 255 项（跳过 3 项）在普通与模拟已安装辅助服务环境下均通过，三个 cjs 测试通过；vaio-panel Actions（main 与标签）通过。已在网页创建 Release「Vaio Panel 1.4.4」，为最新版本。
+- **真实验收**：未执行。
