@@ -110,6 +110,22 @@ def create_app(config=None):
             return fn(*args, **kwargs)
         return decorated
 
+    def portal(fn):
+        """Platform user's own page. Separate session table: a user cookie never passes `admin`."""
+        @wraps(fn)
+        def decorated(*args, **kwargs):
+            with store.connect() as db:
+                session = db.execute("SELECT user_sessions.* FROM user_sessions JOIN platform_users ON platform_users.id=user_sessions.user_id "
+                                     "WHERE token=? AND expires>? AND platform_users.password_hash IS NOT NULL AND platform_users.deleting IS NULL",
+                                     (digest(request.cookies.get("vaio_session", "")), time.time())).fetchone()
+            if not session:
+                return jsonify(error="请登录"), 401
+            if request.method != "GET" and not secrets.compare_digest(request.headers.get("X-CSRF-Token", ""), session["csrf"]):
+                return jsonify(error="请求校验失败，请刷新页面"), 403
+            g.session = session
+            return fn(*args, **kwargs)
+        return decorated
+
     def agent(fn):
         @wraps(fn)
         def decorated(node_id, *args, **kwargs):
@@ -260,16 +276,29 @@ def create_app(config=None):
             username_row = db.execute("SELECT value FROM settings WHERE key='username'").fetchone()
             expected_username = username_row[0] if username_row else "admin"
             password_ok = check_password_hash(password_hash[0], password)
-            if not password_ok or username != expected_username:
+            role = "admin" if password_ok and username == expected_username else None
+            member = None
+            if not role and username != expected_username:
+                # Platform user with login enabled (the admin's name is never a user login).
+                member = db.execute("SELECT * FROM platform_users WHERE name=? AND password_hash IS NOT NULL AND deleting IS NULL",
+                                    (username,)).fetchone()
+                if member and check_password_hash(member["password_hash"], password):
+                    role = "user"
+            if not role:
                 count = attempt["count"] + 1 if attempt and attempt["until"] > now else 1
                 db.execute("INSERT OR REPLACE INTO attempts VALUES(?,?,?)", (ip, count, now + 900))
                 return jsonify(error="账号或密码错误"), 401
             db.execute("DELETE FROM attempts WHERE ip=?", (ip,))
-            db.execute("DELETE FROM sessions WHERE expires<?", (now,))
             token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-            db.execute("INSERT INTO sessions VALUES(?,?,?)", (digest(token), csrf, now + 43200))
-            audit(db, "login")
-        response = jsonify(csrf=csrf, version=__version__)
+            if role == "admin":
+                db.execute("DELETE FROM sessions WHERE expires<?", (now,))
+                db.execute("INSERT INTO sessions VALUES(?,?,?)", (digest(token), csrf, now + 43200))
+                audit(db, "login")
+            else:
+                db.execute("DELETE FROM user_sessions WHERE expires<?", (now,))
+                db.execute("INSERT INTO user_sessions VALUES(?,?,?,?)", (digest(token), csrf, now + 43200, member["id"]))
+                audit(db, "portal.login", detail=member["name"])
+        response = jsonify(csrf=csrf, version=__version__, role=role)
         response.set_cookie("vaio_session", token, httponly=True, secure=secure, samesite="Strict", max_age=43200)
         return response
 
@@ -307,6 +336,8 @@ def create_app(config=None):
                 count = attempt["count"] + 1 if attempt and attempt["until"] > now else 1
                 db.execute("INSERT OR REPLACE INTO attempts VALUES('account',?,?)", (count, now + 900))
                 return jsonify(error="当前密码错误"), 400
+            if db.execute("SELECT 1 FROM platform_users WHERE name=? AND password_hash IS NOT NULL", (username,)).fetchone():
+                raise ValueError("该账号名已被开启登录的平台用户使用，请换一个")
             db.execute("INSERT OR REPLACE INTO settings VALUES('username',?)", (username,))
             if password:
                 db.execute("UPDATE settings SET value=? WHERE key='password'",
@@ -319,10 +350,17 @@ def create_app(config=None):
         return response
 
     @app.post("/api/logout")
-    @admin
     def logout():
+        token = digest(request.cookies.get("vaio_session", ""))
         with store.connect() as db:
-            db.execute("DELETE FROM sessions WHERE token=?", (g.session["token"],))
+            session = (db.execute("SELECT csrf FROM sessions WHERE token=?", (token,)).fetchone()
+                       or db.execute("SELECT csrf FROM user_sessions WHERE token=?", (token,)).fetchone())
+            if not session:
+                return jsonify(error="请登录"), 401
+            if not secrets.compare_digest(request.headers.get("X-CSRF-Token", ""), session["csrf"]):
+                return jsonify(error="请求校验失败，请刷新页面"), 403
+            db.execute("DELETE FROM sessions WHERE token=?", (token,))
+            db.execute("DELETE FROM user_sessions WHERE token=?", (token,))
         response = jsonify(ok=True)
         response.delete_cookie("vaio_session")
         return response
@@ -693,11 +731,14 @@ def create_app(config=None):
     @app.get("/api/tasks/<task_id>/qr")
     @admin
     def connection_qr(task_id):
-        import qrcode
-        import qrcode.image.svg
         with store.connect() as db:
             row = db.execute("SELECT * FROM tasks WHERE id=? AND action='share' AND status='succeeded'", (task_id,)).fetchone()
-        if not row or not row['finished'] or row['finished'] < time.time() - 600:
+        return qr_response(row)
+
+    def qr_response(row):
+        import qrcode
+        import qrcode.image.svg
+        if not row or row['status'] != 'succeeded' or not row['finished'] or row['finished'] < time.time() - 600:
             return jsonify(error="连接信息不存在或已过期"), 404
         connection = json.loads(row['result'] or '{}').get('connection')
         if not isinstance(connection, str) or not connection or len(connection) > 4096:
@@ -775,13 +816,42 @@ def create_app(config=None):
     @admin
     def platform_user_update(user_id):
         data = body()
-        return platform_change(user_id, "platform.user_updated", lambda db: {"changed": sorted(platform_users.update_user(db, user_id, data))})
+        def action(db):
+            admin_name = db.execute("SELECT value FROM settings WHERE key='username'").fetchone()
+            if isinstance(data, dict) and data.get("name") == (admin_name[0] if admin_name else "admin") and \
+                    db.execute("SELECT 1 FROM platform_users WHERE id=? AND password_hash IS NOT NULL", (user_id,)).fetchone():
+                raise ValueError("已开启登录的用户不能与管理员账号同名")
+            return {"changed": sorted(platform_users.update_user(db, user_id, data))}
+        return platform_change(user_id, "platform.user_updated", action)
 
     @app.post("/api/users/<user_id>/delete")
     @admin
     def platform_user_delete(user_id):
         mode = body().get("mode")
-        return platform_change(user_id, "platform.user_deleted", lambda db: {"deleted": platform_users.delete_user(db, user_id, mode)})
+        def action(db):
+            db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+            return {"deleted": platform_users.delete_user(db, user_id, mode)}
+        return platform_change(user_id, "platform.user_deleted", action)
+
+    @app.post("/api/users/<user_id>/login")
+    @admin
+    def platform_user_login(user_id):
+        """Turn the user's own page login on (set or reset the password) or off; either way their sessions end."""
+        data = body()
+        if data == {"enabled": False}:
+            password_hash = None
+        elif set(data) == {"password"} and isinstance(data["password"], str) and 8 <= len(data["password"]) <= 128:
+            password_hash = generate_password_hash(data["password"], method="pbkdf2:sha256:600000")
+        else:
+            raise ValueError("密码需为 8–128 位")
+        def action(db):
+            user = db.execute("SELECT name FROM platform_users WHERE id=?", (user_id,)).fetchone()
+            admin_name = db.execute("SELECT value FROM settings WHERE key='username'").fetchone()
+            if password_hash and user["name"] == (admin_name[0] if admin_name else "admin"):
+                raise ValueError("该用户与管理员账号同名，不能开启登录")
+            db.execute("UPDATE platform_users SET password_hash=? WHERE id=?", (password_hash, user_id))
+            db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+        return platform_change(user_id, "platform.login_set" if password_hash else "platform.login_disabled", action)
 
     @app.post("/api/users/<user_id>/links")
     @admin
@@ -960,6 +1030,118 @@ def create_app(config=None):
     def relay_share(line_id):
         from . import relays
         return jsonify(id=relay_change("relay.share", lambda db: relays.share(db, line_id))), 201
+
+    # ------------------------------------------------------------ platform user's own page
+    def portal_user(db):
+        return db.execute("SELECT * FROM platform_users WHERE id=?", (g.session["user_id"],)).fetchone()
+
+    @app.get("/api/me")
+    @portal
+    def me():
+        from . import portal as portal_view
+        from .monitor import bot_info
+        with store.connect() as db:
+            data = portal_view.view(db, portal_user(db))
+        data["telegram"]["bot"] = bot_info(store)
+        return jsonify(**data, csrf=g.session["csrf"], version=__version__)
+
+    @app.post("/api/me/share")
+    @portal
+    def me_share():
+        from . import portal as portal_view, relays
+        data = body()
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            user = portal_user(db)
+            if portal_view.busy(db, user["id"]):
+                raise ValueError("上一个连接导出仍在进行中，请稍候")
+            try:
+                if set(data) == {"relay_id"}:
+                    line = db.execute("SELECT id FROM relay_lines WHERE id=? AND user_id=? AND removing=0", (data["relay_id"], user["id"])).fetchone() \
+                        if isinstance(data["relay_id"], str) else None
+                    if not line:
+                        raise LookupError("线路不存在")
+                    task_id = relays.share(db, line["id"], key_prefix="user-share:" + user["id"] + ":")
+                else:
+                    node_id, task = portal_view.share_link(db, user, data)
+                    task_id = portal_view.queue(db, user["id"], node_id, task)
+            except LookupError as error:
+                return jsonify(error=str(error)), 404
+            audit(db, "portal.share", None, user["name"] + " " + task_id)
+        return jsonify(id=task_id), 201
+
+    @app.get("/api/me/tasks/<task_id>")
+    @portal
+    def me_task(task_id):
+        from . import portal as portal_view
+        with store.connect() as db:
+            row = portal_view.own_task(db, g.session["user_id"], task_id)
+        if not row:
+            return jsonify(error="导出记录不存在"), 404
+        return jsonify(portal_view.task_view(row))
+
+    @app.get("/api/me/tasks/<task_id>/qr")
+    @portal
+    def me_task_qr(task_id):
+        from . import portal as portal_view
+        with store.connect() as db:
+            return qr_response(portal_view.own_task(db, g.session["user_id"], task_id))
+
+    @app.post("/api/me/tg-code")
+    @portal
+    def me_tg_code():
+        from .monitor import bot_info, new_code
+        if body():
+            raise ValueError("参数无效")
+        if not bot_info(store)["enabled"]:
+            raise ValueError("管理员尚未启用 Telegram 机器人")
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            code, expires = new_code(db, g.session["user_id"])
+            audit(db, "portal.bind_code", detail=g.session["user_id"])
+        return jsonify(code=code, expires=expires)
+
+    @app.post("/api/me/tg-unbind")
+    @portal
+    def me_tg_unbind():
+        from .monitor import unbind
+        if body():
+            raise ValueError("参数无效")
+        with store.connect() as db:
+            unbind(db, g.session["user_id"])
+            audit(db, "portal.unbind", detail=g.session["user_id"])
+        return jsonify(ok=True)
+
+    @app.post("/api/me/password")
+    @portal
+    def me_password():
+        data = body()
+        current, password = data.get("current_password", ""), data.get("new_password", "")
+        if set(data) != {"current_password", "new_password", "confirm_password"} or not isinstance(current, str) or not current or len(current) > 1024:
+            raise ValueError("请输入当前密码")
+        if not isinstance(password, str) or not 8 <= len(password) <= 128:
+            raise ValueError("新密码需为 8–128 位")
+        if password != data["confirm_password"]:
+            raise ValueError("两次输入的新密码不一致")
+        now, key = time.time(), "user:" + g.session["user_id"]
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            attempt = db.execute("SELECT * FROM attempts WHERE ip=?", (key,)).fetchone()
+            if attempt and attempt["until"] > now and attempt["count"] >= 8:
+                return jsonify(error="尝试次数过多，请 15 分钟后重试"), 429
+            user = portal_user(db)
+            if not user or not user["password_hash"] or not check_password_hash(user["password_hash"], current):
+                count = attempt["count"] + 1 if attempt and attempt["until"] > now else 1
+                db.execute("INSERT OR REPLACE INTO attempts VALUES(?,?,?)", (key, count, now + 900))
+                return jsonify(error="当前密码错误"), 400
+            db.execute("UPDATE platform_users SET password_hash=? WHERE id=?",
+                       (generate_password_hash(password, method="pbkdf2:sha256:600000"), user["id"]))
+            db.execute("DELETE FROM user_sessions WHERE user_id=?", (user["id"],))
+            db.execute("DELETE FROM attempts WHERE ip=?", (key,))
+            audit(db, "portal.password", detail=user["name"])
+        response = jsonify(ok=True)
+        response.delete_cookie("vaio_session")
+        return response
 
     def address_migration(db):
         key = "set-url:" + hashlib.sha256(app.config["PUBLIC_URL"].encode()).hexdigest()[:12] + ":%"

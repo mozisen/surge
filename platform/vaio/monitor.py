@@ -27,7 +27,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS platform_tg_chat ON platform_tg(chat_id) WHERE
 '''
 
 DEFAULTS = dict(enabled=False, bot_token='', chat_id='', quota_percent=80, daily_enabled=False, daily_time='09:00',
-                bot_enabled=False, bot_offset=0)
+                bot_enabled=False, bot_offset=0, bot_username='')
 TOKEN = re.compile(r'[0-9]{5,20}:[A-Za-z0-9_-]{20,100}')
 CHAT = re.compile(r'(?:-?[0-9]{1,24}|@[A-Za-z0-9_]{5,32})')
 CODE = re.compile(r'[A-F0-9]{12}')
@@ -119,7 +119,7 @@ def save_settings(store, data):
         new['bot_token'] = token
     if new['bot_token'] != old['bot_token']:
         # A different bot must be enabled again: webhook removal, commands and the update offset belong to the old one.
-        new['bot_enabled'], new['bot_offset'] = False, 0
+        new['bot_enabled'], new['bot_offset'], new['bot_username'] = False, 0, ''
     if new['enabled'] and not (new['bot_token'] and new['chat_id']):
         raise ValueError('请先设置 Bot Token 和 Chat ID')
     with store.connect() as db:
@@ -171,8 +171,25 @@ def enable_bot(store, enabled):
         tg_call(config['bot_token'], 'setMyCommands', {'commands': COMMANDS})
     except RuntimeError:
         pass  # The menu is a convenience; commands work without it.
-    update(store, bot_enabled=True)
-    return {'username': (me or {}).get('username', '')}
+    username = str((me or {}).get('username', ''))[:64]
+    update(store, bot_enabled=True, bot_username=username)
+    return {'username': username}
+
+
+def bot_info(store):
+    """For the user page: the enabled bot's @name. Bots enabled before 1.3.0 have none saved; look it up once."""
+    config = settings(store, True)
+    if not config['bot_enabled']:
+        return {'enabled': False, 'username': ''}
+    if not config['bot_username']:
+        try:
+            username = str((tg_call(config['bot_token'], 'getMe', {}) or {}).get('username', ''))[:64]
+        except RuntimeError:
+            username = ''
+        if username:
+            update(store, bot_username=username)
+        config['bot_username'] = username
+    return {'enabled': True, 'username': config['bot_username']}
 
 
 # ---------------------------------------------------------------- bind codes and the user bot

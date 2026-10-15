@@ -542,4 +542,4 @@ def describe(db, user, nodes, now=None):
                       "account": account, "members": (account or {}).get("members", [])})
     return {"id": user["id"], **fields_of(user), "cycle": user["cycle"], "used": used,
             "state": state_of(user, used, datetime.date.fromtimestamp(now)), "deleting": user["deleting"],
-            "mtime": json.loads(user["mtime"]), "links": links}
+            "mtime": json.loads(user["mtime"]), "links": links, "login_enabled": user["password_hash"] is not None}

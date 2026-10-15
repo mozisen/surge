@@ -5,6 +5,7 @@ import sqlite3
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS user_sessions(token TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires REAL NOT NULL, user_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS attempts(ip TEXT PRIMARY KEY, count INTEGER NOT NULL, until REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS nodes(
  id TEXT PRIMARY KEY, name TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '',
@@ -46,6 +47,9 @@ class Store:
                                      ("deleted", "REAL"), ("maintenance", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in columns:
                     db.execute("ALTER TABLE nodes ADD COLUMN " + name + " " + definition)
+            # Platform users who may sign in to their own page (NULL: login off).
+            if "password_hash" not in {row[1] for row in db.execute("PRAGMA table_info(platform_users)")}:
+                db.execute("ALTER TABLE platform_users ADD COLUMN password_hash TEXT")
             db.execute("PRAGMA user_version=2")
         os.chmod(self.path, 0o600)
 

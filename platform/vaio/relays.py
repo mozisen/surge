@@ -291,7 +291,7 @@ def retry(db, line_id, now=None):
     _save(db, line_id, hops, now)
 
 
-def share(db, line_id, now=None):
+def share(db, line_id, now=None, key_prefix="relay-share:"):
     """Export the user's connection for the landing protocol, addressed to the first relay's entry."""
     now = time.time() if now is None else now
     line = db.execute("SELECT * FROM relay_lines WHERE id=?", (line_id,)).fetchone()
@@ -314,7 +314,7 @@ def share(db, line_id, now=None):
                              "params": {"name": user["name"], "host": host, "port": hops[0]["rule"]["listen_port"]}})
     task_id = str(uuid.uuid4())
     db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
-               (task_id, landing["id"], "share", json.dumps(request), "queued", now, "relay-share:" + task_id))
+               (task_id, landing["id"], "share", json.dumps(request), "queued", now, key_prefix + task_id))
     return task_id
 
 
