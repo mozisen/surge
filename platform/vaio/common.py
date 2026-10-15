@@ -102,8 +102,13 @@ def validate_task(data):
     if "reset_day" in params and (type(params["reset_day"]) is not int or not 0 <= params["reset_day"] <= 28):
         raise ValueError("月度重置日必须为 1–28，0 表示不自动重置")
     if params.get("expire_date"):
+        # The agent compares dates as strings, so only the exact YYYY-MM-DD form is valid (Python 3.11+
+        # fromisoformat also takes 20260101; [0-9] keeps out non-ASCII digits).
+        value = params["expire_date"]
         try:
-            datetime.date.fromisoformat(params["expire_date"])
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+                raise ValueError
+            datetime.date.fromisoformat(value)
         except (TypeError, ValueError):
             raise ValueError("到期日期格式应为 YYYY-MM-DD")
     if action == "share":

@@ -68,6 +68,14 @@ class ProtocolUsersAgent(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_task(data)
 
+    def test_expire_date_must_be_exact_iso_form(self):
+        # The agent compares expiry dates as strings: compact or non-ASCII forms would sort wrongly.
+        base = {"action": "user_update", "protocol": "vless", "core": "xray", "port": 443, "revision": "a" * 64}
+        self.assertEqual(validate_task({**base, "params": {"name": "alice", "expire_date": "2026-01-01"}})["params"]["expire_date"], "2026-01-01")
+        for bad in ("20260101", "2026-W01-1", "2026-02-30", "２０２６-01-01", "2026-01-01T00:00", 20260101):
+            with self.assertRaisesRegex(ValueError, "YYYY-MM-DD"):
+                validate_task({**base, "params": {"name": "alice", "expire_date": bad}})
+
     def test_platform_mode_installs_an_empty_instance(self):
         db = node_db(); db["meta"]["user_authority"] = "platform"
         atomic_write(self.cfg / "db.json", json.dumps(db))
