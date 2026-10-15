@@ -5,8 +5,10 @@
 - 仓库：https://github.com/mozisen/surge
 - 分支：`codex/platform-3.7.4`
 - 提交：与当前根目录脚本同一 Git 提交；使用下列摘要固定内容。
-- 版本：`3.7.4-preview.12`（导出连接支持中转入口端口）
-- SHA-256：`f3e8466b6cf1bffae24110643f57b4b5cbe9e980660d4a334e59605bfeb1af49`
+- 版本：`3.7.4-preview.13`（Sing-box 只安装与更新已编译的统计版预编译包）
+- SHA-256：`4e0fa1007a145dea1d3b782dfe8367754e701a3ebf5b8c0eec41770ec07ce9c7`
+
+3.7.4-preview.13：Sing-box 的全新安装、核心管理更新、指定版本与统计修复都只使用 `mozisen/surge` 分支 `singbox-stats-binaries` 中本机（架构 + libc）已发布的版本，不再安装官方版本；本机架构没有预编译包时才安装官方版本并提示无用户统计。上一固定版本为 3.7.4-preview.12，SHA-256 为 `f3e8466b6cf1bffae24110643f57b4b5cbe9e980660d4a334e59605bfeb1af49`。
 
 原快照未提供许可证，不对该文件另行声明许可证。
 

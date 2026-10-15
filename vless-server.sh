@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.12"
+readonly VERSION="3.7.4-preview.13"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -3337,16 +3337,15 @@ _singbox_stats_build_version() {
 }
 
 _singbox_stats_version_gate() {
-    local current latest releases
+    local current latest
     current=$(sing-box version | awk '/^sing-box version / {print $3; exit}')
-    releases=$(curl -fsSL --connect-timeout 15 --max-time 60 'https://api.github.com/repos/SagerNet/sing-box/releases?per_page=100') || {
-        _err "无法确认最新 1.14 稳定版，请检查网络后重试；未更换核心"; return 1;
-    }
-    latest=$(jq -er '[.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v1\\.14\\.[0-9]+$"))] | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last | select(. != null) | ltrimstr("v")' <<< "$releases") || {
-        _err "未找到官方 1.14 稳定版，未更换核心"; return 1;
-    }
-    [[ "$current" == "$latest" ]] && return 0
-    _warn "流量统计要求最新 1.14 稳定版 v${latest}，当前 v${current}。请先在核心版本管理中选择指定版本更新，再开启统计；不会自动升级或降级。"
+    _singbox_stats_has_version "$current" && return 0
+    latest=$(_get_singbox_stats_latest true) || true
+    if [[ -n "$latest" ]]; then
+        _warn "当前 v${current} 没有统计版预编译包（最新统计版 v${latest}）。请先在核心管理中更新 Sing-box（只安装已编译的统计版），再开启统计；不会自动升级或降级。"
+    else
+        _err "无法获取本机可用的 Sing-box 统计版预编译包，请检查网络后重试；未更换核心"
+    fi
     return 1
 }
 
@@ -3358,6 +3357,52 @@ _singbox_stats_libc() {
         *GLIBC*|*GNU\ libc*|*GNU\ C\ Library*) echo glibc ;;
         *) if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then echo glibc; else return 1; fi ;;
     esac
+}
+
+# Sing-box 只安装项目 CI 预编译的统计版（含用户流量统计），版本来自 singbox-stats-binaries 分支。
+readonly SINGBOX_STATS_REPO="mozisen/singbox-stats"
+readonly SINGBOX_STATS_TREE_URL="https://api.github.com/repos/mozisen/surge/git/trees/singbox-stats-binaries?recursive=1"
+
+# 本机（架构 + libc）有预编译统计包；不支持时返回 1
+_singbox_stats_platform() {
+    local arch libc
+    arch=$(_map_arch "amd64:arm64:unsupported" 2>/dev/null) || return 1
+    [[ "$arch" == amd64 || "$arch" == arm64 ]] || return 1
+    libc=$(_singbox_stats_libc) || return 1
+    printf 'linux-%s-%s\n' "$arch" "$libc"
+}
+
+# 本机可安装的统计版版本，新到旧（每行一个，不带 v）
+_singbox_stats_versions() {
+    local platform tree
+    platform=$(_singbox_stats_platform) || return 1
+    tree=$(curl -fsSL --connect-timeout 10 --max-time 30 "$SINGBOX_STATS_TREE_URL" 2>/dev/null) || return 1
+    jq -r --arg d "$platform" '.tree[]?.path | capture("^v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/" + $d + "/manifest\\.json$")? | .v' <<< "$tree" 2>/dev/null |
+        sort -t. -k1,1nr -k2,2nr -k3,3nr | uniq
+}
+
+# 最新统计版版本（带缓存；网络失败时使用旧缓存）
+_get_singbox_stats_latest() {
+    local use_cache="${1:-true}" force="${2:-false}" cache_file version
+    _init_version_cache
+    cache_file="$VERSION_CACHE_DIR/$(echo "$SINGBOX_STATS_REPO" | tr '/' '_')"
+    if [[ "$force" != true && "$use_cache" == true ]] && _is_cache_fresh "$cache_file"; then
+        cat "$cache_file" 2>/dev/null
+        return 0
+    fi
+    version=$(_singbox_stats_versions | head -n 1)
+    if [[ -n "$version" ]]; then
+        _save_version_cache "$SINGBOX_STATS_REPO" "$version"
+        echo "$version"
+        return 0
+    fi
+    _force_get_cached_version "$SINGBOX_STATS_REPO" 2>/dev/null
+}
+
+# 指定版本是否有本机可用的统计包
+_singbox_stats_has_version() {
+    local version="${1#v}"
+    [[ -n "$version" ]] && _singbox_stats_versions | grep -qx "$version"
 }
 
 _download_singbox_stats_core() {
@@ -3501,13 +3546,39 @@ _singbox_stats_enabled() {
 _update_singbox_preserving_stats() {
     local channel="${1:-stable}" target="${2:-}"
     if [[ -z "$target" ]]; then
-        [[ "$channel" == stable || -z "$channel" ]] || { _err "统计保留更新暂不接受预发布通道，请选择稳定版"; return 1; }
-        target=$(_get_latest_version SagerNet/sing-box true) || return 1
+        [[ "$channel" == stable || -z "$channel" ]] || { _err "Sing-box 只提供统计版稳定版本，请选择稳定版"; return 1; }
+        target=$(_get_singbox_stats_latest true) || true
+        [[ -n "$target" ]] || { _err "未找到本机可用的 Sing-box 统计版预编译包，原核心保留"; return 1; }
     fi
     target=$(_singbox_stats_build_version "$target") || { _err "目标不是稳定版本，未更新核心"; return 1; }
+    _singbox_stats_has_version "$target" || { _err "v$target 没有本机可用的统计版预编译包（只安装已编译的版本），原核心保留"; return 1; }
     _info "保留用户统计，先下载校验目标 v$target，再备份、替换、验证；无包或失败时保留/恢复原核心。"
     _build_singbox_stats_core "$target"
 }
+
+# 全新安装统计版 Sing-box（本机还没有核心时）；只装已编译的版本
+_install_singbox_stats_fresh() (
+    local version="${1:-}" arch work candidate=""
+    if [[ -z "$version" ]]; then
+        version=$(_get_singbox_stats_latest true) || true
+        [[ -n "$version" ]] || { _err "未找到本机可用的 Sing-box 统计版预编译包"; return 1; }
+    fi
+    version=$(_singbox_stats_build_version "$version") || { _err "目标不是稳定版本"; return 1; }
+    _singbox_stats_has_version "$version" || { _err "v$version 没有本机可用的统计版预编译包（只安装已编译的版本）"; return 1; }
+    arch=$(_map_arch "amd64:arm64:unsupported") || return 1
+    work=$(mktemp -d) || return 1
+    trap '[[ -z "$candidate" ]] || rm -f "$candidate"; rm -rf "$work"' EXIT
+    _info "安装 Sing-box v$version（统计版预编译包）..."
+    _download_singbox_stats_core "$version" "$arch" "$work" || return 1
+    "$work/bin/sing-box" version | grep -q with_v2ray_api || { _err "下载核心无法运行或未包含统计接口"; return 1; }
+    [[ "$("$work/bin/sing-box" version | awk '/^sing-box version / {print $3; exit}')" == "$version" ]] || { _err "预编译包版本与目标不一致"; return 1; }
+    mkdir -p /usr/local/bin || return 1
+    candidate=$(mktemp /usr/local/bin/.sing-box-install.XXXXXX) || return 1
+    install -m 755 "$work/bin/sing-box" "$candidate" && mv -f "$candidate" /usr/local/bin/sing-box || return 1
+    candidate=""
+    install_singbox_stats_client || _warn "统计依赖安装失败；协议可运行，但用户流量暂不可用"
+    _ok "Sing-box v$version（统计版）已安装"
+)
 
 # 确保 Sing-box 协议的默认用户落入 users[]，便于统计 / 限额 / 到期统一处理
 _ensure_singbox_default_users() {
@@ -10010,6 +10081,10 @@ _update_version_cache_async() {
         ) &
         return 0
     fi
+    if [[ "$repo" == "$SINGBOX_STATS_REPO" ]]; then
+        ( _get_singbox_stats_latest false true >/dev/null 2>&1 || true ) &
+        return 0
+    fi
     (
         local version
         local response http_code body
@@ -10036,7 +10111,7 @@ _update_prerelease_cache_async() {
     if _is_cache_fresh "$cache_file"; then
         return 0
     fi
-    if [[ "$repo" == "surge-networks/snell" ]]; then
+    if [[ "$repo" == "surge-networks/snell" || "$repo" == "$SINGBOX_STATS_REPO" ]]; then
         echo "无" > "$cache_file" 2>/dev/null || true
         rm -f "$unavailable_file" 2>/dev/null || true
         return 0
@@ -10065,6 +10140,11 @@ _update_all_versions_async() {
     local stable_cache="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')"
     local prerelease_cache="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')_prerelease"
     if _is_cache_fresh "$stable_cache" && _is_cache_fresh "$prerelease_cache"; then
+        return 0
+    fi
+    if [[ "$repo" == "$SINGBOX_STATS_REPO" ]]; then
+        echo "无" > "$prerelease_cache" 2>/dev/null || true
+        ( _get_singbox_stats_latest false true >/dev/null 2>&1 || true ) &
         return 0
     fi
     (
@@ -10096,6 +10176,10 @@ _get_latest_version() {
 
     if [[ "$repo" == "surge-networks/snell" ]]; then
         _get_snell_latest_version "$use_cache" "$force"
+        return $?
+    fi
+    if [[ "$repo" == "$SINGBOX_STATS_REPO" ]]; then
+        _get_singbox_stats_latest "$use_cache" "$force"
         return $?
     fi
 
@@ -10161,7 +10245,7 @@ _check_version_updates_async() {
         fi
 
         if [[ "$singbox_ver" != "未安装" ]] && [[ "$singbox_ver" != "未知" ]]; then
-            singbox_cached=$(_get_cached_version "SagerNet/sing-box" 2>/dev/null)
+            singbox_cached=$(_get_cached_version "$SINGBOX_STATS_REPO" 2>/dev/null)
             if [[ -n "$singbox_cached" ]] && [[ "$singbox_ver" != "$singbox_cached" ]]; then
                 has_update=true
                 echo "singbox:$singbox_cached" >> "$update_flag_file"
@@ -10178,7 +10262,7 @@ _check_version_updates_async() {
             _update_version_cache_async "XTLS/Xray-core"
         fi
         if [[ "$singbox_ver" != "未安装" ]] && [[ "$singbox_ver" != "未知" ]]; then
-            _update_version_cache_async "SagerNet/sing-box"
+            _update_version_cache_async "$SINGBOX_STATS_REPO"
         fi
     ) &
 }
@@ -10209,7 +10293,7 @@ _get_latest_prerelease_version() {
     # 初始化缓存目录
     _init_version_cache
 
-    if [[ "$repo" == "surge-networks/snell" ]]; then
+    if [[ "$repo" == "surge-networks/snell" || "$repo" == "$SINGBOX_STATS_REPO" ]]; then
         echo "无" > "$cache_file" 2>/dev/null || true
         echo "无"
         return 0
@@ -10334,6 +10418,17 @@ _get_release_versions() {
     local repo_safe cache_file
     repo_safe=$(echo "$repo" | tr '/' '_')
     cache_file="$VERSION_CACHE_DIR/${repo_safe}_releases_${mode}"
+    if [[ "$repo" == "$SINGBOX_STATS_REPO" ]]; then
+        local stats_versions
+        if [[ "$mode" == "prerelease" || "$mode" == "test" || "$mode" == "beta" ]]; then
+            _err "Sing-box 统计版无预发布版本"
+            return 1
+        fi
+        stats_versions=$(_singbox_stats_versions | head -n "$limit")
+        [[ -n "$stats_versions" ]] || { _err "未找到本机可用的 Sing-box 统计版预编译包"; return 1; }
+        echo "$stats_versions"
+        return 0
+    fi
     if [[ "$repo" == "surge-networks/snell" ]] && _is_cache_fresh "$cache_file"; then
         local cached_versions
         cached_versions=$(cat "$cache_file" 2>/dev/null)
@@ -10781,10 +10876,17 @@ install_singbox() {
     local channel="${1:-stable}"
     local force="${2:-false}"
     local version_override="${3:-}"
-    if [[ "$force" == true ]] && _singbox_stats_enabled; then
-        _update_singbox_preserving_stats "$channel" "$version_override"
+    # 只安装 / 更新项目 CI 预编译的统计版（含用户流量统计）；本机架构没有预编译包时才安装官方版本。
+    if _singbox_stats_platform >/dev/null; then
+        if check_cmd sing-box; then
+            [[ "$force" == true ]] || { _ok "Sing-box 已安装"; return 0; }
+            _update_singbox_preserving_stats "$channel" "$version_override"
+            return $?
+        fi
+        _install_singbox_stats_fresh "$version_override"
         return $?
     fi
+    _warn "本机架构没有 Sing-box 统计版预编译包，安装官方版本（不含用户流量统计）"
     local sarch=$(_map_arch "amd64:arm64:armv7") || { _err "不支持的架构"; return 1; }
     # Alpine 需要安装 gcompat 兼容层来运行 glibc 编译的二进制
     if [[ "$DISTRO" == "alpine" ]]; then
@@ -11182,8 +11284,8 @@ _update_core_to_version() {
     local core="$1" channel="$2" version="$3" service="$4" install_func="$5"
     _check_core_update_deps || return 1
     _confirm_core_update_version "$core" "$channel" "$version" || return 1
-    if [[ "$core" == Sing-box ]] && _singbox_stats_enabled; then
-        _update_singbox_preserving_stats "$channel" "$version"
+    if [[ "$core" == Sing-box ]]; then
+        install_singbox "${channel:-stable}" true "$version"
         return $?
     fi
 
@@ -11272,7 +11374,7 @@ _update_core_versions_async() {
 
         # 优先从缓存获取稳定版
         xray_latest=$(_get_cached_version "XTLS/Xray-core" 2>/dev/null)
-        singbox_latest=$(_get_cached_version "SagerNet/sing-box" 2>/dev/null)
+        singbox_latest=$(_get_cached_version "$SINGBOX_STATS_REPO" 2>/dev/null)
         snell_latest=$(_get_cached_version "surge-networks/snell" 2>/dev/null)
 
         # 写入版本信息
@@ -11287,6 +11389,7 @@ _update_core_versions_async() {
 
         # 后台异步更新稳定版缓存
         _update_version_cache_async "XTLS/Xray-core"
+        _update_version_cache_async "$SINGBOX_STATS_REPO"
         _update_version_cache_async "SagerNet/sing-box"
         _update_version_cache_async "surge-networks/snell"
 
@@ -11294,7 +11397,6 @@ _update_core_versions_async() {
         # 注意：这些函数内部已经有缓存机制，这里只是触发后台更新
         (
             _get_latest_prerelease_version "XTLS/Xray-core" "false" >/dev/null 2>&1
-            _get_latest_prerelease_version "SagerNet/sing-box" "false" >/dev/null 2>&1
             _get_latest_prerelease_version "surge-networks/snell" "false" >/dev/null 2>&1
             _refresh_snell_v6_version_cache >/dev/null 2>&1
         ) &
@@ -11305,8 +11407,8 @@ _refresh_core_versions_now() {
     _info "重新获取版本..."
     _get_latest_version "XTLS/Xray-core" "false" "true" >/dev/null 2>&1
     _get_latest_prerelease_version "XTLS/Xray-core" "false" "true" >/dev/null 2>&1
+    _get_latest_version "$SINGBOX_STATS_REPO" "false" "true" >/dev/null 2>&1
     _get_latest_version "SagerNet/sing-box" "false" "true" >/dev/null 2>&1
-    _get_latest_prerelease_version "SagerNet/sing-box" "false" "true" >/dev/null 2>&1
     _get_latest_version "surge-networks/snell" "false" "true" >/dev/null 2>&1
     _get_latest_prerelease_version "surge-networks/snell" "false" "true" >/dev/null 2>&1
     _refresh_snell_v6_version_cache >/dev/null 2>&1
@@ -11408,40 +11510,30 @@ _show_core_versions() {
         local singbox_current
         singbox_current=$(_get_core_version "sing-box")
         
-        local singbox_latest singbox_prerelease
-        singbox_latest=$(_get_cached_version_with_fallback "SagerNet/sing-box")
+        local singbox_latest singbox_official
+        singbox_latest=$(_get_cached_version_with_fallback "$SINGBOX_STATS_REPO")
         [[ -z "$singbox_latest" ]] && singbox_latest="获取中..."
-        
-        singbox_prerelease=$(_get_cached_prerelease_with_fallback "SagerNet/sing-box")
-        [[ -z "$singbox_prerelease" ]] && singbox_prerelease="获取中..."
-
-        local singbox_unavailable="$VERSION_CACHE_DIR/SagerNet_sing-box_unavailable"
-        if [[ -f "$singbox_unavailable" ]]; then
-            [[ "$singbox_latest" == "获取中..." ]] && singbox_latest="不可获取"
-            [[ "$singbox_prerelease" == "获取中..." ]] && singbox_prerelease="不可获取"
-        fi
-        
-        local singbox_prerelease_hint
-        singbox_prerelease_hint=$(_prerelease_hint "$singbox_prerelease" "$singbox_latest")
+        singbox_official=$(_get_cached_version_with_fallback "SagerNet/sing-box")
+        [[ -z "$singbox_official" ]] && singbox_official="获取中..."
         
         echo -e "  ${W}Sing-box${NC}"
         if [[ "$singbox_current" == "未安装" ]]; then
             echo -e "    ${W}当前版本:${NC} ${D}${singbox_current}${NC}"
         else
-            local singbox_status=$(_get_version_status "$singbox_current" "$singbox_latest" "$singbox_prerelease")
+            local singbox_status=$(_get_version_status "$singbox_current" "$singbox_latest" "无")
             echo -e "    ${W}当前版本:${NC} ${G}v${singbox_current}${NC}${singbox_status}"
         fi
         
         if ! _is_version_unknown "$singbox_latest"; then
-            echo -e "    ${NC}${W}稳定版本:${NC} ${C}v${singbox_latest}${NC}"
+            echo -e "    ${NC}${W}统计版本:${NC} ${C}v${singbox_latest}${NC}"
         else
-            echo -e "    ${NC}${W}稳定版本:${NC} ${D}${singbox_latest}${NC}"
+            echo -e "    ${NC}${W}统计版本:${NC} ${D}${singbox_latest}${NC}"
         fi
         
-        if ! _is_version_unknown "$singbox_prerelease"; then
-            echo -e "    ${W}预发布版本:${NC} ${M}v${singbox_prerelease}${NC}${D}${singbox_prerelease_hint}${NC}"
+        if ! _is_version_unknown "$singbox_official"; then
+            echo -e "    ${W}官方版本:${NC} ${D}v${singbox_official}（仅供参考，只安装已编译的统计版）${NC}"
         else
-            echo -e "    ${W}预发布版本:${NC} ${D}${singbox_prerelease}${NC}"
+            echo -e "    ${W}官方版本:${NC} ${D}${singbox_official}${NC}"
         fi
 
         # 如果还要显示 Snell v5，添加空行分隔
@@ -11528,8 +11620,8 @@ _show_core_versions() {
     fi
     
     if [[ "$filter" == "all" ]] || [[ "$filter" == "singbox" ]]; then
+        _update_version_cache_async "$SINGBOX_STATS_REPO"
         _update_version_cache_async "SagerNet/sing-box"
-        _update_prerelease_cache_async "SagerNet/sing-box"
     fi
 
     if [[ "$filter" == "all" ]] || [[ "$filter" == "snellv5" ]]; then
@@ -11596,56 +11688,8 @@ update_singbox_core() {
     local channel="${1:-stable}"
     _check_core_update_deps || return 1
     _confirm_core_update "Sing-box" "$channel" || return 1
-    if _singbox_stats_enabled; then
-        _update_singbox_preserving_stats "$channel"
-        return $?
-    fi
-
-    local is_new_install=false
-    if ! check_cmd sing-box; then
-        _warn "未检测到 Sing-box，将执行安装"
-        is_new_install=true
-    fi
-
-    local need_restart=false service_running=false
-    if svc status vless-singbox 2>/dev/null; then
-        service_running=true
-        need_restart=true
-        _info "停止 vless-singbox 服务..."
-        if ! svc stop vless-singbox 2>/dev/null; then
-            _warn "停止服务失败，继续更新"
-        fi
-    fi
-
-    if install_singbox "$channel" "true"; then
-        _ok "Sing-box 内核已更新"
-        local new_version
-        new_version=$(sing-box version 2>/dev/null | awk '{print $3}')
-        if [[ -n "$new_version" && "$is_new_install" != "true" ]]; then
-            _show_changelog_summary "SagerNet/sing-box" "$new_version" 10
-        fi
-        if [[ "$need_restart" == "true" ]]; then
-            _info "重新启动 vless-singbox 服务..."
-            if svc start vless-singbox 2>/dev/null; then
-                _ok "服务已启动"
-            else
-                _err "服务启动失败，请手动检查配置: svc start vless-singbox"
-                return 1
-            fi
-        fi
-        return 0
-    fi
-
-    _err "Sing-box 内核更新失败"
-    if [[ "$service_running" == "true" ]]; then
-        _warn "尝试恢复服务..."
-        if svc start vless-singbox 2>/dev/null; then
-            _ok "服务已恢复"
-        else
-            _err "服务恢复失败，请手动检查: svc start vless-singbox"
-        fi
-    fi
-    return 1
+    # 只更新到已编译的统计版；安装或更新均由 install_singbox 选择统计版预编译包。
+    install_singbox "$channel" true
 }
 
 update_snell_v5_core() {
@@ -11782,9 +11826,43 @@ update_xray_core_custom() {
     _update_core_to_version "Xray" "" "$version" "vless-reality" "install_xray"
 }
 
+# 核心管理中的 Sing-box：只提供已编译的统计版（官方版本仅作参考）
+_update_singbox_stats_menu() {
+    _check_core_update_deps || return 1
+    local current latest official choice
+    current=$(_get_core_version "sing-box")
+    latest=$(_get_singbox_stats_latest true) || true
+    official=$(_get_cached_version_with_fallback "SagerNet/sing-box")
+    _update_version_cache_async "SagerNet/sing-box"
+    _header
+    echo -e "  ${W}Sing-box 版本选择（统计版预编译包）${NC}"
+    _line
+    echo -e "  ${W}当前版本:${NC} ${G}${current}${NC}"
+    if [[ -n "$latest" ]]; then
+        echo -e "  ${W}最新统计版:${NC} ${G}v${latest}${NC}"
+    else
+        echo -e "  ${W}最新统计版:${NC} ${D}不可获取${NC}"
+    fi
+    if [[ -n "$official" && -n "$latest" && "$official" != "$latest" ]]; then
+        echo -e "  ${D}官方最新 v${official}；统计版尚未发布时不会更新到官方版本${NC}"
+    fi
+    echo ""
+    _item "1" "更新到最新统计版${latest:+ (v${latest})}"
+    _item "2" "指定统计版版本"
+    _item "0" "返回"
+    _line
+    read -rp "  请选择: " choice
+    case "$choice" in
+        1) [[ -n "$latest" ]] || { _err "未找到本机可用的 Sing-box 统计版预编译包"; return 1; }
+           _update_core_to_version "Sing-box" "stable" "$latest" "vless-singbox" "install_singbox" ;;
+        2) update_singbox_core_custom ;;
+        *) _SKIP_PAUSE_ONCE=1; return 0 ;;
+    esac
+}
+
 update_singbox_core_custom() {
     _header
-    echo -e "  ${W}Sing-box 安装指定版本${NC}"
+    echo -e "  ${W}Sing-box 安装指定版本（统计版预编译包）${NC}"
     _line
     _show_core_versions "singbox"
     _line
@@ -11794,7 +11872,7 @@ update_singbox_core_custom() {
     fi
 
     local version
-    version=$(_select_version_from_list "SagerNet/sing-box" "all" "Sing-box" 10)
+    version=$(_select_version_from_list "$SINGBOX_STATS_REPO" "stable" "Sing-box" 10)
     local select_rc=$?
     if [[ $select_rc -ne 0 ]]; then
         [[ $select_rc -eq 2 ]] && { _SKIP_PAUSE_ONCE=1; return 0; }
@@ -12148,7 +12226,7 @@ update_core_menu() {
         read -rp "  请选择: " choice
         case "$choice" in
             1) _update_core_with_channel_select "Xray" "XTLS/Xray-core" "xray" "vless-reality" "install_xray" ;;
-            2) _update_core_with_channel_select "Sing-box" "SagerNet/sing-box" "sing-box" "vless-singbox" "install_singbox" ;;
+            2) _update_singbox_stats_menu ;;
             3) _update_core_with_channel_select "Snell v5" "surge-networks/snell" "snell-server-v5" "vless-snell-v5" "install_snell_v5" ;;
             4) _update_core_with_channel_select "Snell v6" "$SNELL_V6_REPO" "snell-server-v6" "vless-snell-v6" "install_snell_v6" ;;
             5) _refresh_core_versions_now ;;
@@ -32317,7 +32395,7 @@ main_menu() {
     # 启动时立即异步获取最新版本（后台执行，不阻塞主界面）
     # 使用统一函数，一次请求同时获取稳定版和测试版（减少API请求次数）
     _update_all_versions_async "XTLS/Xray-core"
-    _update_all_versions_async "SagerNet/sing-box"
+    _update_all_versions_async "$SINGBOX_STATS_REPO"
     _check_script_update_async
 
     # 自动同步隧道配置
@@ -32346,7 +32424,7 @@ main_menu() {
         # 获取核心版本及状态（使用公共方法）
         local xray_ver_with_status singbox_ver_with_status
         xray_ver_with_status=$(_get_core_version_with_status "xray" "XTLS/Xray-core")
-        singbox_ver_with_status=$(_get_core_version_with_status "sing-box" "SagerNet/sing-box")
+        singbox_ver_with_status=$(_get_core_version_with_status "sing-box" "$SINGBOX_STATS_REPO")
         local script_update_ver=""
         if _has_script_update; then
             script_update_ver=$(_get_script_update_info)
