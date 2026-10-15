@@ -13,9 +13,12 @@ def cycle_key(day, today=None):
 
 def traffic_state(db, core, proto, row, now=None):
     now = time.time() if now is None else now
-    if proto.startswith('snell') or (core == 'singbox' and proto in ('ss-legacy', 'ss2022') and len(row.get('users', [])) == 1):
+    from .inventory import ss_user_stats
+    ss = core == 'singbox' and proto in ('ss-legacy', 'ss2022')
+    if proto.startswith('snell') or (ss and not ss_user_stats(proto, row)):
+        # One password on the inbound: counted per inbound into its single user.
         at = (row.get('users') or [{}])[0].get('traffic_observed_at', 0)
-    elif (core == 'xray' and proto in ('vless', 'trojan')) or (core == 'singbox' and proto in ('vless', 'trojan', 'hy2', 'anytls', 'tuic')):
+    elif (core == 'xray' and proto in ('vless', 'trojan')) or (core == 'singbox' and proto in ('vless', 'trojan', 'hy2', 'anytls', 'tuic')) or ss:
         at = db.get('meta', {}).get('traffic_observed_' + core, 0)
     else:
         return 'unsupported'

@@ -18,7 +18,7 @@ from vaio.install_options import SS_METHODS
 from vaio.common import MUTATIONS, PROTOCOLS, config_revision, validate_core_task, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task
 from .addresses import discover
 from .config_details import config_details
-from .inventory import mutable, read_db, rows, service_for, users_for
+from .inventory import mutable, read_db, rows, service_for, ss_server_key, ss_user_stats, users_for
 from .runtime import Runtime, active_users, atomic_write
 from .billing import advance, configure, traffic_state
 
@@ -315,8 +315,6 @@ class Bridge:
             if action.startswith("user_") and proto.startswith("snell") and action != "user_update":
                 raise ValueError("Snell 一用户一端口，请通过新增或卸载协议实例管理")
             original = copy.deepcopy(db)
-            if proto in SS_METHODS and action in ("user_add", "user_delete"):
-                raise ValueError("SS 系列采用一用户一端口，请新增或卸载实例；现有用户可编辑")
             params = task["params"]
             after = copy.deepcopy(before)
             if action == "install":
@@ -378,7 +376,14 @@ class Bridge:
                     # Upstream traffic identities are protocol-wide, not per-port.
                     if any(u.get("name") == params["name"] for c, p, row in rows(db) if c == core and p == proto for u in users_for(row)):
                         raise ValueError("同协议用户名已存在")
-                    user = {"name": params["name"], "uuid": str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16), "enabled": True, "used": 0}
+                    credential = str(uuid.uuid4()) if proto == "vless" else secrets.token_hex(16)
+                    if proto == "ss2022":
+                        credential = base64.b64encode(secrets.token_bytes(16 if "128" in after.get("method", before.get("method", "")) else 32)).decode()
+                        if not after.get("password") and users:
+                            # Panel-installed SS2022 keeps the instance key as its first user's key; keep it as the
+                            # server key so existing users stay valid once the instance becomes multi-user.
+                            after["password"] = users[0]["uuid"]
+                    user = {"name": params["name"], "uuid": credential, "enabled": True, "used": 0}
                     users.append(user)
                 else:
                     if len(found) != 1:
@@ -481,6 +486,9 @@ class Bridge:
         host = "[" + host + "]" if ":" in host else host
         address = host + ":" + str(row["port"])
         if proto in SS_METHODS:
+            if proto == "ss2022" and ss_user_stats(proto, row):
+                # Multi-user SS2022: the client password is server key:user key.
+                credential = ss_server_key(row) + ":" + credential
             auth = quote(row["method"] + ":" + credential, safe="") if proto == "ss2022" else base64.urlsafe_b64encode((row["method"] + ":" + credential).encode()).decode().rstrip("=")
             return "ss://" + auth + "@" + address + "#" + quote(params["name"])
         if proto == "vless":

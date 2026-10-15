@@ -54,9 +54,27 @@ def service_status(name):
         return "unknown"
 
 
+def ss_server_key(row):
+    """SS2022 instance key; instances installed by the panel keep it as their first user's key."""
+    users = row.get("users") if isinstance(row.get("users"), list) else []
+    return row.get("password") or (users[0].get("uuid") if users else "") or ""
+
+
+def ss_user_stats(proto, row):
+    """True when the shared renderer gives this SS / SS2022 instance named users (counted per user);
+    otherwise it is one password on the inbound (counted per inbound). Mirrors _platform_render_inbound."""
+    users = row.get("users") if isinstance(row.get("users"), list) else []
+    if proto == "ss-legacy":
+        return len(users) > 1
+    if proto == "ss2022":
+        key = ss_server_key(row)
+        return bool(key) and (len(users) != 1 or users[0].get("uuid") != key)
+    return False
+
+
 def mutable(core, proto, row):
-    if proto in ("ss-legacy", "ss2022") and (not row.get("panel_managed") or len(row.get("users", [])) != 1):
-        return False
+    # SS / SS2022 with any number of users: the shared renderer writes single and multi-user inbounds;
+    # runtime still refuses inbounds that are not plain managed shadowsocks (relays, other types).
     if proto not in PROTOCOLS or core not in PROTOCOL_CORES[proto]:
         return False
     if proto == "vless" and row.get("security_mode", "reality") != "reality":
