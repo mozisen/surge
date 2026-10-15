@@ -2951,3 +2951,16 @@ td .action-row {
     justify-content: flex-end;
     margin-bottom: 4px;
 }
+
+/* Core versions in the server detail: name and version left, state and action right. */
+.core-row > span:last-child {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.core-version {
+    font-family: var(--mono);
+    font-size: 12px;
+    white-space: nowrap;
+}

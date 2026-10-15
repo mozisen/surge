@@ -80,7 +80,14 @@ const actions = {
     platform_apply: '平台用户同步',
     agent_upgrade: '一键升级',
     forward_apply: '端口转发',
-    agent_set_url: '切换面板地址'
+    agent_set_url: '切换面板地址',
+    core_update: '更新内核'
+};
+const coreLabels = {xray: 'Xray', singbox: 'Sing-box', 'snell-v5': 'Snell v5', 'snell-v6': 'Snell v6'};
+// 内核更新任务的一行摘要：内核名 + 版本变化
+const coreSummary = t => {
+    const c = t.result?.core;
+    return (coreLabels[t.request.params?.core] || '') + (c ? ' ' + (c.changed ? c.from + ' → ' + c.to : c.to) : '');
 };
 // 端口转发任务的一行摘要：操作 + 监听端口
 const forwardSummary = t => {
@@ -256,11 +263,11 @@ function nodeCards() {
 }
 
 function taskTable(list) {
-    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
+    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='core_update'?esc(coreSummary(t)):t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
 }
 
 function overview(section) {
-    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器'}</h1></div><div class="action-row"><button data-action="upgrade-all"${nodes.some(n=>n.adopted&&n.upgrade_available)?'':' disabled title="所有节点程序已是最新"'}>一键更新节点程序</button><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="trash">回收站</button>${filterMenu('group-filter', '筛选分组', [['', '全部分组'], ...[...new Set(nodes.map(n=>n.group_name).filter(Boolean))].map(g=>[g, g])], groupFilter)}<div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>中转线路 <span class="count" id="overview-relay-count">${relayData.length}</span></h2><a href="#relays">管理中转 →</a></div><div class="panel" id="overview-relays">${relayTable(relayData)}</div>`:''}`, section);
+    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器'}</h1></div><div class="action-row"><button data-action="core-update-all">一键更新内核</button><button data-action="upgrade-all"${nodes.some(n=>n.adopted&&n.upgrade_available)?'':' disabled title="所有节点程序已是最新"'}>一键更新节点程序</button><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="trash">回收站</button>${filterMenu('group-filter', '筛选分组', [['', '全部分组'], ...[...new Set(nodes.map(n=>n.group_name).filter(Boolean))].map(g=>[g, g])], groupFilter)}<div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>中转线路 <span class="count" id="overview-relay-count">${relayData.length}</span></h2><a href="#relays">管理中转 →</a></div><div class="panel" id="overview-relays">${relayTable(relayData)}</div>`:''}`, section);
     if (section === 'overview') loadOverviewRelays().catch(() => {});
     $('#group-filter').onchange = e => { groupFilter = e.target.value; $('#node-results').innerHTML = nodeCards(); };
     $('#search').addEventListener('input', e => {
@@ -318,7 +325,7 @@ function detail(node) {
     selected = node;
     const s = node.snapshot,
         m = s.metrics || {};
-    shell(`<div class="heading"><div><a class="back-link" href="#nodes">返回服务器</a><h1>${esc(node.name)} ${badge(node.status)}</h1><div class="detail-info"><span>${esc(node.group_name)}</span><span>${esc(s.hostname||'等待连接')}</span><span>${esc(s.arch||'—')}</span><span>节点程序 ${esc(s.agent_version||'—')}</span></div></div><div class="action-row">${node.upgrade_available?`<button data-action="upgrade-agent" title="节点程序 ${esc(s.agent_version)}，当前面板 ${esc(node.panel_version)}">${s.upgrade_version===1&&node.status==='online'?'一键升级':'升级节点'}</button>`:''}<button data-action="history">历史曲线</button><button data-action="node-settings">节点设置</button><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div></div>${node.maintenance || node.status!=='online' || s.error?`<div class="notice warn">${esc(node.connection_hint)}</div>`:''}${node.notes?`<div class="notice node-notes">${esc(node.notes)}</div>`:''}${authorityNotice(node)}${!node.adopted?`<div class="notice"><div><strong>${node.status==='pending'?'等待节点连接':'配置已识别，尚未接管'}</strong><br>${node.status==='pending'?'在服务器运行安装脚本，节点将自动上线。':'请检查下面的协议与端口。接管后面板可以修改节点配置。'}</div><button data-action="${node.status==='pending'?'renew':'adopt'}" ${node.status==='offline'?'disabled':''}>${node.status==='pending'?'重新生成脚本':'确认接管'}</button></div>`:''}<div class="stats">${stat('系统负载',m.load??'—',`${m.cpu_count||'—'} 个逻辑核心`)}${stat('内存使用',m.memory_total?(m.memory_used/m.memory_total*100).toFixed(0):'—',bytes(m.memory_used)+' / '+bytes(m.memory_total),m.memory_total?'%':'')}${stat('磁盘使用',m.disk_total?(m.disk_used/m.disk_total*100).toFixed(0):'—',bytes(m.disk_used)+' / '+bytes(m.disk_total),m.disk_total?'%':'')}${stat('协议实例',(s.instances||[]).length,'配置以节点实际状态为准')}</div><div class="tabs"><button data-action="tab" data-tab="protocols" class="${detailTab==='protocols'?'active':''}">协议管理</button><button data-action="tab" data-tab="tasks" class="${detailTab==='tasks'?'active':''}">执行记录</button></div><div class="split"><section><div class="panel"><div class="panel-head"><h2>${detailTab==='protocols'?'已安装协议':'节点任务'} <span class="count">${detailTab==='protocols'?(s.instances||[]).length:tasks.filter(t=>t.node_id===node.id).length}</span></h2><button class="quiet small" data-action="refresh">${icon('refresh')}刷新</button></div>${detailTab==='protocols'?protocolTable(node):taskTable(tasks.filter(t=>t.node_id===node.id))}</div></section><aside class="detail-aside">${authorityBlock(node)}<section class="info-block"><h3>节点信息</h3>${s.script_api?`<div class="kv"><span>脚本接口</span><span>${s.script_api.status==='ready'?'只读预览':'暂不可用'}</span></div><p class="helper">${s.script_api.status==='ready'?`${esc(s.script_api.version)} · ${Number(s.script_api.protocol_count)||0} 种协议与内核组合。新增协议写接口尚未开放。`:'接口检查失败，请查看节点依赖及脚本校验。'}现有管理功能使用已验收的独立适配器。</p>`:''}<div class="kv"><span>系统</span><span>${esc(s.os||'—')}</span></div><div class="kv"><span>运行时间</span><span>${m.uptime?Math.floor(m.uptime/86400)+' 天':'—'}</span></div><div class="kv"><span>网卡累计接收</span><span>${bytes(m.network_rx)}</span></div><div class="kv"><span>网卡累计发送</span><span>${bytes(m.network_tx)}</span></div><div class="kv"><span>最后心跳</span><span>${date(node.last_seen)}</span></div><div class="kv"><span>流量同步</span><span>${esc(({ok:'正常',unavailable:'暂不可用',stale:'等待同步',error:'同步异常',unknown:'未知',no_core:'未找到内核',no_stats:'暂无统计',snell_error:'Snell 同步失败',singbox_error:'Sing-box 同步失败',partial_singbox_error:'部分统计失败',temp_error:'临时文件错误'})[s.traffic_status]||'暂不可用')}</span></div></section><section class="info-block"><h3>${icon('shield')} 操作说明</h3><p>共享核心的配置修改会重启对应核心，可能短暂影响同服务的其他协议。</p><p>不支持写入的协议仅展示状态。配置备份保留在节点本地。</p></section></aside></div>`, 'nodes');
+    shell(`<div class="heading"><div><a class="back-link" href="#nodes">返回服务器</a><h1>${esc(node.name)} ${badge(node.status)}</h1><div class="detail-info"><span>${esc(node.group_name)}</span><span>${esc(s.hostname||'等待连接')}</span><span>${esc(s.arch||'—')}</span><span>节点程序 ${esc(s.agent_version||'—')}</span></div></div><div class="action-row">${node.upgrade_available?`<button data-action="upgrade-agent" title="节点程序 ${esc(s.agent_version)}，当前面板 ${esc(node.panel_version)}">${s.upgrade_version===1&&node.status==='online'?'一键升级':'升级节点'}</button>`:''}<button data-action="history">历史曲线</button><button data-action="node-settings">节点设置</button><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div></div>${node.maintenance || node.status!=='online' || s.error?`<div class="notice warn">${esc(node.connection_hint)}</div>`:''}${node.notes?`<div class="notice node-notes">${esc(node.notes)}</div>`:''}${authorityNotice(node)}${!node.adopted?`<div class="notice"><div><strong>${node.status==='pending'?'等待节点连接':'配置已识别，尚未接管'}</strong><br>${node.status==='pending'?'在服务器运行安装脚本，节点将自动上线。':'请检查下面的协议与端口。接管后面板可以修改节点配置。'}</div><button data-action="${node.status==='pending'?'renew':'adopt'}" ${node.status==='offline'?'disabled':''}>${node.status==='pending'?'重新生成脚本':'确认接管'}</button></div>`:''}<div class="stats">${stat('系统负载',m.load??'—',`${m.cpu_count||'—'} 个逻辑核心`)}${stat('内存使用',m.memory_total?(m.memory_used/m.memory_total*100).toFixed(0):'—',bytes(m.memory_used)+' / '+bytes(m.memory_total),m.memory_total?'%':'')}${stat('磁盘使用',m.disk_total?(m.disk_used/m.disk_total*100).toFixed(0):'—',bytes(m.disk_used)+' / '+bytes(m.disk_total),m.disk_total?'%':'')}${stat('协议实例',(s.instances||[]).length,'配置以节点实际状态为准')}</div><div class="tabs"><button data-action="tab" data-tab="protocols" class="${detailTab==='protocols'?'active':''}">协议管理</button><button data-action="tab" data-tab="tasks" class="${detailTab==='tasks'?'active':''}">执行记录</button></div><div class="split"><section><div class="panel"><div class="panel-head"><h2>${detailTab==='protocols'?'已安装协议':'节点任务'} <span class="count">${detailTab==='protocols'?(s.instances||[]).length:tasks.filter(t=>t.node_id===node.id).length}</span></h2><button class="quiet small" data-action="refresh">${icon('refresh')}刷新</button></div>${detailTab==='protocols'?protocolTable(node):taskTable(tasks.filter(t=>t.node_id===node.id))}</div></section><aside class="detail-aside">${authorityBlock(node)}${coreBlock(node)}<section class="info-block"><h3>节点信息</h3>${s.script_api?`<div class="kv"><span>脚本接口</span><span>${s.script_api.status==='ready'?'只读预览':'暂不可用'}</span></div><p class="helper">${s.script_api.status==='ready'?`${esc(s.script_api.version)} · ${Number(s.script_api.protocol_count)||0} 种协议与内核组合。新增协议写接口尚未开放。`:'接口检查失败，请查看节点依赖及脚本校验。'}现有管理功能使用已验收的独立适配器。</p>`:''}<div class="kv"><span>系统</span><span>${esc(s.os||'—')}</span></div><div class="kv"><span>运行时间</span><span>${m.uptime?Math.floor(m.uptime/86400)+' 天':'—'}</span></div><div class="kv"><span>网卡累计接收</span><span>${bytes(m.network_rx)}</span></div><div class="kv"><span>网卡累计发送</span><span>${bytes(m.network_tx)}</span></div><div class="kv"><span>最后心跳</span><span>${date(node.last_seen)}</span></div><div class="kv"><span>流量同步</span><span>${esc(({ok:'正常',unavailable:'暂不可用',stale:'等待同步',error:'同步异常',unknown:'未知',no_core:'未找到内核',no_stats:'暂无统计',snell_error:'Snell 同步失败',singbox_error:'Sing-box 同步失败',partial_singbox_error:'部分统计失败',temp_error:'临时文件错误'})[s.traffic_status]||'暂不可用')}</span></div></section><section class="info-block"><h3>${icon('shield')} 操作说明</h3><p>共享核心的配置修改会重启对应核心，可能短暂影响同服务的其他协议。</p><p>不支持写入的协议仅展示状态。配置备份保留在节点本地。</p></section></aside></div>`, 'nodes');
 }
 async function render() {
     const route = location.hash.slice(1) || 'overview';
@@ -486,7 +493,7 @@ function showTask(id) {
         return;
     }
     const r = t.result || {};
-    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
+    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='core_update'?esc(coreSummary(t)):t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
 }
 
 function installPortCandidate(instances, current) {
@@ -814,6 +821,7 @@ document.addEventListener('click', async e => {
         else if (action === 'panel-update') await panelUpdateDialog(true);
         else if (action === 'panel-update-start') await panelUpdateStart(b);
         else if (action === 'upgrade-all') upgradeAllDialog();
+        else if (action.startsWith('core-')) await coreAction(action, b);
         else if (action === 'upgrade-all-confirm') await upgradeAllStart(b);
         else if (action === 'add-node') addNode();
         else if (action === 'task') showTask(b.dataset.id);
@@ -1476,6 +1484,77 @@ async function upgradeAllStart(b) {
     const skipped = r.skipped.length ? `<h3>已跳过</h3>${r.skipped.map(x => `<div class="kv"><span>${esc(x.name)}</span><span>${esc(x.reason)}</span></div>`).join('')}` : '';
     modal('一键更新节点程序', `${queued}${skipped}<div class="modal-foot"><button type="button" data-action="close" onclick="location.hash='tasks'">查看任务</button><button type="button" class="primary" data-action="close">完成</button></div>`);
     await refresh();
+}
+
+// ---------------------------------------------------------------- 内核（Xray / Sing-box / Snell）版本与一键更新
+const vkey = v => (v || '').split('.').map(Number);
+const newer = (a, b) => { const x = vkey(a), y = vkey(b); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
+// Updatable: a newer latest version, or Sing-box without per-user statistics (the statistics build replaces it).
+function coreUpdatable(core, item) {
+    return !!item?.latest && (newer(item.latest, item.current) || (core === 'singbox' && !item.stats));
+}
+// "current → latest", "1.14.2 → 统计版" (same version, statistics build), or "current · 已是最新".
+function coreVersionText(core, item) {
+    if (!item.latest) return `${esc(item.current)} · 最新版本获取中`;
+    if (!coreUpdatable(core, item)) return `${esc(item.current)} · 已是最新`;
+    return `${esc(item.current)} → ${item.latest === item.current ? '统计版' : esc(item.latest)}`;
+}
+function coreBlock(node) {
+    const s = node.snapshot;
+    if (!node.adopted) return '';
+    if (s.core_update_version !== 1) return '<section class="info-block"><h3>内核</h3><p class="helper">节点程序更新到 1.4.0 及以上后，可在这里查看并更新 Xray、Sing-box 与 Snell 内核。</p></section>';
+    const cores = s.cores || {};
+    const rows = Object.keys(coreLabels).filter(c => cores[c]).map(c => {
+        const item = cores[c], can = coreUpdatable(c, item);
+        const state = `<span class="core-version${can ? '' : ' muted'}">${coreVersionText(c, item)}</span>`;
+        const notes = [];
+        if (c === 'singbox' && !item.stats) notes.push('当前核心不带用户统计，更新后恢复统计');
+        if (c === 'singbox' && item.official && newer(item.official, item.latest || item.current)) notes.push(`官方已有 ${esc(item.official)}，统计版待发布`);
+        return `<div class="kv core-row"><span>${coreLabels[c]}</span><span>${state}${can ? ` <button class="small" data-action="core-update" data-core="${c}"${node.status === 'online' && !node.maintenance ? '' : ' disabled'}>更新</button>` : ''}</span></div>${notes.map(n => `<p class="helper">${n}</p>`).join('')}`;
+    }).join('');
+    return `<section class="info-block"><h3>内核</h3>${rows || '<p class="helper">未安装 Xray、Sing-box 或 Snell 内核。</p>'}</section>`;
+}
+function coreUpdatableNodes(core) {
+    return nodes.filter(n => n.adopted && !n.deleted && n.snapshot.core_update_version === 1 && coreUpdatable(core, (n.snapshot.cores || {})[core]));
+}
+function coreAllDialog() {
+    const options = Object.entries(coreLabels).map(([c, label]) => [c, label, coreUpdatableNodes(c).length]);
+    modal('一键更新内核', `<form id="core-all-form"><label for="core-all-core">内核</label><select id="core-all-core">${options.map(([c, label, n]) => `<option value="${c}">${label}（${n} 台可更新）</option>`).join('')}</select><div id="core-all-list" class="upgrade-list"></div><p class="helper">逐台排队：先同步用户流量，再备份并更新内核、重启使用它的服务，失败自动恢复旧版本。更新时该内核上的协议会短暂中断。Sing-box 更新为带用户统计的预编译版本。离线、维护中、有未完成任务或节点程序过旧的服务器会跳过。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">开始更新</button></div></form>`);
+    const show = () => {
+        const core = $('#core-all-core').value, list = coreUpdatableNodes(core);
+        $('#core-all-list').innerHTML = list.map(n => `<div class="kv"><span>${esc(n.name)}</span><span class="core-version">${coreVersionText(core, n.snapshot.cores[core])}</span></div>`).join('') || '<p class="muted">没有可更新的服务器。</p>';
+    };
+    $('#core-all-core').onchange = show; show();
+    $('#core-all-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target); button.disabled = true;
+        const core = $('#core-all-core').value;
+        try {
+            const r = await post('/nodes/core-update-all', {core});
+            const queued = r.queued.length ? `<p>已为 ${r.queued.length} 台服务器排队更新 ${coreLabels[core]}：${r.queued.map(esc).join('、')}。进度见任务记录。</p>` : '<p>没有服务器可以立即更新。</p>';
+            const skipped = r.skipped.length ? `<h3>已跳过</h3>${r.skipped.map(x => `<div class="kv"><span>${esc(x.name)}</span><span>${esc(x.reason)}</span></div>`).join('')}` : '';
+            modal('一键更新内核', `${queued}${skipped}<div class="modal-foot"><button type="button" data-action="close" onclick="location.hash='tasks'">查看任务</button><button type="button" class="primary" data-action="close">完成</button></div>`);
+            await refresh();
+        } catch (err) { formError(err); button.disabled = false; }
+    };
+}
+async function coreAction(action, b) {
+    if (action === 'core-update-all') return coreAllDialog();
+    if (action !== 'core-update') return;
+    const core = b.dataset.core, item = selected?.snapshot.cores?.[core];
+    if (!selected || !item) throw new Error('内核信息不存在，请刷新后重试');
+    const node = selected;
+    modal('更新 ' + coreLabels[core] + ' 内核', `<form id="core-form"><p>将 ${esc(node.name)} 的 ${coreLabels[core]} 从 <span class="mono">${esc(item.current)}</span> 更新到 <span class="mono">${esc(item.latest)}</span>${core === 'singbox' ? '（带用户统计的预编译版本）' : ''}。</p><p class="helper">先同步用户流量，再备份并更新内核；更新时使用该内核的协议会短暂中断，失败自动恢复旧版本。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button type="submit" class="primary">开始更新</button></div></form>`);
+    $('#core-form').onsubmit = async e => {
+        e.preventDefault();
+        const button = $('[type=submit]', e.target); button.disabled = true;
+        try {
+            const r = await post('/nodes/' + node.id + '/core-update', {core});
+            activeTaskId = r.id;
+            await refresh();
+            showTask(r.id);
+        } catch (err) { formError(err); button.disabled = false; }
+    };
 }
 
 // ---------------------------------------------------------------- 中转管理（用户 → 中转服务器 … → 落地协议）

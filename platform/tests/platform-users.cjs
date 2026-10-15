@@ -17,6 +17,7 @@ const context = {
     names: {vless: 'VLESS Reality', hy2: 'Hysteria2', ss2022: 'SS2022', 'snell-v5': 'Snell v5'},
     icon: () => '<svg></svg>',
     brand: '<div class="brand">VAIO</div>',
+    coreLabels: {xray: 'Xray', singbox: 'Sing-box', 'snell-v5': 'Snell v5', 'snell-v6': 'Snell v6'},
     meter: (label, percent) => `<meter>${percent == null ? '—' : percent.toFixed(0)}</meter>`,
     stat: (title, value, foot) => `<stat>${title}:${value}:${foot}</stat>`,
     shell: (content, section) => { html.shell = content; html.section = section; },
@@ -34,7 +35,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;this.nodeVersion=nodeVersion;this.settingsTabs=settingsTabs;this.panelUpdateLabel=panelUpdateLabel;this.checkPanelUpdate=checkPanelUpdate;this.panelUpdateDialog=panelUpdateDialog;this.panelUpdateStart=panelUpdateStart;this.upgradeAllDialog=upgradeAllDialog;this.upgradeAllStart=upgradeAllStart;this.portalPage=portalPage;this.telegramCard=telegramCard;this.portalAction=portalAction;this.portalShareWait=portalShareWait;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;this.nodeVersion=nodeVersion;this.settingsTabs=settingsTabs;this.panelUpdateLabel=panelUpdateLabel;this.checkPanelUpdate=checkPanelUpdate;this.panelUpdateDialog=panelUpdateDialog;this.panelUpdateStart=panelUpdateStart;this.upgradeAllDialog=upgradeAllDialog;this.upgradeAllStart=upgradeAllStart;this.portalPage=portalPage;this.telegramCard=telegramCard;this.portalAction=portalAction;this.portalShareWait=portalShareWait;this.coreBlock=coreBlock;this.coreUpdatable=coreUpdatable;this.coreAllDialog=coreAllDialog;this.coreAction=coreAction;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -565,4 +566,43 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     await context.portalAction('me-share-relay', {dataset: {id: 'r1'}});
     assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.at(-1))), ['/me/share', {relay_id: 'r1'}]);
     console.log('PASS user page: own data only, escaping, exports, relay export, telegram states');
+
+    // 内核：版本与更新按钮、Sing-box 统计提示、旧节点提示、单台确认与批量对话框
+    const coreNode = (cores, extra = {}) => ({id: 'cn', name: 'hk<1>', adopted: true, status: 'online', maintenance: false, deleted: null,
+        snapshot: {core_update_version: 1, cores}, ...extra});
+    let coreHtml = context.coreBlock(coreNode({xray: {current: '25.1.30', latest: '25.3.6'}, singbox: {current: '1.14.2', latest: '1.14.2', stats: true, official: '1.14.3'},
+                                            'snell-v6': {current: '6.0.0', latest: ''}}));
+    assert(coreHtml.includes('25.1.30 → 25.3.6') && coreHtml.includes('data-action="core-update" data-core="xray"'));
+    assert(!coreHtml.includes('data-core="singbox"') && coreHtml.includes('官方已有 1.14.3，统计版待发布'));
+    assert(coreHtml.includes('6.0.0 · 最新版本获取中') && !coreHtml.includes('data-core="snell-v6"') && !coreHtml.includes('Snell v5'));
+    coreHtml = context.coreBlock(coreNode({singbox: {current: '1.14.2', latest: '1.14.2', stats: false}}));
+    assert(coreHtml.includes('data-core="singbox"') && coreHtml.includes('不带用户统计') && coreHtml.includes('1.14.2 → 统计版'), 'non-statistics Sing-box can be replaced');
+    assert(/data-core="xray" disabled/.test(context.coreBlock(coreNode({xray: {current: '1.0.0', latest: '2.0.0'}}, {status: 'offline'}))));
+    assert(context.coreBlock(coreNode({}, {snapshot: {core_update_version: 0}})).includes('1.4.0'));
+    assert(context.coreUpdatable('xray', {current: '25.10.1', latest: '25.9.30'}) === false && context.coreUpdatable('xray', {current: '25.9.30', latest: '25.10.1'}) === true);
+    // Single node: confirm form posts the core and opens the task.
+    const target = coreNode({xray: {current: '25.1.30', latest: '25.3.6'}});
+    vm.runInContext('selected = this.coreTarget;', Object.assign(context, {coreTarget: target}));
+    element('core-form');
+    await context.coreAction('core-update', {dataset: {core: 'xray'}});
+    assert(html.title === '更新 Xray 内核' && html.modal.includes('hk&lt;1&gt;') && html.modal.includes('25.3.6'));
+    posts.length = 0;
+    let shown = null;
+    context.post = async (path, data) => { posts.push([path, data]); return {id: 'task-core', queued: ['hk'], skipped: [{name: 'old<>', reason: '节点程序需更新到 1.4.0 及以上'}]}; };
+    context.refresh = async () => {}; context.showTask = id => { shown = id; };
+    await elements['core-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), ['/nodes/cn/core-update', {core: 'xray'}]);
+    assert.strictEqual(shown, 'task-core');
+    // All nodes: per-core counts, list, result with skip reasons.
+    vm.runInContext('nodes = this.coreNodes;', Object.assign(context, {coreNodes: [target, coreNode({xray: {current: '25.3.6', latest: '25.3.6'}}, {id: 'n2', name: 'jp'})]}));
+    element('core-all-form'); element('core-all-core', {value: 'xray'}); element('core-all-list');
+    context.coreAllDialog();
+    assert(html.modal.includes('Xray（1 台可更新）') && html.modal.includes('Sing-box（0 台可更新）'));
+    elements['core-all-core'].onchange();
+    assert(elements['core-all-list'].innerHTML.includes('hk&lt;1&gt;') && !elements['core-all-list'].innerHTML.includes('jp'));
+    posts.length = 0;
+    await elements['core-all-form'].onsubmit({preventDefault() {}, target: {}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), ['/nodes/core-update-all', {core: 'xray'}]);
+    assert(html.modal.includes('已为 1 台服务器排队更新 Xray') && html.modal.includes('old&lt;&gt;'));
+    console.log('PASS cores: versions, statistics notes, old nodes, single update, all-nodes dialog');
 })().catch(error => { console.error(error); process.exit(1); });
