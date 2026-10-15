@@ -16,6 +16,7 @@ const context = {
     badge: s => `<badge>${s}</badge>`, states: {online: '在线', offline: '离线'},
     names: {vless: 'VLESS Reality', hy2: 'Hysteria2', ss2022: 'SS2022', 'snell-v5': 'Snell v5'},
     icon: () => '<svg></svg>',
+    brand: '<div class="brand">VAIO</div>',
     meter: (label, percent) => `<meter>${percent == null ? '—' : percent.toFixed(0)}</meter>`,
     stat: (title, value, foot) => `<stat>${title}:${value}:${foot}</stat>`,
     shell: (content, section) => { html.shell = content; html.section = section; },
@@ -33,7 +34,7 @@ const context = {
 context.api = async path => context.responses[path];
 context.post = async (path, data) => { posts.push([path, data]); return {id: 'new-user', deleted: true}; };
 vm.createContext(context);
-vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;this.nodeVersion=nodeVersion;this.settingsTabs=settingsTabs;this.panelUpdateLabel=panelUpdateLabel;this.checkPanelUpdate=checkPanelUpdate;this.panelUpdateDialog=panelUpdateDialog;this.panelUpdateStart=panelUpdateStart;this.upgradeAllDialog=upgradeAllDialog;this.upgradeAllStart=upgradeAllStart;this.portalPage=portalPage;this.telegramCard=telegramCard;this.loginBlock=loginBlock;this.portalAction=portalAction;this.portalShareWait=portalShareWait;', context);
+vm.runInContext(code + '\nthis.usersPage=usersPage;this.userDetail=userDetail;this.userForm=userForm;this.membersDialog=membersDialog;this.linkDialog=linkDialog;this.authorityBlock=authorityBlock;this.authorityNotice=authorityNotice;this.authorityDialog=authorityDialog;this.upgradeDialog=upgradeDialog;this.userModeText=userModeText;this.memberAddable=memberAddable;this.installUserPicker=installUserPicker;this.installPickedUsers=installPickedUsers;this.installPlaceUsers=installPlaceUsers;this.instancesPage=instancesPage;this.instanceRows=instanceRows;this.instanceMatches=instanceMatches;this.instanceTable=instanceTable;this.filterMenu=filterMenu;this.forwardsPage=forwardsPage;this.relaysPage=relaysPage;this.panelAddressDialog=panelAddressDialog;this.panelAddressAction=panelAddressAction;this.relayMatches=relayMatches;this.relayTable=relayTable;this.relayAction=relayAction;this.relayDialog=relayDialog;this.relayLandingOptions=relayLandingOptions;this.forwardRows=forwardRows;this.forwardMatches=forwardMatches;this.forwardTable=forwardTable;this.forwardDialog=forwardDialog;this.forwardAction=forwardAction;this.selectMenuOptions=selectMenuOptions;this.monitorPage=monitorPage;this.notificationSettings=notificationSettings;this.notifyAction=notifyAction;this.userAction=userAction;this.nodeVersion=nodeVersion;this.settingsTabs=settingsTabs;this.panelUpdateLabel=panelUpdateLabel;this.checkPanelUpdate=checkPanelUpdate;this.panelUpdateDialog=panelUpdateDialog;this.panelUpdateStart=panelUpdateStart;this.upgradeAllDialog=upgradeAllDialog;this.upgradeAllStart=upgradeAllStart;this.portalPage=portalPage;this.telegramCard=telegramCard;this.portalAction=portalAction;this.portalShareWait=portalShareWait;', context);
 
 const node = (id, extra = {}) => ({id, name: 'node-' + id, adopted: true, status: 'online', maintenance: false, deleted: null,
     snapshot: {accounts_version: 1, authority_version: 1, user_authority: 'platform', upgrade_version: 1, agent_version: '0.3.0-preview.11', instances: [
@@ -69,20 +70,23 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
 
     // 编辑：未改的配额不提交，启停与其他字段提交
     element('pu-name', {value: 'alice'}); element('pu-quota', {value: '10'}); element('pu-reset', {value: '5'});
-    element('pu-expire', {value: '2099-02-01'}); element('pu-note', {value: 'n'}); element('pu-enabled', {checked: false});
+    element('pu-expire', {value: '2099-02-01'}); element('pu-note', {value: 'n'}); element('pu-enabled', {checked: false}); element('pu-password', {value: ''});
     element('pu-form'); element('[type=submit]'); element('modal', {close() {}});
     context.userForm(user);
-    assert(html.title === '编辑用户' && html.modal.includes('pu-enabled'));
+    assert(html.title === '编辑用户' && html.modal.includes('pu-enabled') && html.modal.includes('placeholder="留空不修改"') && !/id="pu-password"[^>]*required/.test(html.modal));
     await elements['pu-form'].onsubmit({preventDefault() {}, target: {}});
     assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.pop())), ['/users/u1', {name: 'alice', reset_day: 5, expire_date: '2099-02-01', note: 'n', enabled: false}]);
     elements['pu-quota'].value = '20';
     await elements['pu-form'].onsubmit({preventDefault() {}, target: {}});
     assert.strictEqual(posts.pop()[1].quota_gb, 20);
     context.userForm(null);
-    assert(html.title === '新建用户' && !html.modal.includes('pu-enabled'));
+    assert(html.title === '新建用户' && !html.modal.includes('pu-enabled') && /id="pu-password"[^>]*required/.test(html.modal) && html.modal.includes('pu-password-random'));
     delete elements['pu-enabled'];
+    elements['pu-password'].value = 'secret-pass-1';
     await elements['pu-form'].onsubmit({preventDefault() {}, target: {}});
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.pop())), ['/users', {name: 'alice', quota_gb: 20, reset_day: 5, expire_date: '2099-02-01', note: 'n'}]);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.pop())), ['/users', {name: 'alice', quota_gb: 20, reset_day: 5, expire_date: '2099-02-01', note: 'n', password: 'secret-pass-1'}]);
+    assert(html.title === '用户已创建' && html.modal.includes('secret-pass-1'), 'password shown once after creating');
+    elements['pu-password'].value = '';
     assert.strictEqual(context.location.hash, 'users/new-user');
     console.log('PASS user form payloads: create, edit, unchanged quota omitted');
 
@@ -522,7 +526,7 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
 
     // 系统设置：账号与面板地址两个标签
     const tabs = context.settingsTabs('account');
-    assert(tabs.includes('data-tab="account" class="active"') && tabs.includes('data-tab="address" class=""') && tabs.includes('账号') && tabs.includes('面板地址'));
+    assert(tabs.includes('data-tab="account" class="active"') && tabs.includes('data-tab="address" class=""') && tabs.includes('data-tab="backup" class=""') && tabs.includes('备份恢复'));
     console.log('PASS system settings tabs');
 
     // 用户自助页：只渲染自己的数据、转义、导出、TG 卡片、管理员登录区
@@ -558,8 +562,5 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     assert(elements['me-share'].innerHTML.includes('读取失败：节点&lt;错误&gt;'));
     await context.portalAction('me-share-relay', {dataset: {id: 'r1'}});
     assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.at(-1))), ['/me/share', {relay_id: 'r1'}]);
-    assert(context.loginBlock({login_enabled: false, name: 'a'}).includes('设置密码并开启登录'));
-    const loginHtml = context.loginBlock({login_enabled: true, name: '<a>'});
-    assert(loginHtml.includes('重置密码') && loginHtml.includes('pu-login-off') && loginHtml.includes('&lt;a&gt;'));
-    console.log('PASS user page: own data only, escaping, exports, relay export, telegram states, admin login block');
+    console.log('PASS user page: own data only, escaping, exports, relay export, telegram states');
 })().catch(error => { console.error(error); process.exit(1); });

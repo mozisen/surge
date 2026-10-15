@@ -2686,6 +2686,16 @@ dialog.install .install-warning {
 /* 中转管理：线路链与编辑界面的两个框（中间箭头连接）。 */
 .relay-chain {
     line-height: 1.7;
+    white-space: normal;
+}
+
+/* The chain wraps between hops so the action buttons keep their own line. */
+.relay-chain > span {
+    white-space: nowrap;
+}
+
+td .action-row {
+    flex-wrap: nowrap;
 }
 .relay-chain-arrow {
     margin: 0 6px;
@@ -2915,4 +2925,24 @@ dialog.install .install-warning {
     .portal td:not([data-label])::before {
         content: none;
     }
+}
+
+/* Input with a button on the same line (随机生成). */
+.input-action {
+    display: flex;
+    gap: 8px;
+}
+
+.input-action input {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.input-action button {
+    flex: 0 0 auto;
+}
+
+.settings-actions {
+    justify-content: flex-end;
+    margin-bottom: 4px;
 }

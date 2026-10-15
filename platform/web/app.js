@@ -91,7 +91,7 @@ const bytes = n => n == null ? '—' : n >= 1073741824 ? (n / 1073741824).toFixe
 const date = n => n ? new Date(n * 1000).toLocaleString('zh-CN', {
     hour12: false
 }) : '—';
-const brand = `<div class="brand">Vaio <span>管理面板</span></div>`;
+const brand = `<div class="brand">VAIO</div>`;
 let panelVersion = '',
     groupFilter = '',
     csrf = '',
@@ -206,9 +206,9 @@ function login() {
 
 function shell(content, section) {
     checkPanelUpdate();
-    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器管理'], ['instances', 'globe', '节点管理'], ['relays', 'relay', '中转管理'], ['forwards', 'forward', '端口转发'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '通知配置'], ['backups', 'server', '备份恢复'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
+    const links = [['overview', 'grid', '总览'], ['nodes', 'server', '服务器'], ['instances', 'globe', '节点管理'], ['relays', 'relay', '中转管理'], ['forwards', 'forward', '端口转发'], ['users', 'users', '用户管理'], ['traffic', 'pulse', '流量统计'], ['monitor', 'pulse', '通知配置'], ['tasks', 'tasks', '任务记录'], ['audit', 'shield', '操作审计']];
     const nav = links.map(([id, ico, text]) => `<a href="#${id}" class="${section===id?'active':''}"${section===id?' aria-current="page"':''}>${icon(ico)}${text}</a>`).join('');
-    $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><span class="live">更新于 ${esc(lastRefresh)}</span><div class="account-actions"><button class="quiet small" data-action="settings">系统设置</button><button class="quiet small" data-action="panel-update">${panelUpdateLabel()}</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
+    $('#app').innerHTML = `<div class="shell"><aside class="sidebar">${brand}<nav class="nav" aria-label="主导航">${nav}</nav><div class="sidebar-foot"><div class="account-actions"><button class="quiet small" data-action="settings">系统设置</button><button class="quiet small" data-action="panel-update">${panelUpdateLabel()}</button><button class="quiet small" data-action="logout">退出</button></div></div></aside><main class="main">${content}<div class="footer-note"><span>面板版本 ${esc(panelVersion)} · 状态每 10 秒刷新 · 离线数据为最后快照</span></div></main></div>`;
 }
 
 // Readout value: number large, unit set apart in small muted type.
@@ -260,7 +260,8 @@ function taskTable(list) {
 }
 
 function overview(section) {
-    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器管理'}</h1><p class="subtext">${section==='overview'?'服务器、协议与任务，尽在一个工作空间。':'连接、分组并管理你的所有服务器。'}</p></div><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="upgrade-all"${nodes.some(n=>n.adopted&&n.upgrade_available)?'':' disabled title="所有节点程序已是最新"'}>一键更新节点程序</button><button class="quiet small" data-action="trash">回收站</button>${filterMenu('group-filter', '筛选分组', [['', '全部分组'], ...[...new Set(nodes.map(n=>n.group_name).filter(Boolean))].map(g=>[g, g])], groupFilter)}<div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>最近任务</h2><a href="#tasks">查看全部 →</a></div><div class="panel">${taskTable(tasks.slice(0,5))}</div>`:''}`, section);
+    shell(`<div class="heading"><div><h1>${section==='overview'?'运行总览':'服务器'}</h1></div><div class="action-row"><button data-action="upgrade-all"${nodes.some(n=>n.adopted&&n.upgrade_available)?'':' disabled title="所有节点程序已是最新"'}>一键更新节点程序</button><button class="primary" data-action="add-node">${icon('plus')}添加服务器</button></div></div>${summary()}<div class="section-label"><h2>我的服务器 <span class="count">${nodes.length}</span></h2><div class="tools"><button class="quiet small" data-action="trash">回收站</button>${filterMenu('group-filter', '筛选分组', [['', '全部分组'], ...[...new Set(nodes.map(n=>n.group_name).filter(Boolean))].map(g=>[g, g])], groupFilter)}<div class="search">${icon('search')}<input id="search" type="search" aria-label="搜索服务器" placeholder="搜索名称或分组" value="${esc(search)}"></div></div></div><div id="node-results">${nodes.length?nodeCards():emptyNodes()}</div>${section==='overview'?`<div class="section-label"><h2>中转线路 <span class="count" id="overview-relay-count">${relayData.length}</span></h2><a href="#relays">管理中转 →</a></div><div class="panel" id="overview-relays">${relayTable(relayData)}</div>`:''}`, section);
+    if (section === 'overview') loadOverviewRelays().catch(() => {});
     $('#group-filter').onchange = e => { groupFilter = e.target.value; $('#node-results').innerHTML = nodeCards(); };
     $('#search').addEventListener('input', e => {
         search = e.target.value;
@@ -292,7 +293,7 @@ function trafficPage() {
     const instances = node?.snapshot.instances || [];
     const total = trafficTotal(instances);
     const coreName = p => p.protocol.startsWith('snell') ? '独立核心' : p.core==='singbox' ? 'Sing-box' : 'Xray';
-    shell(`<div class="heading"><div><h1>流量统计</h1><p class="subtext">查看每台服务器、协议实例和用户的流量情况。</p></div><button data-action="refresh">${icon('refresh')}刷新</button></div>
+    shell(`<div class="heading"><div><h1>流量统计</h1></div><button data-action="refresh">${icon('refresh')}刷新</button></div>
     <div class="section-label"><h2>服务器流量</h2></div><div class="panel table-wrap"><table><thead><tr><th>服务器</th><th>状态</th><th class="num">网卡接收</th><th class="num">网卡发送</th><th class="num">网卡合计</th><th class="num">用户用量汇总</th><th>上报时间</th></tr></thead><tbody>${nodes.map(n=>{
         const m=n.snapshot.metrics||{}, sum=trafficTotal(n.snapshot.instances||[]);
         const network = Number.isFinite(m.network_rx)&&Number.isFinite(m.network_tx)?m.network_rx+m.network_tx:null;
@@ -317,7 +318,7 @@ function detail(node) {
     selected = node;
     const s = node.snapshot,
         m = s.metrics || {};
-    shell(`<div class="heading"><div><a class="back-link" href="#nodes">返回服务器管理</a><h1>${esc(node.name)} ${badge(node.status)}</h1><div class="detail-info"><span>${esc(node.group_name)}</span><span>${esc(s.hostname||'等待连接')}</span><span>${esc(s.arch||'—')}</span><span>节点程序 ${esc(s.agent_version||'—')}</span></div></div><div class="action-row">${node.upgrade_available?`<button data-action="upgrade-agent" title="节点程序 ${esc(s.agent_version)}，当前面板 ${esc(node.panel_version)}">${s.upgrade_version===1&&node.status==='online'?'一键升级':'升级节点'}</button>`:''}<button data-action="history">历史曲线</button><button data-action="node-settings">节点设置</button><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div></div>${node.maintenance || node.status!=='online' || s.error?`<div class="notice warn">${esc(node.connection_hint)}</div>`:''}${node.notes?`<div class="notice node-notes">${esc(node.notes)}</div>`:''}${authorityNotice(node)}${!node.adopted?`<div class="notice"><div><strong>${node.status==='pending'?'等待节点连接':'配置已识别，尚未接管'}</strong><br>${node.status==='pending'?'在服务器运行安装脚本，节点将自动上线。':'请检查下面的协议与端口。接管后面板可以修改节点配置。'}</div><button data-action="${node.status==='pending'?'renew':'adopt'}" ${node.status==='offline'?'disabled':''}>${node.status==='pending'?'重新生成脚本':'确认接管'}</button></div>`:''}<div class="stats">${stat('系统负载',m.load??'—',`${m.cpu_count||'—'} 个逻辑核心`)}${stat('内存使用',m.memory_total?(m.memory_used/m.memory_total*100).toFixed(0):'—',bytes(m.memory_used)+' / '+bytes(m.memory_total),m.memory_total?'%':'')}${stat('磁盘使用',m.disk_total?(m.disk_used/m.disk_total*100).toFixed(0):'—',bytes(m.disk_used)+' / '+bytes(m.disk_total),m.disk_total?'%':'')}${stat('协议实例',(s.instances||[]).length,'配置以节点实际状态为准')}</div><div class="tabs"><button data-action="tab" data-tab="protocols" class="${detailTab==='protocols'?'active':''}">协议管理</button><button data-action="tab" data-tab="tasks" class="${detailTab==='tasks'?'active':''}">执行记录</button></div><div class="split"><section><div class="panel"><div class="panel-head"><h2>${detailTab==='protocols'?'已安装协议':'节点任务'} <span class="count">${detailTab==='protocols'?(s.instances||[]).length:tasks.filter(t=>t.node_id===node.id).length}</span></h2><button class="quiet small" data-action="refresh">${icon('refresh')}刷新</button></div>${detailTab==='protocols'?protocolTable(node):taskTable(tasks.filter(t=>t.node_id===node.id))}</div></section><aside class="detail-aside">${authorityBlock(node)}<section class="info-block"><h3>节点信息</h3>${s.script_api?`<div class="kv"><span>脚本接口</span><span>${s.script_api.status==='ready'?'只读预览':'暂不可用'}</span></div><p class="helper">${s.script_api.status==='ready'?`${esc(s.script_api.version)} · ${Number(s.script_api.protocol_count)||0} 种协议与内核组合。新增协议写接口尚未开放。`:'接口检查失败，请查看节点依赖及脚本校验。'}现有管理功能使用已验收的独立适配器。</p>`:''}<div class="kv"><span>系统</span><span>${esc(s.os||'—')}</span></div><div class="kv"><span>运行时间</span><span>${m.uptime?Math.floor(m.uptime/86400)+' 天':'—'}</span></div><div class="kv"><span>网卡累计接收</span><span>${bytes(m.network_rx)}</span></div><div class="kv"><span>网卡累计发送</span><span>${bytes(m.network_tx)}</span></div><div class="kv"><span>最后心跳</span><span>${date(node.last_seen)}</span></div><div class="kv"><span>流量同步</span><span>${esc(({ok:'正常',unavailable:'暂不可用',stale:'等待同步',error:'同步异常',unknown:'未知',no_core:'未找到内核',no_stats:'暂无统计',snell_error:'Snell 同步失败',singbox_error:'Sing-box 同步失败',partial_singbox_error:'部分统计失败',temp_error:'临时文件错误'})[s.traffic_status]||'暂不可用')}</span></div></section><section class="info-block"><h3>${icon('shield')} 操作说明</h3><p>共享核心的配置修改会重启对应核心，可能短暂影响同服务的其他协议。</p><p>不支持写入的协议仅展示状态。配置备份保留在节点本地。</p></section></aside></div>`, 'nodes');
+    shell(`<div class="heading"><div><a class="back-link" href="#nodes">返回服务器</a><h1>${esc(node.name)} ${badge(node.status)}</h1><div class="detail-info"><span>${esc(node.group_name)}</span><span>${esc(s.hostname||'等待连接')}</span><span>${esc(s.arch||'—')}</span><span>节点程序 ${esc(s.agent_version||'—')}</span></div></div><div class="action-row">${node.upgrade_available?`<button data-action="upgrade-agent" title="节点程序 ${esc(s.agent_version)}，当前面板 ${esc(node.panel_version)}">${s.upgrade_version===1&&node.status==='online'?'一键升级':'升级节点'}</button>`:''}<button data-action="history">历史曲线</button><button data-action="node-settings">节点设置</button><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div></div>${node.maintenance || node.status!=='online' || s.error?`<div class="notice warn">${esc(node.connection_hint)}</div>`:''}${node.notes?`<div class="notice node-notes">${esc(node.notes)}</div>`:''}${authorityNotice(node)}${!node.adopted?`<div class="notice"><div><strong>${node.status==='pending'?'等待节点连接':'配置已识别，尚未接管'}</strong><br>${node.status==='pending'?'在服务器运行安装脚本，节点将自动上线。':'请检查下面的协议与端口。接管后面板可以修改节点配置。'}</div><button data-action="${node.status==='pending'?'renew':'adopt'}" ${node.status==='offline'?'disabled':''}>${node.status==='pending'?'重新生成脚本':'确认接管'}</button></div>`:''}<div class="stats">${stat('系统负载',m.load??'—',`${m.cpu_count||'—'} 个逻辑核心`)}${stat('内存使用',m.memory_total?(m.memory_used/m.memory_total*100).toFixed(0):'—',bytes(m.memory_used)+' / '+bytes(m.memory_total),m.memory_total?'%':'')}${stat('磁盘使用',m.disk_total?(m.disk_used/m.disk_total*100).toFixed(0):'—',bytes(m.disk_used)+' / '+bytes(m.disk_total),m.disk_total?'%':'')}${stat('协议实例',(s.instances||[]).length,'配置以节点实际状态为准')}</div><div class="tabs"><button data-action="tab" data-tab="protocols" class="${detailTab==='protocols'?'active':''}">协议管理</button><button data-action="tab" data-tab="tasks" class="${detailTab==='tasks'?'active':''}">执行记录</button></div><div class="split"><section><div class="panel"><div class="panel-head"><h2>${detailTab==='protocols'?'已安装协议':'节点任务'} <span class="count">${detailTab==='protocols'?(s.instances||[]).length:tasks.filter(t=>t.node_id===node.id).length}</span></h2><button class="quiet small" data-action="refresh">${icon('refresh')}刷新</button></div>${detailTab==='protocols'?protocolTable(node):taskTable(tasks.filter(t=>t.node_id===node.id))}</div></section><aside class="detail-aside">${authorityBlock(node)}<section class="info-block"><h3>节点信息</h3>${s.script_api?`<div class="kv"><span>脚本接口</span><span>${s.script_api.status==='ready'?'只读预览':'暂不可用'}</span></div><p class="helper">${s.script_api.status==='ready'?`${esc(s.script_api.version)} · ${Number(s.script_api.protocol_count)||0} 种协议与内核组合。新增协议写接口尚未开放。`:'接口检查失败，请查看节点依赖及脚本校验。'}现有管理功能使用已验收的独立适配器。</p>`:''}<div class="kv"><span>系统</span><span>${esc(s.os||'—')}</span></div><div class="kv"><span>运行时间</span><span>${m.uptime?Math.floor(m.uptime/86400)+' 天':'—'}</span></div><div class="kv"><span>网卡累计接收</span><span>${bytes(m.network_rx)}</span></div><div class="kv"><span>网卡累计发送</span><span>${bytes(m.network_tx)}</span></div><div class="kv"><span>最后心跳</span><span>${date(node.last_seen)}</span></div><div class="kv"><span>流量同步</span><span>${esc(({ok:'正常',unavailable:'暂不可用',stale:'等待同步',error:'同步异常',unknown:'未知',no_core:'未找到内核',no_stats:'暂无统计',snell_error:'Snell 同步失败',singbox_error:'Sing-box 同步失败',partial_singbox_error:'部分统计失败',temp_error:'临时文件错误'})[s.traffic_status]||'暂不可用')}</span></div></section><section class="info-block"><h3>${icon('shield')} 操作说明</h3><p>共享核心的配置修改会重启对应核心，可能短暂影响同服务的其他协议。</p><p>不支持写入的协议仅展示状态。配置备份保留在节点本地。</p></section></aside></div>`, 'nodes');
 }
 async function render() {
     const route = location.hash.slice(1) || 'overview';
@@ -326,7 +327,7 @@ async function render() {
         if (node) detail(node);
         else shell('<div class="empty"><h3>节点不存在</h3><a href="#nodes">返回节点列表</a></div>', 'nodes');
     } else if (route === 'tasks') {
-        shell(`<div class="heading"><div><h1>任务记录</h1><p class="subtext">安装、修改与卸载的执行结果，集中追溯。</p></div><button data-action="refresh">${icon('refresh')}刷新</button></div><div class="notice">执行结果未确认的任务不会自动重试。请检查节点实际状态后再发起新操作。</div><div class="panel">${taskTable(tasks)}</div>`, 'tasks');
+        shell(`<div class="heading"><div><h1>任务记录</h1></div><button data-action="refresh">${icon('refresh')}刷新</button></div><div class="notice">执行结果未确认的任务不会自动重试。请检查节点实际状态后再发起新操作。</div><div class="panel">${taskTable(tasks)}</div>`, 'tasks');
     } else if (route === 'users') {
         await usersPage();
     } else if (route.startsWith('users/')) {
@@ -342,11 +343,9 @@ async function render() {
         await userTraffic();
     } else if (route === 'monitor') {
         await monitorPage();
-    } else if (route === 'backups') {
-        await backupPage();
     } else if (route === 'audit') {
         const data = await api('/audit');
-        shell(`<div class="heading"><div><h1>操作审计</h1><p class="subtext">最近 200 条管理事件，不包含密码和私钥。</p></div></div><div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>说明</th></tr></thead><tbody>${data.events.map(e=>`<tr><td class="muted">${date(e.at)}</td><td class="mono">${esc(e.event)}</td><td>${esc(nodes.find(n=>n.id===e.node_id)?.name||'—')}</td><td>${esc(e.detail)}</td></tr>`).join('')}</tbody></table></div></div>`, 'audit');
+        shell(`<div class="heading"><div><h1>操作审计</h1></div></div><div class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>说明</th></tr></thead><tbody>${data.events.map(e=>`<tr><td class="muted">${date(e.at)}</td><td class="mono">${esc(e.event)}</td><td>${esc(nodes.find(n=>n.id===e.node_id)?.name||'—')}</td><td>${esc(e.detail)}</td></tr>`).join('')}</tbody></table></div></div>`, 'audit');
     } else overview(route === 'nodes' ? 'nodes' : 'overview');
 }
 async function refresh() {
@@ -801,7 +800,7 @@ document.addEventListener('click', async e => {
         else if (action === 'history') await historyDialog();
         else if (action === 'monitor-settings') await notificationSettings();
         else if (action === 'notification-test') { await post('/monitor/test'); toast('测试消息已排队，稍后在 Telegram 查收'); }
-        else if (action === 'backup-create') { b.disabled=true; try { await post('/backups'); await backupPage(); } finally { b.disabled=false; } }
+        else if (action === 'backup-create') { b.disabled=true; try { await post('/backups'); await backupSettings(); } finally { b.disabled=false; } }
         else if (action === 'backup-verify') { b.disabled=true; try { const r=await post('/backups/verify', {name:b.dataset.name}); toast(`恢复副本校验通过：${r.nodes} 个节点，${r.tasks} 条任务`); } finally { b.disabled=false; } }
         else if (action === 'trash') await showTrash();
         else if (action === 'restore-node') { await post('/nodes/'+b.dataset.id+'/restore'); await refresh(); await showTrash(); }
@@ -811,7 +810,7 @@ document.addEventListener('click', async e => {
         else if (action === 'upgrade-agent') { currentCommand=selected.update_command; modal('升级节点程序', `<p>在节点以 root 执行，升级前自动检查任务，保留节点身份、现有协议与用户；新版未上线会恢复旧程序。</p><textarea readonly rows="5">${esc(currentCommand)}</textarea><p class="helper">维护中断时，请在节点核对状态后运行 vaio-agent resume。此操作不会更新代理内核。</p><div class="modal-foot"><button class="primary" data-action="copy-command">复制升级命令</button></div>`); }
         else if (action === 'resolve-task') resolveTask(b.dataset.id);
         else if (action === 'settings') await accountSettings();
-        else if (action === 'settings-tab') await (b.dataset.tab === 'address' ? panelAddressDialog() : accountSettings());
+        else if (action === 'settings-tab') await ({address: panelAddressDialog, backup: backupSettings}[b.dataset.tab] || accountSettings)();
         else if (action === 'panel-update') await panelUpdateDialog(true);
         else if (action === 'panel-update-start') await panelUpdateStart(b);
         else if (action === 'upgrade-all') upgradeAllDialog();
@@ -945,9 +944,9 @@ setInterval(() => {
 boot();
 
 
-async function backupPage() {
+async function backupSettings() {
     const data = await api('/backups');
-    shell(`<div class="heading"><div><h1>备份恢复</h1><p class="subtext">每日自动备份面板数据库，保留最近 7 份，也可以立即创建。</p></div><button class="primary" data-action="backup-create">立即备份</button></div><div class="notice">校验会恢复到临时副本并检查完整性，不影响在线面板。实际恢复需在服务器执行，恢复后排队任务取消、执行中任务标记结果未知。节点代理配置需使用节点本地备份。</div><div class="panel table-wrap"><table><thead><tr><th>备份</th><th>时间</th><th class="num">大小</th><th>操作</th></tr></thead><tbody>${data.backups.map(b=>`<tr><td class="mono">${esc(b.name)}</td><td class="muted">${date(b.at)}</td><td class="num">${bytes(b.size)}</td><td><button class="small" data-action="backup-verify" data-name="${esc(b.name)}">恢复校验</button></td></tr>`).join('')||'<tr><td colspan="4">首次自动备份尚未完成，可以立即创建备份。</td></tr>'}</tbody></table></div>`, 'backups');
+    modal('系统设置', `${settingsTabs('backup')}<div class="action-row settings-actions"><button class="primary" data-action="backup-create">立即备份</button></div><p class="helper">每天自动备份面板数据库，保留最近 7 份。校验会恢复到临时副本并检查完整性，不影响在线面板；实际恢复需在服务器执行 vaio-panel restore，恢复后排队任务取消、执行中任务标记结果未知。节点代理配置使用节点本地备份。</p><div class="table-wrap"><table><thead><tr><th>备份</th><th>时间</th><th class="num">大小</th><th>操作</th></tr></thead><tbody>${data.backups.map(b=>`<tr><td class="mono">${esc(b.name)}</td><td class="muted">${date(b.at)}</td><td class="num">${bytes(b.size)}</td><td><button class="small" data-action="backup-verify" data-name="${esc(b.name)}">恢复校验</button></td></tr>`).join('')||'<tr><td colspan="4">首次自动备份尚未完成，可以立即创建备份。</td></tr>'}</tbody></table></div>`, true);
 }
 
 async function historyDialog() {
@@ -992,7 +991,7 @@ const authorityText = s => s.authority_version !== 1 ? '旧版节点（需升级
 async function usersPage() {
     platformData = await api('/users');
     const rows = platformData.users.map(u => `<tr><td><a href="#users/${esc(u.id)}"><strong>${esc(u.name)}</strong></a>${u.note ? `<br><span class="muted">${esc(u.note)}</span>` : ''}</td><td>${stateBadge(userStates, u.state)}${u.deleting ? '<br><span class="muted">删除中</span>' : ''}</td><td>${meter('用量', u.quota ? u.used / u.quota * 100 : null)}<span class="muted">${quotaText(u.used, u.quota)}</span></td><td>${esc(u.expire_date || '永不过期')}</td><td class="num">${u.links.length}</td><td>${userSync(u)}</td></tr>`).join('');
-    shell(`<div class="heading"><div><h1>用户管理</h1><p class="subtext">一个用户可以使用多个节点和协议，到期与总流量由面板统一管理。</p></div><button class="primary" data-action="pu-create">${icon('plus')}新建用户</button></div>
+    shell(`<div class="heading"><div><h1>用户管理</h1></div><button class="primary" data-action="pu-create">${icon('plus')}新建用户</button></div>
     <div class="panel table-wrap"><table><thead><tr><th>用户</th><th>状态</th><th>本周期用量</th><th>到期</th><th class="num">节点</th><th>同步</th></tr></thead><tbody>${rows || '<tr><td colspan="6">暂无平台用户。新建用户后关联节点即可使用。</td></tr>'}</tbody></table></div>
     <p class="helper">只有用户管理方式为「以平台为准」的节点可以关联，可在节点详情中切换。跨节点总流量达到配额后，所有节点上的该用户都会停用，到重置日或调高配额后自动恢复。</p>`, 'users');
 }
@@ -1004,26 +1003,29 @@ async function userDetail(id) {
     shell(`<div class="heading"><div><a class="back-link" href="#users">返回用户管理</a><h1>${esc(user.name)} ${stateBadge(userStates, user.state)}</h1><div class="detail-info"><span>到期 ${esc(user.expire_date || '永不过期')}</span><span>${user.reset_day ? '每月 ' + user.reset_day + ' 日重置' : '累计不重置'}</span>${user.note ? `<span>${esc(user.note)}</span>` : ''}</div></div><div class="action-row"><button data-action="pu-edit">编辑</button><button data-action="pu-reset-usage">重置用量</button><button data-action="pu-reset-credentials" ${user.links.length ? '' : 'disabled'}>重置全部凭据</button><button class="danger" data-action="pu-delete">删除</button></div></div>
     ${user.deleting ? '<div class="notice warn">正在从各节点解除，完成后删除此用户。</div>' : ''}
     <div class="stats">${stat('本周期用量', bytes(user.used).split(' ')[0], user.quota ? '配额 ' + bytes(user.quota) : '不限流量', bytes(user.used).split(' ')[1] || '')}${stat('剩余', user.quota ? bytes(Math.max(0, user.quota - user.used)).split(' ')[0] : '不限', user.quota ? '达到配额后停用全部节点' : '未设置配额', user.quota ? bytes(Math.max(0, user.quota - user.used)).split(' ')[1] || '' : '')}${stat('关联节点', user.links.length, user.links.filter(l => l.sync === 'synced').length + ' 个已同步')}${stat('统计周期', user.cycle === 'total' ? '累计' : esc(user.cycle), user.reset_day ? '按面板时区切换' : '不自动重置')}</div>
-    ${loginBlock(user)}
     <div class="panel"><div class="panel-head"><h2>关联节点 <span class="count">${user.links.length}</span></h2><button class="primary small" data-action="pu-link" ${user.deleting ? 'disabled' : ''}>${icon('plus')}关联节点</button></div><div class="table-wrap"><table><thead><tr><th>节点</th><th>协议</th><th>同步</th><th class="num">本周期用量</th><th>操作</th></tr></thead><tbody>${links || '<tr><td colspan="5">尚未关联节点。关联后会在节点上创建统一用户，或认领节点上已有的统一用户。</td></tr>'}</tbody></table></div></div>
     <p class="helper">每个协议的凭据独立。同步任务出现在任务记录中，结果未确认时不会自动重试，请核对后标记已核对。</p>`, 'users');
 }
 
 function userForm(user) {
-    modal(user ? '编辑用户' : '新建用户', `<form id="pu-form"><label for="pu-name">用户名</label><input id="pu-name" value="${esc(user?.name || '')}" pattern="[A-Za-z0-9_\\-]{1,32}" maxlength="32" required><label for="pu-quota">总流量配额（GiB）</label><input id="pu-quota" type="number" min="0" max="999999" step="1" required value="${Math.ceil((user?.quota || 0) / 1073741824)}"><label for="pu-reset">每月重置日</label><input id="pu-reset" type="number" min="0" max="28" step="1" required value="${user?.reset_day || 0}"><label for="pu-expire">到期日期</label><input id="pu-expire" type="date" value="${esc(user?.expire_date || '')}"><label for="pu-note">备注</label><input id="pu-note" maxlength="200" value="${esc(user?.note || '')}">${user ? `<label class="field-check"><input id="pu-enabled" type="checkbox" ${user.enabled ? 'checked' : ''}>启用此用户</label>` : ''}<p class="helper">配额 0 表示不限，重置日 0 表示累计不重置；周期按面板时区切换，修改设置保留本周期用量。到期日期留空表示永不过期。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="submit" class="primary">${user ? '保存修改' : '创建用户'}</button></div></form>`);
+    modal(user ? '编辑用户' : '新建用户', `<form id="pu-form"><label for="pu-name">用户名</label><input id="pu-name" value="${esc(user?.name || '')}" pattern="[A-Za-z0-9_\\-]{1,32}" maxlength="32" required><label for="pu-quota">总流量配额（GiB）</label><input id="pu-quota" type="number" min="0" max="999999" step="1" required value="${Math.ceil((user?.quota || 0) / 1073741824)}"><label for="pu-reset">每月重置日</label><input id="pu-reset" type="number" min="0" max="28" step="1" required value="${user?.reset_day || 0}"><label for="pu-expire">到期日期</label><input id="pu-expire" type="date" value="${esc(user?.expire_date || '')}"><label for="pu-note">备注</label><input id="pu-note" maxlength="200" value="${esc(user?.note || '')}"><label for="pu-password">登录密码</label><div class="input-action"><input id="pu-password" type="text" minlength="8" maxlength="128" ${user ? 'placeholder="留空不修改"' : 'required'} autocomplete="off" spellcheck="false"><button type="button" data-action="pu-password-random">随机生成</button></div><p class="helper">用户用用户名和此密码登录自己的页面，8–128 位。${user ? '填写即重置密码，该用户已登录的设备会退出。' : ''}</p>${user ? `<label class="field-check"><input id="pu-enabled" type="checkbox" ${user.enabled ? 'checked' : ''}>启用此用户</label>` : ''}<p class="helper">配额 0 表示不限，重置日 0 表示累计不重置；周期按面板时区切换，修改设置保留本周期用量。到期日期留空表示永不过期。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="submit" class="primary">${user ? '保存修改' : '创建用户'}</button></div></form>`);
     $('#pu-form').onsubmit = async e => {
         e.preventDefault();
         const button = $('[type=submit]', e.target); button.disabled = true;
         const data = {name: $('#pu-name').value, quota_gb: Number($('#pu-quota').value), reset_day: Number($('#pu-reset').value), expire_date: $('#pu-expire').value, note: $('#pu-note').value};
+        const password = $('#pu-password').value;
+        if (password) data.password = password;
         try {
             if (user) {
                 data.enabled = $('#pu-enabled').checked;
                 if (data.quota_gb === Math.ceil(user.quota / 1073741824)) delete data.quota_gb;
                 await post('/users/' + user.id, data);
-                $('#modal').close(); toast('已保存，正在同步到各节点'); await userDetail(user.id);
+                $('#modal').close(); toast(password ? '已保存，登录密码已重置' : '已保存，正在同步到各节点'); await userDetail(user.id);
             } else {
                 const created = await post('/users', data);
-                $('#modal').close(); location.hash = 'users/' + created.id;
+                location.hash = 'users/' + created.id;
+                // Shown once so the admin can pass it on; only its hash is stored.
+                modal('用户已创建', `<p>用户 <strong>${esc(data.name)}</strong> 可以用以下信息登录：</p><div class="kv"><span>登录地址</span><span class="mono">${esc(location.origin)}</span></div><div class="kv"><span>用户名</span><span class="mono">${esc(data.name)}</span></div><label for="connection">登录密码</label><textarea id="connection" readonly rows="1">${esc(password)}</textarea><button data-action="copy-connection">复制密码</button><p class="helper">密码只显示这一次，之后可在「编辑用户」中重置。</p><div class="modal-foot"><button class="primary" data-action="close">完成</button></div>`);
             }
         } catch (err) { formError(err); button.disabled = false; }
     };
@@ -1138,8 +1140,7 @@ async function userAction(action, b) {
     else if (action === 'pu-edit') userForm(currentUser);
     else if (action === 'pu-link') linkDialog();
     else if (action === 'pu-members') membersDialog(b.dataset.link);
-    else if (action === 'pu-login-set') loginPasswordDialog(currentUser);
-    else if (action === 'pu-login-off') choiceDialog('关闭登录', '关闭后该用户无法登录自己的页面，已登录的设备立即退出。可随时重新设置密码开启。', [], async () => { await post('/users/' + currentUser.id + '/login', {enabled: false}); toast('已关闭登录'); await userDetail(currentUser.id); });
+    else if (action === 'pu-password-random') { $('#pu-password').value = randomPassword(); $('#pu-password').focus(); }
     else if (action === 'pu-reset-usage') choiceDialog('重置用量', '清零该用户在所有节点上的本周期用量，超额停用的节点会自动恢复。', [], async () => { await post('/users/' + currentUser.id + '/reset-usage'); toast('用量已清零'); await userDetail(currentUser.id); });
     else if (action === 'pu-reset-credentials') choiceDialog('重置全部凭据', '为该用户在所有节点的每个协议生成新凭据，旧连接全部失效，之后请重新导出连接信息。', [], async () => { await post('/users/' + currentUser.id + '/reset-credentials', {}); toast('已提交，节点在线时自动同步'); await userDetail(currentUser.id); });
     else if (action === 'pu-unlink') choiceDialog('解除节点关联', '解除后面板不再管理该节点上的这个用户。', [['release', '保留节点上的统一用户，改为在节点本地管理'], ['delete', '删除节点上的统一用户和全部协议账号（旧连接失效）']], async mode => { await post('/links/' + b.dataset.link + '/remove', {mode}); toast('已提交，节点在线时自动执行'); await userDetail(currentUser.id); });
@@ -1197,7 +1198,7 @@ async function installPlaceUsers(users, nodeId = selected.id) {
 // ---------------------------------------------------------------- 通知配置（TG 通知、用户查询机器人与绑定码）
 async function monitorPage() {
     const data = await api('/monitor'), c = data.config, bound = data.users.filter(u => u.bound).length;
-    shell(`<div class="heading"><div><h1>通知配置</h1><p class="subtext">Telegram 管理员通知、每日报告与用户查询机器人。以平台为准的节点不再使用脚本自己的 TG 配置。</p></div><button data-action="monitor-settings" class="primary">通知设置</button></div>
+    shell(`<div class="heading"><div><h1>通知配置</h1></div><button data-action="monitor-settings" class="primary">通知设置</button></div>
     <div class="panel status-panel"><div class="status-main"><h2 class="status-title ${c.enabled ? 'on' : 'off'}">${c.enabled ? 'TG 通知已启用' : 'TG 通知未启用'}</h2><p>Bot Token：${c.token_configured ? '已配置' : '未配置'} · Chat ID：${c.chat_id ? esc(c.chat_id) : '未配置'} · 每日报告：${c.daily_enabled ? '每天 ' + esc(c.daily_time) : '关闭'}</p><p class="helper">节点离线超过 2 分钟、任务异常、到期前 3 天、流量达到 ${Number(c.quota_percent)}% 和用尽时提醒，恢复后再通知一次。监控检查：${date(Number(data.heartbeat) || 0)}。发送失败的消息不重发，也不保留发送记录。</p></div><button data-action="notification-test" ${c.enabled ? '' : 'disabled'}>测试发送</button></div>
     <div class="panel status-panel"><div class="status-main"><h2 class="status-title ${c.bot_enabled ? 'on' : 'off'}">${c.bot_enabled ? '用户查询机器人已启用' : '用户查询机器人未启用'}</h2><p>已绑定用户：${bound} / ${data.users.length}</p><p class="helper">复用上面的 Bot Token，启用时移除该 Bot 的 webhook，由面板轮询消息。已绑定的用户私聊机器人可查询所有节点合计流量与到期，并收到自己的流量和到期提醒。命令：/bind 绑定码、/traffic、/status、/unbind、/help。</p></div><button data-action="pu-tg-bot" data-enabled="${c.bot_enabled ? '' : '1'}" ${c.token_configured ? '' : 'disabled'}>${c.bot_enabled ? '禁用机器人' : '启用机器人'}</button></div>
     <div class="section-label"><h2>用户绑定 <span class="count">${data.users.length}</span></h2></div>
@@ -1293,22 +1294,9 @@ async function panelAddressAction(action) {
 let portalState = null;
 const relayStateText = {creating: '创建中', active: '正常', partial: '部分失败', removing: '删除中'};
 
-function loginBlock(user) {
-    return user.login_enabled
-        ? `<div class="notice login-block"><div><strong>已开启登录</strong><br>该用户可用用户名 <span class="mono">${esc(user.name)}</span> 和密码登录，查看自己的用量、连接信息和 Telegram 绑定。</div><div class="action-row"><button data-action="pu-login-set">重置密码</button><button data-action="pu-login-off">关闭登录</button></div></div>`
-        : `<div class="notice login-block"><div><strong>未开启登录</strong><br>设置密码后，用户可以在登录页用用户名登录，自助查看用量、导出连接和绑定 Telegram。</div><div class="action-row"><button data-action="pu-login-set">设置密码并开启登录</button></div></div>`;
-}
-
-function loginPasswordDialog(user) {
-    modal(user.login_enabled ? '重置登录密码' : '开启登录', `<form id="pu-login-form"><p>用户 <strong>${esc(user.name)}</strong> 将用此密码登录。保存后该用户已登录的设备会退出，请把新密码告知用户。</p><label for="pu-login-password">登录密码</label><input id="pu-login-password" type="text" minlength="8" maxlength="128" required autocomplete="off" spellcheck="false"><p class="helper">8–128 位。用户登录后可以自己修改。</p><div class="error" role="alert"></div><div class="modal-foot"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存</button></div></form>`);
-    $('#pu-login-form').onsubmit = async e => {
-        e.preventDefault();
-        const button = $('[type=submit]', e.target); button.disabled = true;
-        try {
-            await post('/users/' + user.id + '/login', {password: $('#pu-login-password').value});
-            $('#modal').close(); toast('已开启登录'); await userDetail(user.id);
-        } catch (err) { formError(err); button.disabled = false; }
-    };
+function randomPassword() {
+    const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789', bytes = crypto.getRandomValues(new Uint8Array(14));
+    return Array.from(bytes, n => chars[n % chars.length]).join('');
 }
 
 async function portal() {
@@ -1328,7 +1316,7 @@ function portalPage(me) {
     const percent = me.quota ? Math.min(100, me.used / me.quota * 100) : null;
     const links = me.links.map(l => `<tr><td data-label="服务器"><span>${esc(l.node_name)}${l.online ? '' : ' <span class="muted">离线</span>'}</span></td><td data-label="协议 · 端口"><div>${l.members.map(m => `<div class="portal-member"><span>${esc(names[m.protocol] || m.protocol)} <span class="muted mono">${m.port}</span>${m.enabled ? '' : ' <span class="muted">已停用</span>'}</span>${m.enabled ? `<button class="small" data-action="me-share" data-link="${esc(l.id)}" data-core="${esc(m.core)}" data-protocol="${esc(m.protocol)}" data-port="${m.port}"${l.online ? '' : ' disabled'}>连接信息</button>` : ''}</div>`).join('') || '<span class="muted">等待服务器创建</span>'}</div></td><td class="num" data-label="本周期用量">${bytes(l.cycle_used)}</td></tr>`).join('');
     const relays = me.relays.map(r => `<tr><td class="relay-chain" data-label="线路"><span>${r.chain.map(esc).join('<span class="relay-chain-arrow" aria-hidden="true">→</span>')}</span></td><td class="mono" data-label="入口">${esc(r.entry || '—')}</td><td data-label="落地协议">${r.port_only ? '仅转发端口' : esc(names[r.protocol] || r.protocol)}</td><td data-label="状态"><span class="badge ${r.state === 'active' ? 'running' : 'stopped'}">${esc(relayStateText[r.state] || r.state)}</span></td><td>${r.state === 'active' && !r.port_only ? `<button class="small" data-action="me-share-relay" data-id="${esc(r.id)}">连接信息</button>` : ''}</td></tr>`).join('');
-    return `<div class="portal"><header class="portal-head"><div class="brand">Vaio <span>我的账号</span></div><div class="portal-account"><span class="muted">${esc(me.name)}</span><button class="quiet small" data-action="me-password">修改密码</button><button class="quiet small" data-action="logout">退出</button></div></header><main class="portal-main">
+    return `<div class="portal"><header class="portal-head">${brand}<div class="portal-account"><span class="muted">${esc(me.name)}</span><button class="quiet small" data-action="me-password">修改密码</button><button class="quiet small" data-action="logout">退出</button></div></header><main class="portal-main">
 <div class="heading"><div><h1>${esc(me.name)} ${stateBadge(userStates, me.state)}</h1><p class="subtext">我的账号 · 用量每分钟同步</p></div></div>
 <div class="stats">${stat('本周期用量', bytes(me.used).split(' ')[0], '配额 ' + quota, bytes(me.used).split(' ')[1] || '')}${stat('剩余', left.split(' ')[0], percent == null ? '未设置配额' : '已用 ' + percent.toFixed(0) + '%', me.quota ? left.split(' ')[1] || '' : '')}${stat('到期', me.expire_date || '永久', me.expire_date ? '到期后所有协议停用' : '不会到期')}${stat('流量重置', me.reset_day ? me.reset_day + ' 日' : '不重置', me.reset_day ? '每月该日清零用量' : '累计计算')}</div>
 <div class="section-label"><h2>我的协议 <span class="count">${me.links.reduce((n, l) => n + l.members.length, 0)}</span></h2></div><div class="panel table-wrap"><table><thead><tr><th>服务器</th><th>协议 · 端口</th><th class="num">本周期用量</th></tr></thead><tbody>${links || '<tr><td colspan="3">还没有可用的协议，请联系管理员。</td></tr>'}</tbody></table></div>
@@ -1395,7 +1383,7 @@ async function portalAction(action, b) {
 
 // ---------------------------------------------------------------- 系统设置、面板更新、一键更新节点程序
 function settingsTabs(active) {
-    return `<div class="tabs settings-tabs">${[['account', '账号'], ['address', '面板地址']].map(([id, text]) => `<button type="button" data-action="settings-tab" data-tab="${id}" class="${active === id ? 'active' : ''}"${active === id ? ' aria-current="page"' : ''}>${text}</button>`).join('')}</div>`;
+    return `<div class="tabs settings-tabs">${[['account', '账号'], ['address', '面板地址'], ['backup', '备份恢复']].map(([id, text]) => `<button type="button" data-action="settings-tab" data-tab="${id}" class="${active === id ? 'active' : ''}"${active === id ? ' aria-current="page"' : ''}>${text}</button>`).join('')}</div>`;
 }
 
 // Node program version against the panel's (nodes upgrade to the panel's own version).
@@ -1514,7 +1502,7 @@ function relayTable(lines) {
 async function relaysPage() {
     relayData = (await api('/relays')).relays;
     const servers = nodes.filter(n => !n.deleted);
-    shell(`<div class="heading"><div><h1>中转管理</h1><p class="subtext">用户经中转服务器连接落地协议的线路，自动在各中转服务器上建立端口转发。</p></div><div class="action-row"><button data-action="refresh">${icon('refresh')}刷新</button><button class="primary" data-action="rl-add">${icon('plus')}添加中转线路</button></div></div>
+    shell(`<div class="heading"><div><h1>中转管理</h1></div><div class="action-row"><button data-action="refresh">${icon('refresh')}刷新</button><button class="primary" data-action="rl-add">${icon('plus')}添加中转线路</button></div></div>
     <div class="section-label"><h2>线路 <span class="count" id="relay-count"></span></h2><div class="tools instance-filters">
     ${filterMenu('relay-node', '筛选服务器', [['', '全部服务器'], ...servers.map(n => [n.id, n.name])], relayFilter.node)}
     <div class="search">${icon('search')}<input id="relay-search" type="search" aria-label="搜索中转线路" placeholder="搜索用户或服务器" value="${esc(relayFilter.q)}"></div></div></div>
@@ -1635,6 +1623,20 @@ async function relayDialog() {
         } catch (err) { formError(err); button.disabled = false; }
     };
 }
+// The relay table appears on its own page and on the overview.
+async function relaysView() {
+    if (location.hash.replace('#', '') === 'relays') return relaysPage();
+    await loadOverviewRelays();
+}
+async function loadOverviewRelays() {
+    const data = await api('/relays');
+    relayData = data.relays;
+    const box = $('#overview-relays');
+    if (box) {
+        box.innerHTML = relayTable(relayData);
+        $('#overview-relay-count').textContent = relayData.length;
+    }
+}
 async function relayAction(action, b) {
     if (action === 'rl-add') return relayDialog();
     const line = relayData.find(l => l.id === b.dataset.id);
@@ -1647,12 +1649,12 @@ async function relayAction(action, b) {
     } else if (action === 'rl-retry') {
         await post('/relays/' + line.id + '/retry');
         toast('已重新提交失败的中转服务器');
-        await relaysPage();
+        await relaysView();
     } else if (action === 'rl-delete') {
         choiceDialog('删除中转线路', `删除 ${esc(line.user_name)} 经 ${line.hops.map(h => esc(h.node_name)).join(' → ')} 到 ${esc(line.landing.node_name)} 的线路，并删除各中转服务器上的转发规则。用户在落地协议上的账号保留。`, [], async () => {
             await post('/relays/' + line.id + '/delete');
             toast('正在删除各中转服务器上的转发规则');
-            await relaysPage();
+            await relaysView();
         });
     }
 }
@@ -1682,7 +1684,7 @@ function forwardTable(rows) {
 function forwardsPage() {
     const rows = forwardRows(), f = forwardFilter, servers = nodes.filter(n => !n.deleted);
     const outdated = servers.filter(n => n.adopted && n.snapshot.forward_version !== 1).length;
-    shell(`<div class="heading"><div><h1>端口转发</h1><p class="subtext">所有服务器上的 Realm 与 nftables 转发规则，与节点脚本的配置双向同步。</p></div><div class="action-row"><button data-action="refresh">${icon('refresh')}刷新</button><button class="primary" data-action="fw-add">${icon('plus')}新建转发</button></div></div>
+    shell(`<div class="heading"><div><h1>端口转发</h1></div><div class="action-row"><button data-action="refresh">${icon('refresh')}刷新</button><button class="primary" data-action="fw-add">${icon('plus')}新建转发</button></div></div>
     ${outdated ? `<div class="notice">${outdated} 台服务器的节点程序版本较旧，升级后才能查看和管理端口转发。</div>` : ''}
     <div class="section-label"><h2>规则 <span class="count" id="forward-count"></span></h2><div class="tools instance-filters">
     ${filterMenu('forward-node', '筛选服务器', [['', '全部服务器'], ...servers.map(n => [n.id, n.name])], f.node)}
@@ -1916,7 +1918,7 @@ function instancesPage() {
     const rows = instanceRows(), f = instanceFilter;
     const servers = nodes.filter(n => !n.deleted);
     const protocols = [...new Set(rows.map(r => r.p.protocol))].sort();
-    shell(`<div class="heading"><div><h1>节点管理</h1><p class="subtext">所有服务器上的协议实例，按服务器、协议、状态和用户模式筛选。</p></div><div class="action-row"><button data-action="refresh">${icon('refresh')}刷新</button><button class="primary" data-action="instance-create">${icon('plus')}新建协议</button></div></div>
+    shell(`<div class="heading"><div><h1>节点管理</h1></div><div class="action-row"><button data-action="refresh">${icon('refresh')}刷新</button><button class="primary" data-action="instance-create">${icon('plus')}新建协议</button></div></div>
     <div class="section-label"><h2>节点 <span class="count" id="instance-count"></span></h2><div class="tools instance-filters">
     ${filterMenu('instance-node', '筛选服务器', [['', '全部服务器'], ...servers.map(n => [n.id, n.name])], f.node)}
     ${filterMenu('instance-protocol', '筛选协议', [['', '全部协议'], ...protocols.map(p => [p, names[p] || p])], f.protocol)}
