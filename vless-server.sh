@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.14"
+readonly VERSION="3.7.4-preview.15"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -2132,19 +2132,25 @@ db_account_member_new() {
         ss2022)
             method=$(jq -r --arg c "$core" --arg p "$proto" --argjson port "$port" "$(_account_jq_defs)"'
                 first(proto_rows($c; $p)[] | select(.port == $port) | .method) // ""' "$DB_FILE")
-            if [[ "$method" == *256* ]]; then credential=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
-            else credential=$(head -c 16 /dev/urandom | base64 | tr -d '\n'); fi ;;
+            # 只有 aes-128-gcm 用 16 字节密钥；aes-256-gcm 与 chacha20-poly1305 都是 32 字节。
+            if [[ "$method" == *128* ]]; then credential=$(head -c 16 /dev/urandom | base64 | tr -d '\n')
+            else credential=$(head -c 32 /dev/urandom | base64 | tr -d '\n'); fi ;;
         *) credential=$(gen_password 16) ;;
     esac
     [[ -n "$credential" ]] || { _err "凭据生成失败"; return 1; }
     _account_materialize_default "$core" "$proto" "$port" || return 1
     jq -e --arg c "$core" --arg p "$proto" --argjson port "$port" "$(_account_jq_defs)"'
         any(proto_rows($c; $p)[]; .port == $port)' "$DB_FILE" >/dev/null || { _err "协议实例不存在"; return 1; }
+    # 面板安装的 SS2022 实例没有单独的实例密钥（唯一用户的密钥即实例密钥）；加入第二个用户前
+    # 先把它记为服务端密钥，否则仍按单用户渲染，新用户无法连接。
     _db_apply --arg c "$core" --arg p "$proto" --argjson port "$port" --arg n "$name" --arg u "$credential" \
         --arg cr "$(date +%F)" "$(_account_jq_defs)"'
+        def add_user:
+            (if $p == "ss2022" and (.password // "") == "" and ((.users // []) | length) > 0 then .password = .users[0].uuid else . end) |
+            .users = ((.users // []) + [{name: $n, uuid: $u, quota: 0, used: 0, enabled: true, created: $cr, expire_date: ""}]);
         if (.[$c][$p] | type) == "array" then
-            .[$c][$p] |= map(if .port == $port then .users = ((.users // []) + [{name: $n, uuid: $u, quota: 0, used: 0, enabled: true, created: $cr, expire_date: ""}]) else . end)
-        else .[$c][$p].users = ((.[$c][$p].users // []) + [{name: $n, uuid: $u, quota: 0, used: 0, enabled: true, created: $cr, expire_date: ""}]) end' || return 1
+            .[$c][$p] |= map(if .port == $port then add_user else . end)
+        else .[$c][$p] |= add_user end' || return 1
     db_account_member_add "$id" "$core" "$proto" "$port" "$name" false || return 1
     _accounts_reload_or_queue "$core|$proto"
 }
@@ -3313,7 +3319,7 @@ _repair_singbox_stats_interactive() {
 _singbox_stats_config_ready() {
     [[ -f "$CFG/singbox.json" ]] || return 1
     local proto mappings name key keys="[]"
-    for proto in vless trojan hy2 tuic anytls ss-legacy; do
+    for proto in vless trojan hy2 tuic anytls ss-legacy ss2022; do
         mappings=$(_get_singbox_stat_user_mappings "$proto")
         [[ -n "$mappings" ]] || continue
         while IFS='|' read -r name key; do
@@ -3963,9 +3969,10 @@ _sync_all_user_traffic_unlocked() {
         done
     done
 
-    # 所有支持命名用户计数的 Sing-box 协议。
+    # 所有支持命名用户计数的 Sing-box 协议（多用户 SS / SS2022 的用户名为「协议-用户名」；
+    # 单用户 SS / SS2022 的入站没有命名用户，由 _sync_ss_inbound_traffic 按入站计数，这里查到 0 不会重复）。
     if [[ "$has_singbox" == "true" && "$singbox_failed" == false ]]; then
-        for proto in vless trojan hy2 tuic anytls ss-legacy; do
+        for proto in vless trojan hy2 tuic anytls ss-legacy ss2022; do
             db_exists "singbox" "$proto" || continue
             local mappings=$(_get_singbox_stat_user_mappings "$proto")
             [[ -z "$mappings" ]] && continue
@@ -5250,9 +5257,10 @@ _platform_render_inbound() {
           .listen_port=$r.port | .listen=(.listen // "0.0.0.0") |
           .tag=(.tag // $r.runtime_tag // ($p+"-in-"+($r.port|tostring))) |
           .method=$r.method |
-          (if $p == "ss2022" and ($r.password // "") != "" and ($r.users | type) == "array" and (($r.users | length) != 1 or $r.users[0].uuid != $r.password) then
-             # 多用户 SS2022：实例密钥为服务端密钥，用户密钥各自独立
-             .password=$r.password |
+          ($r.password // $r.users[0]?.uuid // "") as $server_key |
+          (if $p == "ss2022" and $server_key != "" and ($r.users | type) == "array" and (($r.users | length) != 1 or $r.users[0].uuid != $server_key) then
+             # 多用户 SS2022：实例密钥为服务端密钥（旧实例无 password 时为第一个用户的密钥），用户密钥各自独立
+             .password=$server_key |
              .users=(if ($users|length)>0 then [$users[] | {name:("ss2022-"+.name), password:.uuid}]
                else [{name:"vaio-disabled", password:(if $r.method=="2022-blake3-aes-128-gcm" then $disabled16 else $disabled32 end)}] end)
            elif $p == "ss-legacy" and (($r.users // []) | length) > 1 then
@@ -6089,8 +6097,9 @@ _socks_accounts() {
     fi
 }
 
+# 实例密钥：password；面板安装的旧实例没有单独字段时用第一个用户的密钥（加入第二个用户时会写入 password）。
 _ss2022_is_multi() {
-    jq -e '(.password // "") != "" and (.users | type) == "array" and ((.users | length) != 1 or .users[0].uuid != .password)' <<< "$1" >/dev/null 2>&1
+    jq -e '(.password // .users[0]?.uuid // "") as $k | $k != "" and (.users | type) == "array" and ((.users | length) != 1 or .users[0].uuid != $k)' <<< "$1" >/dev/null 2>&1
 }
 
 _ss2022_active_users() {
@@ -12949,7 +12958,7 @@ generate_singbox_config() {
                 inbound=$(_ss_legacy_singbox_inbound "$cfg" "$listen_addr") || return 1
                 ;;
             ss2022)
-                local password=$(echo "$cfg" | jq -r '.password // empty')
+                local password=$(echo "$cfg" | jq -r '.password // .users[0]?.uuid // empty')
                 local method=$(echo "$cfg" | jq -r '.method // empty')
                 if _ss2022_is_multi "$cfg"; then
                     local ss_users
