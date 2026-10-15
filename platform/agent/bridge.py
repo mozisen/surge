@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from vaio.install_options import SS_METHODS
-from vaio.common import MUTATIONS, PROTOCOLS, config_revision, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task
+from vaio.common import MUTATIONS, PROTOCOLS, config_revision, validate_core_task, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task
 from .addresses import discover
 from .config_details import config_details
 from .inventory import mutable, read_db, rows, service_for, users_for
@@ -121,7 +121,10 @@ class Bridge:
         platform = isinstance(task, dict) and task.get("action") == "platform_apply"
         upgrade = isinstance(task, dict) and task.get("action") == "agent_upgrade"
         forward = isinstance(task, dict) and task.get("action") == "forward_apply"
-        if forward:
+        core = isinstance(task, dict) and task.get("action") == "core_update"
+        if core:
+            validated = validate_core_task({k: v for k, v in task.items() if k != "id"})
+        elif forward:
             validated = validate_forward_task({k: v for k, v in task.items() if k != "id"})
         elif platform:
             validated = validate_platform_task({k: v for k, v in task.items() if k != "id"})
@@ -154,6 +157,12 @@ class Bridge:
             try:
                 if upgrade:
                     result = self._upgrade(identity)
+                elif core:
+                    from . import cores
+                    try:
+                        result = cores.update(self.runtime, self.cfg, self.state, validated["params"]["core"])
+                    except cores.RestoreFailed as error:
+                        raise TransactionUnknown(str(error)) from None
                 elif forward:
                     result = self._forward_apply(validated, identity)
                 elif platform:

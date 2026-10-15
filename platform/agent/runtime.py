@@ -96,16 +96,24 @@ class Runtime:
 
     def upstream(self, operation, *args):
         allowed = {"install_xray", "install_singbox", "install_snell", "install_snell_v5", "install_snell_v6", "_snell_update_counter_port", "install_acme_tool",
-                   "accounts_apply"}
+                   "accounts_apply", "_update_singbox_preserving_stats"}
         if operation not in allowed:
             raise ValueError("未授权的脚本操作")
+        self.command(["bash", "-c", 'source "$1"; shift; "$@"', "vaio", str(self.library()), operation, *args], timeout=1800)
+
+    def upstream_output(self, operation, *args):
+        """Read-only script lookups (latest core versions); returns stdout."""
+        if operation not in {"_get_latest_version", "_get_snell_v6_stable_version"}:
+            raise ValueError("未授权的脚本操作")
+        return self.command(["bash", "-c", 'source "$1"; shift; "$@"', "vaio", str(self.library()), operation, *args], timeout=120, capture=True)
+
+    def library(self):
         source = (ROOT / "vendor/vless-server.sh").read_bytes()
         if hashlib.sha256(source).hexdigest() != UPSTREAM_SHA:
             raise RuntimeError("脚本完整性校验失败")
         library = self.state / "upstream-library.sh"
         atomic_write(library, source.decode().split("# 命令行参数处理\n", 1)[0])
-        runner = 'source "$1"; shift; "$@"'
-        self.command(["bash", "-c", runner, "vaio", str(library), operation, *args], timeout=1200)
+        return library
 
     def install(self, proto, core=None):
         self.ensure_main_script()

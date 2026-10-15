@@ -91,6 +91,11 @@ class Agent:
             if task.get("action") == "agent_set_url":
                 return dict(status="succeeded", message="已改用新的面板地址", result=self.set_url(task))
             result = self.bridge.execute(task)
+            if task.get("action") == "core_update":
+                self.refresh_cores()
+                self.snapshot_at = 0
+                return dict(status="succeeded", message=(("已更新到 " + result["to"]) if result.get("changed") else "已是最新版本 " + result["to"]),
+                            result={"core": result})
             return dict(status="succeeded", message="操作完成", result=result)
         except TransactionUnknown as error:
             return dict(status="unknown", message=str(error), result={})
@@ -135,6 +140,8 @@ class Agent:
             snapshot["forwards"] = snapshot["script_api"].pop("forwards", [])
             snapshot["forward_version"] = 1 if snapshot["script_api"].get("forward_api") == 1 else 0
         snapshot["addresses"] = dict(getattr(self, "addresses", {}))
+        snapshot["cores"] = dict(getattr(self, "cores", {}))
+        snapshot["core_update_version"] = 1
         task = self.api("/poll", {"snapshot": snapshot, "ready": future is None}).get("task")
         if task and future is None:
             task_id = task["id"]
@@ -158,6 +165,39 @@ class Agent:
             self.snapshot_at = 0          # report the new usage on the next poll
         self.bridge.reconcile()
 
+    def watch_cores(self, current_every=600, latest_every=6 * 3600):
+        """Installed and latest core versions, in the background so polls never wait on the network."""
+        from . import cores
+        latest, official, checked = {}, "", 0
+        while True:
+            try:
+                current = {core: cores.read_version(core) for core in cores.CORES}
+                if time.time() - checked > latest_every:
+                    runtime = self.bridge.runtime
+                    for core, (version, _) in current.items():
+                        if version:
+                            try:
+                                latest[core] = cores.latest(runtime, core)
+                            except Exception:
+                                logging.warning("获取 %s 最新版本失败", cores.CORES[core]["label"])
+                    if current["singbox"][0]:
+                        try:
+                            official = cores.official_singbox(runtime)
+                        except Exception:
+                            pass
+                    checked = time.time()
+                self.cores = cores.snapshot(current, latest, official)
+            except Exception:
+                logging.exception("读取内核版本失败")
+            time.sleep(current_every)
+
+    def refresh_cores(self):
+        """After a core update: report the new version now, keep the known latest versions."""
+        from . import cores
+        known = dict(getattr(self, "cores", {}))
+        current = {core: cores.read_version(core) for core in cores.CORES}
+        self.cores = cores.snapshot(current, {k: v.get("latest", "") for k, v in known.items()}, known.get("singbox", {}).get("official", ""))
+
     def watch_addresses(self):
         """Public IPv4/IPv6 for relay targets, refreshed in the background so polls never wait on the network."""
         from .inventory import public_addresses
@@ -172,6 +212,8 @@ class Agent:
         with open(self.state / ".agent.lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             threading.Thread(target=self.watch_addresses, daemon=True, name="vaio-addresses").start()
+            if self.script_api:
+                threading.Thread(target=self.watch_cores, daemon=True, name="vaio-cores").start()
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future, maintenance, delay, last_maintenance = None, None, 10, 0
                 while True:

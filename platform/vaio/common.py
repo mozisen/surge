@@ -232,6 +232,17 @@ def validate_upgrade_task(data):
     return {"action": "agent_upgrade", "params": {}}
 
 
+CORE_NAMES = ("xray", "singbox", "snell-v5", "snell-v6")
+
+
+def validate_core_task(data):
+    """Update one proxy core to its latest stable version (Sing-box: the statistics build)."""
+    if not isinstance(data, dict) or set(data) != {"action", "params"} or data["action"] != "core_update" \
+            or not isinstance(data["params"], dict) or set(data["params"]) != {"core"} or data["params"]["core"] not in CORE_NAMES:
+        raise ValueError("内核更新任务字段无效")
+    return {"action": "core_update", "params": {"core": data["params"]["core"]}}
+
+
 def validate_set_url_task(data):
     """Point a node at the panel's new HTTPS address (after binding a domain)."""
     from urllib.parse import urlsplit

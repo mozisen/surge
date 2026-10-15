@@ -20,7 +20,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
 from . import platform_users
-from .common import FORWARD_FIELDS, MUTATIONS, LEGACY_COMBINATIONS, PROTOCOLS, digest, require_text, validate_forward_rule, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task
+from .common import CORE_NAMES, FORWARD_FIELDS, MUTATIONS, LEGACY_COMBINATIONS, PROTOCOLS, digest, require_text, validate_forward_rule, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task, validate_core_task
 from .install_options import ADVANCED_INSTALL_FIELDS, REALITY_INSTALL_FIELDS
 from .store import Store
 
@@ -657,7 +657,7 @@ def create_app(config=None):
             if not isinstance(detail, dict) or len(json.dumps(detail)) > 32000:
                 raise ValueError("结果过大")
             # Keep only intentionally supported result fields; raw logs never enter the panel DB.
-            detail = {k: v for k, v in detail.items() if k in ("connection", "config_details", "backup", "steps", "affected", "accounts", "rule")}
+            detail = {k: v for k, v in detail.items() if k in ("connection", "config_details", "backup", "steps", "affected", "accounts", "rule", "core")}
             if task["action"] != "share":
                 detail.pop("connection", None)
                 detail.pop("config_details", None)
@@ -1305,6 +1305,59 @@ def create_app(config=None):
                            (task_id, node["id"], "agent_upgrade", json.dumps(validate_upgrade_task({"action": "agent_upgrade", "params": {}})),
                             "queued", time.time(), "system:" + task_id))
                 audit(db, "task.queued", node["id"], task_id + " agent_upgrade（一键更新全部节点）")
+                queued.append(node["name"])
+        return jsonify(queued=queued, skipped=skipped)
+
+    def core_block(snapshot, core):
+        """Why this node cannot update the core now (None: it can)."""
+        if snapshot.get("core_update_version") != 1:
+            return "节点程序需更新到 1.4.0 及以上"
+        item = (snapshot.get("cores") or {}).get(core)
+        if not item:
+            return "未安装此内核"
+        if not item.get("latest"):
+            return "暂未获取到最新稳定版本" + ("（统计版预编译包）" if core == "singbox" else "")
+        if item["latest"] == item["current"] and (core != "singbox" or item.get("stats")):
+            return "已是最新版本"
+        return None
+
+    @app.post("/api/nodes/<node_id>/core-update")
+    @admin
+    def node_core_update(node_id):
+        data = body()
+        if set(data) != {"core"} or data["core"] not in CORE_NAMES:
+            raise ValueError("请选择要更新的内核")
+        return node_task(node_id, "core_update", validate_core_task({"action": "core_update", "params": {"core": data["core"]}}),
+                         lambda node, snapshot: core_block(snapshot, data["core"]))
+
+    @app.post("/api/nodes/core-update-all")
+    @admin
+    def nodes_core_update_all():
+        """Queue one core's update on every node that can take it now; the rest are listed with the reason."""
+        data = body()
+        if set(data) != {"core"} or data["core"] not in CORE_NAMES:
+            raise ValueError("请选择要更新的内核")
+        queued, skipped = [], []
+        request = json.dumps(validate_core_task({"action": "core_update", "params": {"core": data["core"]}}))
+        with store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for node in db.execute("SELECT * FROM nodes WHERE deleted IS NULL AND revoked=0 AND adopted=1 ORDER BY created").fetchall():
+                snapshot = json.loads(node["snapshot"])
+                if data["core"] not in (snapshot.get("cores") or {}) and snapshot.get("core_update_version") == 1:
+                    continue                                    # not installed there: not worth listing
+                reason = ("节点离线" if not node["last_seen"] or time.time() - node["last_seen"] > 45 else
+                          "节点正在维护" if node["maintenance"] else
+                          core_block(snapshot, data["core"]) or
+                          ("有未完成或待核对的任务" if db.execute("SELECT 1 FROM tasks WHERE node_id=? AND status IN ('queued','running','unknown')", (node["id"],)).fetchone() else None))
+                if reason == "已是最新版本":
+                    continue
+                if reason:
+                    skipped.append({"name": node["name"], "reason": reason})
+                    continue
+                task_id = str(uuid.uuid4())
+                db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
+                           (task_id, node["id"], "core_update", request, "queued", time.time(), "system:" + task_id))
+                audit(db, "task.queued", node["id"], task_id + " core_update " + data["core"] + "（一键更新内核）")
                 queued.append(node["name"])
         return jsonify(queued=queued, skipped=skipped)
 

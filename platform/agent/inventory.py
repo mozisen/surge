@@ -233,6 +233,17 @@ def sanitize_snapshot(snapshot):
     clean["addresses"] = {k: v for k, v in addresses.items() if k in ("ipv4", "ipv6") and isinstance(v, str) and _global_ip(v, 4 if k == "ipv4" else 6)} \
         if isinstance(addresses, dict) else {}
     clean["forward_version"] = 1 if snapshot.get("forward_version") == 1 else 0
+    clean["core_update_version"] = 1 if snapshot.get("core_update_version") == 1 else 0
+    cores = snapshot.get("cores")
+    clean["cores"] = {}
+    for name, item in (cores.items() if isinstance(cores, dict) else []):
+        if name not in ("xray", "singbox", "snell-v5", "snell-v6") or not isinstance(item, dict):
+            continue
+        entry = {k: v for k, v in item.items() if k in ("current", "latest", "official") and isinstance(v, str) and re.fullmatch(r"\d+\.\d+\.\d+", v)}
+        if "current" in entry:
+            if name == "singbox":
+                entry["stats"] = item.get("stats") is True
+            clean["cores"][name] = entry
     clean["forwards"] = sanitize_forwards(snapshot.get("forwards")) if clean["forward_version"] else []
     upgrade = snapshot.get("last_upgrade")
     if isinstance(upgrade, dict):
