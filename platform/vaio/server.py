@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, g, jsonify, request, send_file
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
@@ -36,6 +37,24 @@ def agent_archive():
         for name in ("vaio-agent", "update-agent.py"):
             archive.add(ROOT / "scripts" / name, arcname="scripts/" + name, recursive=False)
     return gzip.compress(buffer.getvalue(), mtime=0)
+
+
+class LoopbackProxyFix:
+    """Take the client address from Nginx's X-Forwarded-For, but only for requests that reach us over loopback.
+
+    The installer binds gunicorn to 127.0.0.1:18080 behind Nginx, so every request would otherwise share
+    127.0.0.1 (one login rate-limit bucket for everyone). A directly exposed backend (e.g. the Docker image on
+    0.0.0.0) never sees a loopback peer from outside, so remote clients cannot spoof their address.
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self.proxied = ProxyFix(app, x_for=1, x_proto=0, x_host=0, x_port=0, x_prefix=0)
+
+    def __call__(self, environ, start_response):
+        if environ.get("REMOTE_ADDR") in ("127.0.0.1", "::1"):
+            return self.proxied(environ, start_response)
+        return self.app(environ, start_response)
 
 
 def queue_url_migration(db, public_url, retry=False, now=None):
@@ -1310,4 +1329,5 @@ def create_app(config=None):
             rows = db.execute("SELECT * FROM audit ORDER BY id DESC LIMIT 200").fetchall()
         return jsonify(events=[dict(r) for r in rows])
 
+    app.wsgi_app = LoopbackProxyFix(app.wsgi_app)
     return app

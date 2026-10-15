@@ -177,6 +177,30 @@ class PanelTest(unittest.TestCase):
             self.assertEqual(client.post('/api/login',json={"username":"admin", "password":"bad"}).status_code,401)
         self.assertEqual(client.post('/api/login',json={"username":"admin", "password":"bad"}).status_code,429)
 
+    def test_login_rate_limit_per_proxied_client(self):
+        # Behind Nginx every request arrives from 127.0.0.1; one client's failures must not lock out the others.
+        client=self.app.test_client()
+        attacker={"X-Forwarded-For":"203.0.113.9"}
+        for _ in range(8):
+            self.assertEqual(client.post('/api/login',json={"username":"admin", "password":"bad"},headers=attacker).status_code,401)
+        self.assertEqual(client.post('/api/login',json={"username":"admin", "password":"bad"},headers=attacker).status_code,429)
+        # A client-supplied X-Forwarded-For is prepended by Nginx; only the last hop is trusted.
+        spoof={"X-Forwarded-For":"198.51.100.1, 203.0.113.9"}
+        self.assertEqual(client.post('/api/login',json={"username":"admin", "password":"bad"},headers=spoof).status_code,429)
+        other={"X-Forwarded-For":"198.51.100.7"}
+        self.assertEqual(client.post('/api/login',json={"username":"admin", "password":"a-long-test-password"},headers=other).status_code,200)
+
+    def test_forwarded_for_ignored_from_non_loopback_peer(self):
+        # A backend exposed directly (Docker on 0.0.0.0) must not let remote clients pick their own address.
+        client=self.app.test_client()
+        for index in range(8):
+            response=client.post('/api/login',json={"username":"admin", "password":"bad"},
+                                 headers={"X-Forwarded-For":"198.51.100.%d" % index},environ_base={"REMOTE_ADDR":"192.0.2.5"})
+            self.assertEqual(response.status_code,401)
+        response=client.post('/api/login',json={"username":"admin", "password":"bad"},
+                             headers={"X-Forwarded-For":"198.51.100.99"},environ_base={"REMOTE_ADDR":"192.0.2.5"})
+        self.assertEqual(response.status_code,429)
+
     def test_agent_bundle_deterministic_and_checksum(self):
         one=agent_archive()
         time.sleep(1.01)
