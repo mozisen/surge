@@ -122,3 +122,9 @@
 - 多用户 SS / SS2022 可管理并显示流量，多用户 SS2022 导出服务端密钥:用户密钥；节点脚本 3.7.4-preview.15（SS2022 按用户统计、保留服务端密钥、密钥长度按方法）。
 - 发布结果：vaio-panel `main` 追加提交 `2c174d9`「Vaio Panel 1.5.0」（来源 surge `7733147`，作者 mozi），标签 `v1.5.0`。发布目录 unittest 255 项（跳过 3 项）在普通与模拟已安装辅助服务环境下均通过，三个 cjs 测试通过；vaio-panel Actions（main 与标签）通过。已在网页创建 Release「Vaio Panel 1.5.0」，为最新版本。
 - **真实验收**：未执行（未在真实 Sing-box 与节点上验证多用户 SS / SS2022）。
+
+## 1.5.1（2026-10-15 发布到 vaio-panel）
+
+- 重置用量同时清零各关联节点的本周期用量；节点超额而面板未超额时自动清零。
+- 发布结果：vaio-panel `main` 追加提交 `b7c974d`「Vaio Panel 1.5.1」（来源 surge `a94d40a`，作者 mozi），标签 `v1.5.1`。发布目录 unittest 259 项（跳过 3 项）在普通与模拟已安装辅助服务环境下均通过，三个 cjs 测试通过；vaio-panel Actions（main 与标签）通过。已在网页创建 Release「Vaio Panel 1.5.1」，为最新版本。
+- **真实验收**：未执行。
