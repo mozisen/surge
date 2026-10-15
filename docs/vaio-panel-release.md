@@ -86,3 +86,9 @@
 - 代码审计修复（surge `be88535`…`8ef922a`）：登录限流按反向代理后的真实地址、root 辅助程序写状态文件不跟随符号链接、中转导出使用落地账号成员名、到期日只接受 YYYY-MM-DD、检查更新不占数据库写锁。
 - 发布结果：vaio-panel `main` 追加提交 `2eb22d2`「Vaio Panel 1.3.3」（来源 surge `f4249f2`，作者 mozi），标签 `v1.3.3`。发布目录 unittest 233 项（跳过 3 项）在普通与模拟已安装辅助服务环境下均通过，三个 cjs 测试通过；vaio-panel Actions（main 与标签）通过。已在网页创建 Release「Vaio Panel 1.3.3」，为最新版本。
 - **真实验收**：未执行。
+
+## 1.4.0（2026-10-15 发布到 vaio-panel）
+
+- 在面板更新内核（Xray、Sing-box 统计版、Snell v5/v6）：服务器详情单台更新、服务器页一键批量更新；节点程序先同步流量、备份、停启服务、失败恢复。节点需更新到 1.4.0，节点脚本未改动。
+- 发布结果：vaio-panel `main` 追加提交 `df30d80`「Vaio Panel 1.4.0」（来源 surge `6aa0fa9`，作者 mozi），标签 `v1.4.0`。发布目录 unittest 245 项（跳过 3 项）在普通与模拟已安装辅助服务环境下均通过，三个 cjs 测试通过；vaio-panel Actions（main 与标签）通过。已在网页创建 Release「Vaio Panel 1.4.0」，为最新版本。
+- **真实验收**：未执行（尚未在真实节点上通过面板更新内核）。
