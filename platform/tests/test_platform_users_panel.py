@@ -207,6 +207,19 @@ class PlatformUsersPanel(unittest.TestCase):
         a.settle()
         self.assertEqual(self.user(user)["used"], 10)
 
+    def test_expiry_by_panel_clock_blocks_every_node(self):
+        # Nodes judge expire_date by their own date (and some ports only daily); the panel's own verdict is pushed as a block.
+        user, a, b = self.linked_pair()
+        with self.store.connect() as db:
+            db.execute("UPDATE platform_users SET expire_date=? WHERE id=?", ((datetime.date.today() - datetime.timedelta(days=1)).isoformat(), user))
+        a.settle(); b.settle(); a.settle(); b.settle()
+        self.assertEqual(self.user(user)["state"], "expired")
+        self.assertEqual((self.account(a)[1].get("platform_block"), self.account(b)[1].get("platform_block")), ("quota", "quota"))
+        with self.store.connect() as db:
+            db.execute("UPDATE platform_users SET expire_date='2099-01-01' WHERE id=?", (user,))
+        a.settle(); b.settle(); a.settle(); b.settle()
+        self.assertEqual((self.account(a)[1]["platform_block"], self.account(b)[1]["platform_block"]), ("", ""))
+
     def test_adopted_script_nodes_switch_automatically_when_empty(self):
         node = SimNode(self, 'E', authority='script')        # adopted before switching existed; has a script user
         self.assertIsNone(node.poll(run=False))              # users present: wait for the operator

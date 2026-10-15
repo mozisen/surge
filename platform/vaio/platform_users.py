@@ -407,7 +407,10 @@ def plan(db, node, now=None):
             patch = {k: panel[k] for k in ACCOUNT_FIELDS if panel[k] != account.get(k)}
             if patch:
                 ops.append({"op": "update", "account_id": link["account_id"], "base_rev": account.get("rev", 0), "fields": patch})
-            block = "quota" if user["quota"] and usage(db, user["id"]) >= user["quota"] else ""
+            # The panel's clock decides expiry too: nodes judge expire_date by their own date (another time zone can be a
+            # day behind) and some ports are only checked by the script's daily run. "quota" is the only block value the
+            # node script accepts; it stops every member of the account at once.
+            block = "quota" if state_of(user, usage(db, user["id"]), datetime.date.fromtimestamp(now)) in ("expired", "quota") else ""
             if account.get("platform_block", "") != block:
                 ops.append({"op": "block", "account_id": link["account_id"], "platform_block": block})
             for row in db.execute("SELECT * FROM platform_pending WHERE link_id=? AND task_id IS NULL ORDER BY id", (link["id"],)).fetchall():
