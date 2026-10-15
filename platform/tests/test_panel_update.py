@@ -1,6 +1,7 @@
 """面板更新与一键更新节点程序：GitHub 版本标签检查（缓存、静默失败）、面板更新接口、root 辅助程序按请求更新、全部节点一键升级与跳过原因。"""
 import importlib.util
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -128,6 +129,38 @@ class API(unittest.TestCase):
             r = self.client.get('/api/panel-update?refresh=1').json                         # dialog: asks GitHub
             self.assertEqual((r['latest'], r['newer']), (self.latest, True))
             fetch.assert_called_once()
+
+    def test_github_is_asked_without_holding_the_write_lock(self):
+        # Another request must be able to write while the (up to 5 s) GitHub request runs.
+        def fetch():
+            other = sqlite3.connect(str(self.dir / 'panel.sqlite'), timeout=0)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.rollback()
+            finally:
+                other.close()
+            return self.latest
+        with self.store.connect() as db:
+            db.execute("DELETE FROM settings WHERE key='update_check'")
+        with patch.object(updates, 'fetch_latest', side_effect=fetch) as called:
+            self.assertEqual(self.client.get('/api/panel-update?refresh=1').json['latest'], self.latest)
+            with self.store.connect() as db:
+                db.execute("UPDATE settings SET value=? WHERE key='update_check'", (json.dumps({'at': 0, 'ok': True, 'latest': self.latest}),))
+            self.assertEqual(self.client.post('/api/panel-update', json={'version': self.latest}, headers=self.h).status_code, 200)
+            self.assertEqual(called.call_count, 2)
+
+    def test_refresh_keeps_the_newer_concurrent_check(self):
+        with self.store.connect() as db:
+            db.execute("DELETE FROM settings WHERE key='update_check'")
+
+        def slow():
+            # A second worker finished a later check while this one waited for GitHub.
+            with self.store.connect() as db:
+                db.execute("INSERT OR REPLACE INTO settings VALUES('update_check',?)", (json.dumps({'at': 2000, 'ok': True, 'latest': 'v9.9.9'}),))
+            return 'v0.0.1'
+        self.assertEqual(updates.refresh(self.store, '1.0.0', now=1000, fetch=slow)['latest'], 'v9.9.9')
+        with self.store.connect() as db:
+            self.assertEqual(json.loads(db.execute("SELECT value FROM settings WHERE key='update_check'").fetchone()[0])['latest'], 'v9.9.9')
 
     def test_no_update_when_current(self):
         self.cache('v' + __version__ if updates.version_key(__version__) else None)

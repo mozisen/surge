@@ -1242,9 +1242,7 @@ def create_app(config=None):
     @admin
     def panel_update():
         from . import updates
-        with store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            result = updates.check(db, __version__, force=request.args.get("refresh") == "1")
+        result = updates.refresh(store, __version__, force=request.args.get("refresh") == "1")
         try:
             status = json.loads((data_dir / "panel-update-status.json").read_text())
         except (OSError, ValueError):
@@ -1264,9 +1262,9 @@ def create_app(config=None):
     def panel_update_start():
         from . import updates
         data = body()
+        result = updates.refresh(store, __version__)        # may reach GitHub: outside the transaction
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            result = updates.check(db, __version__)
             if set(data) != {"version"} or data["version"] != result["latest"] or not result["newer"]:
                 raise ValueError("只能更新到检测到的最新版本，请刷新后重试")
             if db.execute("SELECT 1 FROM tasks WHERE status IN ('queued','running') LIMIT 1").fetchone():
