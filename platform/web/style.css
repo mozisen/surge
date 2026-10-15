@@ -2964,3 +2964,59 @@ td .action-row {
     font-size: 12px;
     white-space: nowrap;
 }
+
+/* Overview: one card per figure, rounded and spaced. */
+.overview-cards {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.overview-cards .stat {
+    border: 1px solid var(--line);
+    border-radius: var(--r-panel);
+    background: var(--surface);
+}
+
+.overview-cards .stat + .stat {
+    border-left: 1px solid var(--line);
+}
+
+/* Core list: one block per server. */
+.core-batch {
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+
+.core-server {
+    padding: 12px 0 4px;
+    border-top: 1px solid var(--line-soft);
+}
+
+.core-server h3 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 4px;
+    font-size: 14px;
+}
+
+.core-row {
+    align-items: center;
+}
+
+@media (max-width: 760px) {
+    .overview-cards {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+    }
+
+    .overview-cards .stat {
+        padding: 12px 14px 14px;
+    }
+
+    .overview-cards .reading-value {
+        font-size: 26px;
+    }
+}

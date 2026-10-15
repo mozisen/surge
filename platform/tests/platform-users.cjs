@@ -593,16 +593,25 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     await elements['core-form'].onsubmit({preventDefault() {}, target: {}});
     assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), ['/nodes/cn/core-update', {core: 'xray'}]);
     assert.strictEqual(shown, 'task-core');
-    // All nodes: per-core counts, list, result with skip reasons.
-    vm.runInContext('nodes = this.coreNodes;', Object.assign(context, {coreNodes: [target, coreNode({xray: {current: '25.3.6', latest: '25.3.6'}}, {id: 'n2', name: 'jp'})]}));
-    element('core-all-form'); element('core-all-core', {value: 'xray'}); element('core-all-list');
+    // Core list: every server with its cores; single and per-core updates.
+    const busy = coreNode({singbox: {current: '1.14.0', latest: '1.14.2', stats: true}}, {id: 'n3', name: 'busy'});
+    vm.runInContext('nodes = this.coreNodes; tasks = this.coreTasks;', Object.assign(context, {
+        coreNodes: [target, coreNode({xray: {current: '25.3.6', latest: '25.3.6'}, 'snell-v5': {current: '5.0.1', latest: '6.0.0'}}, {id: 'n2', name: 'jp'}), busy,
+                    coreNode({}, {id: 'old', name: 'old', snapshot: {core_update_version: 0}})],
+        coreTasks: [{node_id: 'n3', action: 'core_update', status: 'running', request: {params: {core: 'singbox'}}}]}));
+    element('core-list');
     context.coreAllDialog();
-    assert(html.modal.includes('Xray（1 台可更新）') && html.modal.includes('Sing-box（0 台可更新）'));
-    elements['core-all-core'].onchange();
-    assert(elements['core-all-list'].innerHTML.includes('hk&lt;1&gt;') && !elements['core-all-list'].innerHTML.includes('jp'));
+    assert(html.title === '一键更新内核' && html.modal.includes('hk&lt;1&gt;') && html.modal.includes('25.1.30 → 25.3.6'));
+    assert(html.modal.includes('data-action="core-update-one" data-node="cn" data-core="xray"'));
+    assert(html.modal.includes('25.3.6 · 已是最新') && html.modal.includes('5.0.1 · 最新版本获取中') && !html.modal.includes('data-node="n2"'), 'snell v5 never offered v6');
+    assert(html.modal.includes('更新中') && !html.modal.includes('data-node="n3"'), 'running update shown, no second button');
+    assert(html.modal.includes('节点程序需更新到 1.4.0'));
+    assert(html.modal.includes('全部更新 Xray（1）') && /data-core="singbox" disabled>全部更新 Sing-box（0）/.test(html.modal));
     posts.length = 0;
-    await elements['core-all-form'].onsubmit({preventDefault() {}, target: {}});
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), ['/nodes/core-update-all', {core: 'xray'}]);
-    assert(html.modal.includes('已为 1 台服务器排队更新 Xray') && html.modal.includes('old&lt;&gt;'));
-    console.log('PASS cores: versions, statistics notes, old nodes, single update, all-nodes dialog');
+    context.post = async (path, data) => { posts.push([path, data]); return {id: 't', queued: ['hk'], skipped: []}; };
+    await context.coreAction('core-update-one', {dataset: {node: 'cn', core: 'xray'}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.pop())), ['/nodes/cn/core-update', {core: 'xray'}]);
+    await context.coreAction('core-update-batch', {dataset: {core: 'xray'}});
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.pop())), ['/nodes/core-update-all', {core: 'xray'}]);
+    console.log('PASS cores: versions, statistics notes, Snell major lines, old nodes, single update, server list with single and per-core updates');
 })().catch(error => { console.error(error); process.exit(1); });
