@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.13"
+readonly VERSION="3.7.4-preview.14"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -9660,6 +9660,16 @@ _get_file_mtime() {
 # 初始化版本缓存目录
 _init_version_cache() {
     mkdir -p "$VERSION_CACHE_DIR" 2>/dev/null || true
+    # 旧版本把发行说明里最新的 6.x 记成了 Snell v5 的最新版本；不是 5.x 的缓存作废。
+    local snell_cache="$VERSION_CACHE_DIR/surge-networks_snell"
+    if [[ -f "$snell_cache" ]] && ! grep -qE '^5\.' "$snell_cache" 2>/dev/null; then
+        rm -f "$snell_cache" 2>/dev/null || true
+    fi
+    local list
+    for list in "$VERSION_CACHE_DIR"/surge-networks_snell_releases_*; do
+        [[ -f "$list" ]] && grep -qvE '^5\.' "$list" 2>/dev/null && rm -f "$list" 2>/dev/null
+    done
+    return 0
 }
 
 _is_cache_fresh() {
@@ -9925,6 +9935,12 @@ _get_snell_versions_from_kb() {
     echo "$versions"
 }
 
+# 「surge-networks/snell」只代表 Snell v5：发行说明同时列出 v6（6.x 排在前面），只取 5.x。
+_get_snell_v5_versions_from_kb() {
+    local limit="${1:-10}"
+    _get_snell_versions_from_kb 100 | grep -E '^5\.' | head -n "$limit"
+}
+
 _get_snell_latest_version() {
     local use_cache="${1:-true}"
     local force="${2:-false}"
@@ -9939,7 +9955,7 @@ _get_snell_latest_version() {
     if [[ "$force" != "true" && "$use_cache" == "true" ]]; then
         local cached_version
         if cached_version=$(_get_cached_version "surge-networks/snell"); then
-            if _is_plain_version "$cached_version"; then
+            if _is_plain_version "$cached_version" && [[ "$cached_version" == 5.* ]]; then
                 echo "$cached_version"
                 return 0
             fi
@@ -9947,7 +9963,7 @@ _get_snell_latest_version() {
     fi
 
     local version
-    version=$(_get_snell_versions_from_kb 1 | head -n 1)
+    version=$(_get_snell_v5_versions_from_kb 20 | grep -v -E '-' | head -n 1)
     [[ -z "$version" ]] && version="$SNELL_DEFAULT_VERSION"
     _save_version_cache "surge-networks/snell" "$version"
     echo "$version"
@@ -10075,7 +10091,7 @@ _update_version_cache_async() {
     if [[ "$repo" == "surge-networks/snell" ]]; then
         (
             local version
-            version=$(_get_snell_versions_from_kb 1 | head -n 1)
+            version=$(_get_snell_v5_versions_from_kb 20 | grep -v -E '-' | head -n 1)
             rm -f "$unavailable_file" 2>/dev/null || true
             [[ -n "$version" ]] && _save_version_cache "$repo" "$version"
         ) &
@@ -10452,7 +10468,7 @@ _get_release_versions() {
             _err "Snell 无预发布版本"
             return 1
         fi
-        versions=$(_get_snell_versions_from_kb "$limit")
+        versions=$(_get_snell_v5_versions_from_kb "$limit")
         [[ -z "$versions" ]] && versions="$SNELL_DEFAULT_VERSION"
         case "$mode" in
             prerelease|test|beta) versions=$(printf '%s\n' "$versions" | grep -E '-' || true) ;;

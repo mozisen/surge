@@ -5,8 +5,10 @@
 - 仓库：https://github.com/mozisen/surge
 - 分支：`codex/platform-3.7.4`
 - 提交：与当前根目录脚本同一 Git 提交；使用下列摘要固定内容。
-- 版本：`3.7.4-preview.13`（Sing-box 只安装与更新已编译的统计版预编译包）
-- SHA-256：`4e0fa1007a145dea1d3b782dfe8367754e701a3ebf5b8c0eec41770ec07ce9c7`
+- 版本：`3.7.4-preview.14`（Snell v5 只取 5.x 版本）
+- SHA-256：`397e51e6be49baa287c4488b4a86867e27873625b8081c0032d7b0f44220b09b`
+
+3.7.4-preview.14：Snell v5 的最新版本、版本列表与后台缓存只取发行说明中的 5.x（发行说明同时列出 6.x，此前把 6.0.0 当作 v5 最新版本，显示「可更新」且更新会因版本校验失败）；启动时作废旧脚本写入的非 5.x 缓存。上一固定版本为 3.7.4-preview.13，SHA-256 为 `4e0fa1007a145dea1d3b782dfe8367754e701a3ebf5b8c0eec41770ec07ce9c7`。
 
 3.7.4-preview.13：Sing-box 的全新安装、核心管理更新、指定版本与统计修复都只使用 `mozisen/surge` 分支 `singbox-stats-binaries` 中本机（架构 + libc）已发布的版本，不再安装官方版本；本机架构没有预编译包时才安装官方版本并提示无用户统计。上一固定版本为 3.7.4-preview.12，SHA-256 为 `f3e8466b6cf1bffae24110643f57b4b5cbe9e980660d4a334e59605bfeb1af49`。
 
