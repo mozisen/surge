@@ -318,6 +318,28 @@ def share(db, line_id, now=None, key_prefix="relay-share:"):
     return task_id
 
 
+def blocked(db, line, nodes, now=None):
+    """Why the line carries no traffic for its user even though every forward runs: the user is stopped,
+    expired or out of quota (the panel disables the user's accounts), or the landing protocol member is off."""
+    if not line["user_id"] or not line["landing_protocol"]:
+        return ""
+    user = db.execute("SELECT * FROM platform_users WHERE id=?", (line["user_id"],)).fetchone()
+    if not user:
+        return ""
+    now = time.time() if now is None else now
+    import datetime
+    state = platform_users.state_of(user, platform_users.usage(db, user["id"]), datetime.date.fromtimestamp(now))
+    if state:
+        return "用户" + platform_users.STATE_TEXT[state]
+    link = db.execute("SELECT account_id FROM platform_links WHERE user_id=? AND node_id=? AND removing IS NULL",
+                      (line["user_id"], line["landing_node_id"])).fetchone()
+    node = nodes.get(line["landing_node_id"])
+    account = (json.loads(node["snapshot"]).get("accounts") or {}).get(link["account_id"]) if link and node else None
+    member = next((m for m in (account or {}).get("members", []) if isinstance(m, dict)
+                   and (m.get("core"), m.get("protocol"), m.get("port")) == (line["landing_core"], line["landing_protocol"], line["landing_port"])), None)
+    return "落地协议已停用" if member and member.get("enabled") is False else ""
+
+
 def describe(db, line, nodes):
     hops = json.loads(line["hops"])
     statuses = {h["status"] for h in hops}
@@ -332,4 +354,4 @@ def describe(db, line, nodes):
                       "backend": h["rule"]["backend"], "transport": h["rule"]["transport"], "listen_port": h["rule"]["listen_port"],
                       "target": "%s:%d" % (h["rule"]["remote_host"], h["rule"]["remote_port"]), "status": h["status"], "forward_id": h.get("forward_id")}
                      for h in hops],
-            "created": line["created"]}
+            "created": line["created"], "blocked": blocked(db, line, nodes)}

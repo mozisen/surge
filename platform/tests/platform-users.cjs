@@ -533,7 +533,8 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     const me = {name: '<alice>', state: 'quota', used: 10 * 1073741824, quota: 10 * 1073741824, expire_date: '', reset_day: 1, version: '1.3.0',
         links: [{id: 'l1', node_name: 'hk<b>', online: true, cycle_used: 1073741824, members: [{core: 'xray', protocol: 'vless', port: 443, enabled: true}, {core: 'singbox', protocol: 'hy2', port: 8443, enabled: false}]},
                 {id: 'l2', node_name: 'jp', online: false, cycle_used: 0, members: [{core: 'xray', protocol: 'vless', port: 443, enabled: true}]}],
-        relays: [{id: 'r1', chain: ['jp', 'hk'], entry: '9.9.9.9:30001', protocol: 'vless', state: 'active', port_only: false},
+        relays: [{id: 'r1', chain: ['jp', 'hk'], entry: '9.9.9.9:30001', protocol: 'vless', state: 'active', port_only: false, blocked: ''},
+                 {id: 'r3', chain: ['jp', 'hk'], entry: '9.9.9.9:30002', protocol: 'vless', state: 'active', port_only: false, blocked: '用户已到期'},
                  {id: 'r2', chain: ['jp', 'hk'], entry: '', protocol: '', state: 'creating', port_only: true}],
         telegram: {bound: false, username: '', bound_at: null, code_pending: false, bot: {enabled: true, username: 'vaio_bot'}}};
     let page = context.portalPage(me);
@@ -544,6 +545,7 @@ const user = {id: 'u1', name: 'alice', note: '<b>vip</b>', enabled: true, expire
     assert(/data-link="l2"[^>]*disabled/.test(page) && page.includes('离线'), 'offline server export disabled');
     assert(page.includes('data-action="me-share-relay" data-id="r1"') && !page.includes('data-id="r2"') && page.includes('仅转发端口'));
     assert(page.includes('https://t.me/vaio_bot') && page.includes('data-action="me-tg-code"'));
+    assert(page.includes('<span class="badge blocked">用户已到期</span>') && !page.includes('data-id="r3"'), 'blocked relay: reason, no export');
     let card = context.telegramCard({bound: true, username: 'tg_alice', bound_at: 5, bot: {enabled: true, username: 'vaio_bot'}});
     assert(card.includes('已绑定 @tg_alice') && card.includes('me-tg-unbind') && !card.includes('me-tg-code'));
     card = context.telegramCard({bound: false, bot: {enabled: false, username: ''}});

@@ -172,6 +172,24 @@ class Portal(unittest.TestCase):
             db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key,result,finished) VALUES('adm','n1','share','{}','succeeded',0,'k','{}',?)", (time.time(),))
         self.assertEqual(user.get('/api/me/tasks/adm').status_code, 404)
 
+    def test_blocked_relay_line(self):
+        self.enable(self.alice)
+        user, h = self.user()
+        self.assertEqual(user.get('/api/me').json['relays'][0]['blocked'], '')
+        with self.store.connect() as db:
+            db.execute("UPDATE platform_users SET expire_date='2000-01-01' WHERE id=?", (self.alice,))
+        me = user.get('/api/me').json
+        self.assertEqual((me['state'], me['relays'][0]['blocked']), ('expired', '用户已到期'))
+        self.assertIn('已到期', user.post('/api/me/share', json={'relay_id': 'line-a'}, headers=h).json['error'])
+        admin, ah = self.admin()
+        self.assertEqual(next(l for l in admin.get('/api/relays').json['relays'] if l['id'] == 'line-a')['blocked'], '用户已到期')
+        with self.store.connect() as db:
+            db.execute("UPDATE platform_users SET expire_date='' WHERE id=?", (self.alice,))
+            snapshot = json.loads(db.execute("SELECT snapshot FROM nodes WHERE id='n1'").fetchone()[0])
+            snapshot['accounts']['acc-a']['members'][0]['enabled'] = False      # landing vless member off
+            db.execute("UPDATE nodes SET snapshot=? WHERE id='n1'", (json.dumps(snapshot),))
+        self.assertEqual(user.get('/api/me').json['relays'][0]['blocked'], '落地协议已停用')
+
     def test_offline_node_and_bad_input(self):
         self.enable(self.alice)
         user, h = self.user()

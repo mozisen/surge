@@ -1143,6 +1143,11 @@ input[type="checkbox"] {
     background: currentColor;
 }
 
+/* Service cut for the user (expired, out of quota, relay landing off): red ring. */
+.badge.blocked::before {
+    color: var(--status-offline);
+}
+
 /* Finished well: check mark, muted text. */
 .badge.succeeded,
 .badge.resolved {

@@ -31,7 +31,7 @@ def view(db, user, now=None):
         item = relay_module.describe(db, line, nodes)
         relays.append({"id": item["id"], "chain": [h["node_name"] for h in item["hops"]] + [item["landing"]["node_name"]],
                        "entry": "%s:%s" % (item["entry"]["host"], item["entry"]["port"]) if item["entry"]["host"] else "",
-                       "protocol": item["landing"]["protocol"], "state": item["state"], "port_only": item["port_only"]})
+                       "protocol": item["landing"]["protocol"], "state": item["state"], "port_only": item["port_only"], "blocked": item["blocked"]})
     tg = db.execute("SELECT * FROM platform_tg WHERE user_id=?", (user["id"],)).fetchone()
     return {"name": user["name"], "enabled": bool(user["enabled"]), "expire_date": user["expire_date"], "quota": user["quota"],
             "reset_day": user["reset_day"], "cycle": user["cycle"], "used": used,

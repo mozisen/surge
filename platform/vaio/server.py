@@ -1060,10 +1060,13 @@ def create_app(config=None):
                 raise ValueError("上一个连接导出仍在进行中，请稍候")
             try:
                 if set(data) == {"relay_id"}:
-                    line = db.execute("SELECT id FROM relay_lines WHERE id=? AND user_id=? AND removing=0", (data["relay_id"], user["id"])).fetchone() \
+                    line = db.execute("SELECT * FROM relay_lines WHERE id=? AND user_id=? AND removing=0", (data["relay_id"], user["id"])).fetchone() \
                         if isinstance(data["relay_id"], str) else None
                     if not line:
                         raise LookupError("线路不存在")
+                    reason = relays.blocked(db, line, {n["id"]: n for n in db.execute("SELECT * FROM nodes")})
+                    if reason:
+                        raise ValueError(reason + "，无法导出连接")
                     task_id = relays.share(db, line["id"], key_prefix="user-share:" + user["id"] + ":")
                 else:
                     node_id, task = portal_view.share_link(db, user, data)
