@@ -1,0 +1,12 @@
+{
+  "version": "1.14.3",
+  "arch": "amd64",
+  "libc": "glibc",
+  "os": "linux",
+  "profile": "stats-v1",
+  "tags": "with_gvisor,with_quic,with_wireguard,with_utls,with_acme,with_clash_api,with_v2ray_api",
+  "source": "github.com/sagernet/sing-box@v1.14.3",
+  "workflow_commit": "12bb9b53aeac2f7ab6040922edb5a9f7538e5932",
+  "binary_sha256": "4a19724d61d902fba1497c76451304a680c0f20e12ebd0087e515012e5996b59",
+  "archive_sha256": "b330941094c43cde563c3e5d01448fe820c4f4d50e5e72f40092b0fd67cb43f5"
+}
