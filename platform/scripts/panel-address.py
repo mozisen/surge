@@ -12,13 +12,15 @@ close-legacy, so nodes still using them can receive the new address.
 Every change rewrites the whole Nginx site from that state; a failure restores the previous files.
 """
 import argparse
+import grp
 import ipaddress
 import json
 import os
+import pwd
 import re
-import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -129,13 +131,30 @@ def save_state(state):
     STATE.chmod(0o600)
 
 
+def write_owned(path, text):
+    """Replace path with text owned by vaio-panel without following links: the folder belongs to the panel user."""
+    fd, temp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o644)
+            try:
+                os.fchown(handle.fileno(), pwd.getpwnam("vaio-panel").pw_uid, grp.getgrnam("vaio-panel").gr_gid)
+            except (KeyError, PermissionError, OSError):
+                pass
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
 def status(state, action, message, **extra):
     DATA.mkdir(parents=True, exist_ok=True)
-    STATUS.write_text(json.dumps({"state": state, "action": action, "message": message, "at": time.time(), **extra}, ensure_ascii=False))
-    try:
-        shutil.chown(STATUS, "vaio-panel", "vaio-panel")
-    except (LookupError, PermissionError, OSError):
-        pass
+    write_owned(STATUS, json.dumps({"state": state, "action": action, "message": message, "at": time.time(), **extra}, ensure_ascii=False))
 
 
 def port_busy(port, own_ports, share_nginx=True):

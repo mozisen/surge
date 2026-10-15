@@ -226,6 +226,37 @@ class AgentSide(unittest.TestCase):
             self.assertEqual((saved['url'], 'allow_http' in saved, saved['token']), ('https://panel.example.com:8443', False, 't'))
 
 
+class StatusFiles(unittest.TestCase):
+    """The root helpers write status into the panel-owned data folder: never follow a link planted there."""
+
+    def check(self, write, path):
+        victim = path.parent.parent / 'victim'
+        victim.write_text('keep')
+        path.symlink_to(victim)
+        write()
+        self.assertEqual(victim.read_text(), 'keep')
+        self.assertFalse(path.is_symlink())
+        self.assertEqual(oct(path.stat().st_mode & 0o777), '0o644')
+        self.assertEqual([p.name for p in path.parent.iterdir()], [path.name])   # no temp file left behind
+        return json.loads(path.read_text())
+
+    def test_address_status_replaces_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'var/lib/vaio-panel').mkdir(parents=True)
+            h = load('panel-address', root)
+            saved = self.check(lambda: h.status('failed', 'domain', 'x'), root / 'var/lib/vaio-panel/address-status.json')
+            self.assertEqual(saved['state'], 'failed')
+
+    def test_update_status_replaces_symlink(self):
+        module = load('update-panel')
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / 'data'
+            data.mkdir()
+            saved = self.check(lambda: module.update_status(data / 'panel-update-status.json', 'running', 'x', ref='v1'), data / 'panel-update-status.json')
+            self.assertEqual((saved['state'], saved['ref']), ('running', 'v1'))
+
+
 class UpgradeHelper(unittest.TestCase):
     def test_upgrade_installs_address_units_once(self):
         module = load('update-panel')

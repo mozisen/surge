@@ -2,14 +2,17 @@
 """Local systemd deployment with a staged environment and automatic code rollback."""
 import argparse
 import fcntl
+import grp
 import io
 import json
 import os
+import pwd
 import re
 import shutil
 import sqlite3
 import subprocess
 import tarfile
+import tempfile
 import time
 import urllib.request
 from urllib.parse import quote
@@ -80,12 +83,29 @@ def ensure_address_helper(units=Path("/etc/systemd/system")):
     return True
 
 
-def update_status(path, state, message, **extra):
-    path.write_text(json.dumps({"state": state, "message": message, "at": time.time(), **extra}, ensure_ascii=False))
+def write_owned(path, text):
+    """Replace path with text owned by vaio-panel without following links: the folder belongs to the panel user."""
+    fd, temp = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + ".")
     try:
-        shutil.chown(path, "vaio-panel", "vaio-panel")
-    except (LookupError, PermissionError, OSError):
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o644)
+            try:
+                os.fchown(handle.fileno(), pwd.getpwnam("vaio-panel").pw_uid, grp.getgrnam("vaio-panel").gr_gid)
+            except (KeyError, PermissionError, OSError):
+                pass
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def update_status(path, state, message, **extra):
+    write_owned(path, json.dumps({"state": state, "message": message, "at": time.time(), **extra}, ensure_ascii=False))
 
 
 def from_request(request_path):
