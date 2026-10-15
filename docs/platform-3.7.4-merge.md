@@ -83,3 +83,9 @@
 - 改动：`surge-networks/snell` 版本源只代表 Snell v5，最新版本、版本列表与后台缓存只取发行说明中的 5.x（新增 `_get_snell_v5_versions_from_kb`）；`_init_version_cache` 作废旧脚本写入的非 5.x 缓存。此前 v5 显示「稳定版本 v6.0.0 / 可更新」，更新会被 `install_snell_v5` 的 5.x 校验拒绝。
 - 面板 1.4.3 同时修复关联用户重复新建（节点程序任务完成后立即刷新状态；面板不对已同步关联重复新建；失败关联确认后自动恢复）。
 - 测试：新增 `tests/snell-v5-versions.sh`；shell 回归全部通过（`singbox-stats-live.sh` 未运行）；unittest 与三个 cjs 通过，新增重复新建与失败恢复两项（已确认在旧逻辑下失败）。**真实节点验收**：未执行。
+
+## 脚本 3.7.4-preview.15：多用户 SS / SS2022（面板 1.5.0）
+
+- 脚本：Sing-box 按用户统计加入 SS2022；统计配置检查加入 SS2022；面板安装的 SS2022 在加入第二个用户时把第一个用户的密钥记为服务端密钥（`db_account_member_new`），渲染器 / `_ss2022_is_multi` / `generate_singbox_config` 缺少 `password` 时回退到第一个用户的密钥；新成员密钥长度按方法（修复 chacha20-poly1305 用 16 字节）。
+- 节点程序：去掉 SS/SS2022「面板安装 + 单用户」的写入限制（10-05 添加，早于脚本 10-12 的多用户支持）；`ss_user_stats` 与渲染器一致判断按用户或按入站统计；统计状态、多用户 SS2022 导出（服务端密钥:用户密钥）、实例中新增 SS 用户（SS2022 生成正确长度密钥并保留服务端密钥）。
+- 测试：新增 `tests/ss2022-multiuser-stats.sh`、`tests/ss2022-multiuser-accounts.sh`；改写 `platform/tests/test_shadowsocks.py`（多用户写入、端口修改、删除回单用户、导出、统计状态）。真实 Sing-box 配置校验（`VAIO_TEST_SINGBOX`）与真实节点验收未执行。
