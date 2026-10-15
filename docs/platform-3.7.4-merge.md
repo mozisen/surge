@@ -77,3 +77,9 @@
 - 统计修复的版本检查由「必须是官方最新 1.14 稳定版」改为「当前版本必须有已发布的统计包」，否则提示先更新到最新统计版。
 - 同步：`platform/vendor/vless-server.sh`、`UPSTREAM_SHA`（`4e0fa100…`）与 `platform/vendor/README.md`；面板与节点程序 1.4.1（一键更新节点程序时推送新脚本）。
 - 测试：`bash -n` 通过；shell 回归全部通过（`singbox-stats-live.sh` 需真实统计核心，未运行）；改写 `tests/stats-platform.sh`（按本机平台列出统计版并按数字排序、缓存回退、修复门槛）与 `tests/singbox-stats-update.sh`（所有安装 / 更新入口只用统计版、未发布版本拒绝、无平台包才退回官方）。`_install_singbox_stats_fresh` 直接写 `/usr/local/bin`，未在本机运行。unittest 245 项（跳过 2 项）与三个 cjs 通过。**真实节点验收**：未执行。
+
+## 脚本 3.7.4-preview.14：Snell v5 只取 5.x（面板 1.4.3）
+
+- 改动：`surge-networks/snell` 版本源只代表 Snell v5，最新版本、版本列表与后台缓存只取发行说明中的 5.x（新增 `_get_snell_v5_versions_from_kb`）；`_init_version_cache` 作废旧脚本写入的非 5.x 缓存。此前 v5 显示「稳定版本 v6.0.0 / 可更新」，更新会被 `install_snell_v5` 的 5.x 校验拒绝。
+- 面板 1.4.3 同时修复关联用户重复新建（节点程序任务完成后立即刷新状态；面板不对已同步关联重复新建；失败关联确认后自动恢复）。
+- 测试：新增 `tests/snell-v5-versions.sh`；shell 回归全部通过（`singbox-stats-live.sh` 未运行）；unittest 与三个 cjs 通过，新增重复新建与失败恢复两项（已确认在旧逻辑下失败）。**真实节点验收**：未执行。
