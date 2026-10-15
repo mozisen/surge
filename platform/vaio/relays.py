@@ -302,16 +302,24 @@ def share(db, line_id, now=None, key_prefix="relay-share:"):
         raise ValueError("仅转发端口的线路没有落地协议，无法导出连接信息")
     if line["removing"] or any(h["status"] != "active" for h in hops):
         raise ValueError("线路尚未全部就绪，暂时无法导出连接")
-    user = db.execute("SELECT name FROM platform_users WHERE id=?", (line["user_id"],)).fetchone()
     entry = db.execute("SELECT * FROM nodes WHERE id=?", (hops[0]["node_id"],)).fetchone()
     landing = db.execute("SELECT * FROM nodes WHERE id=? AND deleted IS NULL AND revoked=0", (line["landing_node_id"],)).fetchone()
     if not landing or not _online(landing, now) or landing["maintenance"]:
         raise ValueError("落地服务器离线或维护中")
+    # The member's name on the landing node is what the script exports by; it differs from the platform user's
+    # name for a claimed or renamed account, and another user on that instance may carry the platform name.
+    link = db.execute("SELECT account_id FROM platform_links WHERE user_id=? AND node_id=? AND removing IS NULL",
+                      (line["user_id"], landing["id"])).fetchone()
+    account = (json.loads(landing["snapshot"]).get("accounts") or {}).get(link["account_id"]) if link else None
+    member = next((m for m in (account or {}).get("members", []) if isinstance(m, dict)
+                   and (m.get("core"), m.get("protocol"), m.get("port")) == (line["landing_core"], line["landing_protocol"], line["landing_port"])), None)
+    if not member or not isinstance(member.get("name"), str) or not member["name"]:
+        raise ValueError("落地服务器上还没有该用户的协议，暂时无法导出连接")
     host = _address(entry) if entry else ""
     if not host:
         raise ValueError("入口中转服务器未上报公网 IP")
     request = validate_task({"action": "share", "protocol": line["landing_protocol"], "core": line["landing_core"], "port": line["landing_port"],
-                             "params": {"name": user["name"], "host": host, "port": hops[0]["rule"]["listen_port"]}})
+                             "params": {"name": member["name"], "host": host, "port": hops[0]["rule"]["listen_port"]}})
     task_id = str(uuid.uuid4())
     db.execute("INSERT INTO tasks(id,node_id,action,request,status,created,request_key) VALUES(?,?,?,?,?,?,?)",
                (task_id, landing["id"], "share", json.dumps(request), "queued", now, key_prefix + task_id))

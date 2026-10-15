@@ -102,6 +102,27 @@ class Relays(unittest.TestCase):
         self.assertEqual(self.lines(), [])
         self.assertEqual((a.forwards, b.forwards), ([], []))
 
+    def test_share_uses_landing_member_name(self):
+        # A claimed or renamed account keeps its own member name on the node: export by it, never by the platform name.
+        a, land = RelayNode(self, 'A', '9.9.9.1'), RelayNode(self, 'L', '8.8.4.9')
+        for node in (a, land):
+            node.poll(run=False)
+        line_id = self.post('/relays', self.body([{"node_id": a.id, "backend": "realm", "listen_port": 30001}], land), 201)['id']
+        a.poll()
+        land.settle()
+        self.assertEqual(self.lines()[0]['state'], 'active')
+        account = next(iter(land.accounts.values()))
+        member = next(m for m in account['members'] if (m['core'], m['protocol'], m['port']) == ('singbox', 'hy2', 8443))
+        member['name'] = 'alice-old'
+        land.poll(run=False)
+        share = self.post('/relays/%s/share' % line_id, {}, 201)['id']
+        task = land.poll()
+        self.assertEqual((task['id'], task['params']['name']), (share, 'alice-old'))
+        # The member is gone from the landing snapshot: refuse instead of exporting whoever is called alice there.
+        account['members'].remove(member)
+        land.poll(run=False)
+        self.assertIn('无法导出', self.post('/relays/%s/share' % line_id, {}, 400)['error'])
+
     def test_validation(self):
         a, land = RelayNode(self, 'A', '9.9.9.1'), RelayNode(self, 'L', '8.8.4.9')
         old, quiet = RelayNode(self, 'O', '9.9.9.3', forward_version=0), RelayNode(self, 'Q', '')
