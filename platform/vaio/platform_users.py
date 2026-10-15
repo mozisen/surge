@@ -395,7 +395,9 @@ def plan(db, node, now=None):
                 ops.append({"op": "unlink", "account_id": link["account_id"]} if link["removing"] == "release"
                            else {"op": "delete", "account_id": link["account_id"], "mode": "delete"})
         elif account is None:
-            if link["origin"] == "created":
+            # A synced link whose account is missing from this snapshot was just created: the node's
+            # report predates the task. Creating again would fail with "account exists".
+            if link["origin"] == "created" and link["state"] != "synced":
                 op = {"op": "create", "account_id": link["account_id"], "platform_user_id": user["id"],
                       "fields": fields_of(user), "members": json.loads(link["members"])}
                 ops.append(op)
@@ -418,8 +420,8 @@ def plan(db, node, now=None):
                 pending_ids.append(row["id"])
         if len(ops) > before:
             link_ids.append(link["id"])
-        elif link["state"] == "pending" and account is not None and not link["removing"]:
-            db.execute("UPDATE platform_links SET state='synced' WHERE id=?", (link["id"],))
+        elif link["state"] in ("pending", "failed") and account is not None and not link["removing"]:
+            db.execute("UPDATE platform_links SET state='synced',notice=CASE WHEN notice LIKE '同步失败%' THEN '' ELSE notice END WHERE id=?", (link["id"],))
     return ops[:200], pending_ids, link_ids
 
 

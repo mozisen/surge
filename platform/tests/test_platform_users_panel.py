@@ -360,6 +360,31 @@ class PlatformUsersPanel(unittest.TestCase):
         b.settle()
         self.assertEqual(self.account(b)[1]["note"], "after")
 
+    def test_stale_report_after_create_does_not_create_twice(self):
+        # The agent may report a snapshot taken before the create ran; the panel must not create again.
+        a = SimNode(self, 'A')
+        user = self.post('/users', {"name": "alice"}, 201)['id']
+        stale = a.snapshot()                                         # no account yet
+        self.post('/users/' + user + '/links', {"node_id": a.id, "members": [{"core": "xray", "protocol": "vless", "port": 443}]})
+        a.poll()                                                     # create runs and succeeds
+        fresh = a.snapshot
+        stale = {**stale, "metrics": {"load": 0.5}}                 # a real report always differs a little (load, counters)
+        a.snapshot = lambda: stale
+        self.assertIsNone(a.poll(run=False))                         # stale report: nothing queued
+        a.snapshot = fresh
+        a.settle()
+        creates = [op for t in a.tasks for op in t["params"]["ops"] if op["op"] == "create"]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual([l["sync"] for l in self.user(user)["links"]], ["synced"])
+
+    def test_failed_link_heals_when_node_shows_the_account(self):
+        user, a, b = self.linked_pair()
+        with self.store.connect() as db:
+            db.execute("UPDATE platform_links SET state='failed',notice='同步失败：节点上已存在同一统一用户',retry_after=0 WHERE node_id=?", (a.id,))
+        a.settle()
+        link = [l for l in self.user(user)["links"] if l["node_id"] == a.id][0]
+        self.assertEqual((link["sync"], link["notice"]), ("synced", ""))
+
     def test_version_conflict_is_remerged(self):
         user, a, b = self.linked_pair()
         identity, account = self.account(a)

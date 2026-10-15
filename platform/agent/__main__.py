@@ -112,6 +112,7 @@ class Agent:
                 self.journal[running_id] = {**future.result(), "sent": False, "at": time.time()}
                 self.save()
             future = None
+            self.snapshot_at = 0          # the next poll carries what the task changed, not a cached snapshot
         for task_id, item in self.journal.items():
             if item["status"] != "running" and not item.get("sent"):
                 self.api("/tasks/" + task_id + "/result", {k: item[k] for k in ("status", "message", "result")})
