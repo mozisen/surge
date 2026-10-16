@@ -89,3 +89,10 @@
 - 脚本：Sing-box 按用户统计加入 SS2022；统计配置检查加入 SS2022；面板安装的 SS2022 在加入第二个用户时把第一个用户的密钥记为服务端密钥（`db_account_member_new`），渲染器 / `_ss2022_is_multi` / `generate_singbox_config` 缺少 `password` 时回退到第一个用户的密钥；新成员密钥长度按方法（修复 chacha20-poly1305 用 16 字节）。
 - 节点程序：去掉 SS/SS2022「面板安装 + 单用户」的写入限制（10-05 添加，早于脚本 10-12 的多用户支持）；`ss_user_stats` 与渲染器一致判断按用户或按入站统计；统计状态、多用户 SS2022 导出（服务端密钥:用户密钥）、实例中新增 SS 用户（SS2022 生成正确长度密钥并保留服务端密钥）。
 - 测试：新增 `tests/ss2022-multiuser-stats.sh`、`tests/ss2022-multiuser-accounts.sh`；改写 `platform/tests/test_shadowsocks.py`（多用户写入、端口修改、删除回单用户、导出、统计状态）。真实 Sing-box 配置校验（`VAIO_TEST_SINGBOX`）与真实节点验收未执行。
+
+## 脚本 3.7.4-preview.16：面板通过脚本安装流程安装协议（面板 1.6.0，阶段 0）
+
+- 脚本：新增提问层 `_ask`（菜单模式等同 `read -rp`；接口模式按 KEY 从 `VAIO_ANSWERS` 取答案，语义值映射为菜单选项，缺省沿用菜单默认值，无效或被重复提问时以 97 退出并记录原因），VLESS-Vision 安装路径上的端口、证书、ACME、SNI、主协议冲突与确认提问改用它；`_pause`、已安装协议的新增 / 覆盖选择在接口模式下不再等待输入。新增 `--api install {protocol, core, answers}`：校验答案（字段清单）→ 加事务锁 → 落盘意图 → 备份数据目录顶层文件、证书与伪装站点 → 以空标准输入在子进程运行 `do_install_server` → 结果标记加数据库新增端口实例双重核对；失败、中止或核对不通过时恢复文件、删除新建文件并重启或停止内核。请求号幂等，结果可经 `result` 查询。`--api capabilities` 增加 `install_api`（含字段清单）。接口模式选择 Let’s Encrypt 时证书申请失败直接失败。本版只开放 VLESS-Vision（Xray）。
+- 节点程序 / 面板：快照上报经清洗的字段清单（`install_version`、`install_schema`）；新任务 `script_install`（20 分钟超时，结果未知时查询脚本记录，不重放）；接口 `POST /api/nodes/<id>/script-install` 按该节点的清单校验参数；安装对话框列出「脚本安装 · 支持自有域名」协议并按清单生成表单（条件字段、端口生成）。
+- 测试：新增 `tests/install-api.sh`（提问层、答案校验、事务成功 / 失败 / 中止 / 未核对的恢复，Bash 3.2 可跑）、`tests/install-api-flow.sh`（加载整份脚本、只桩下载 / 系统服务 / 网络，经 `--api install` 真实走完 VLESS-Vision 自签安装，含端口冲突恢复与已装 Trojan，需 Bash 4.1+；本机用临时编译的 Bash 5.2 运行，CI 在 Ubuntu 运行）、`platform/tests/test_script_install.py`（清单清洗、任务校验、节点执行与快照、面板接口）、`platform/tests/script-install-form.cjs`。shell 回归全部通过（`singbox-stats-live.sh` 未运行）；unittest 266 项（跳过 2 项）普通与 hostsim 两遍通过；四个 cjs 通过；预览面板 1280 / 375 宽截图检查无横向滚动。另：`tests/snell-v5-versions.sh` 在 Bash 5.2（macOS）下失败，HEAD 上同样失败，与本次无关，未纳入 CI。
+- **真实节点验收**：未执行（需授权；需在真实 VPS 上用自签与 Let’s Encrypt 各安装一次并连通）。
