@@ -7,7 +7,7 @@ DB_FILE="$fixture/db.json" VERSION=3.7.2
 XRAY_PROTOCOLS='vless trojan'
 SINGBOX_PROTOCOLS='hy2 anytls'
 STANDALONE_PROTOCOLS='snell snell-v5 snell-v6'
-for fn in _api_reply _api_inventory _api_dispatch _api_account_result db_authority_get _proto_user_mode _proto_user_stats _proto_user_available _proto_user_modes_json _is_snell_users_protocol _snell_managed; do
+for fn in _api_reply _api_inventory _api_dispatch _api_install_schema _api_install_answers _api_install _api_account_result db_authority_get _proto_user_mode _proto_user_stats _proto_user_available _proto_user_modes_json _is_snell_users_protocol _snell_managed; do
     eval "$(awk -v fn="$fn" 'index($0,fn"() {")==1 {on=1} on {print} on && $0=="}" {exit}' "$repo/vless-server.sh")"
 done
 printf '%s' '{"xray":{"vless":[{"port":10001,"uuid":"SECRET_UUID","private_key":"SECRET_KEY","users":[{"name":"one","uuid":"SECRET_USER","used":123,"telegram_chat_id":"SECRET_CHAT"}]},{"port":10002,"uuid":"SECRET_OTHER"}],"snell-v6":[{"port":20001,"snell_id":"aaaaaaaaaaaaaaaaaaaaaaaa","psk":"SECRET_PSK","users":[]}]},"singbox":{"hy2":{"port":30001,"password":"SECRET_PASSWORD"}}}' > "$DB_FILE"
@@ -24,7 +24,11 @@ call_api "$(jq -nc --arg r "$revision" '{api_version:1,request_id:"plan",action:
 jq -e '.code=="unsupported_operation" and .data.executable==false' "$fixture/out" >/dev/null
 call_api '{"api_version":1,"request_id":"plan","action":"plan","expected_revision":"stale"}'
 jq -e '.code=="revision_conflict"' "$fixture/out" >/dev/null
-for action in install update delete start stop restart user_add user_update user_delete share migrate shell; do
+# install 是真实接口：未知参数在加锁、备份与执行之前就被拒绝
+call_api '{"api_version":1,"request_id":"write","action":"install","params":{"command":"touch /tmp/should-not-execute"}}'
+jq -e '.code=="invalid_request"' "$fixture/out" >/dev/null
+[[ ! -e "$CFG/api-results" ]]
+for action in update delete start stop restart user_add user_update user_delete share migrate shell; do
     call_api "$(jq -nc --arg a "$action" '{api_version:1,request_id:"write",action:$a,params:{command:"touch /tmp/should-not-execute"}}')"
     jq -e '.code=="unsupported_operation"' "$fixture/out" >/dev/null
 done

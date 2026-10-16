@@ -21,7 +21,7 @@ for fn in _account_jq_defs _account_valid_id _account_valid_name _account_valid_
     _account_materialize_default db_account_member_add db_account_member_new db_get_user_port db_account_member_remove \
     db_account_delete db_account_reset_usage db_account_unlink_platform db_account_reset_credentials \
     _db_apply db_get_user_field db_list_users is_standalone_protocol _is_snell_users_protocol \
-    _api_reply _api_inventory _api_dispatch _api_sha256 _api_account_validate _api_account_precheck _api_account_execute \
+    _api_reply _api_inventory _api_dispatch _api_install_schema _api_sha256 _api_account_validate _api_account_precheck _api_account_execute \
     _api_account_backup_files _api_account_restore _api_account_store _api_account_apply _api_account_result \
     init_db _api_txn_lock _api_txn_unlock db_authority_get _authority_rows _authority_new_secret _authority_apply \
     _proto_user_mode _proto_user_stats _proto_user_available _proto_user_modes_json _account_assign_single _api_account_share; do

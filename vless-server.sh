@@ -34,7 +34,7 @@ fi
 #  作者地址:https://docs.vaiox.de/
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.7.4-preview.15"
+readonly VERSION="3.7.4-preview.16"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/mozisen/surge"
 readonly SCRIPT_REPO="mozisen/surge"
@@ -6814,7 +6814,41 @@ _ok()    { echo -e "  ${G}✓${NC} $1" >&2; _log "OK" "$1"; }
 _err()   { echo -e "  ${R}✗${NC} $1" >&2; _log "ERROR" "$1"; }
 _warn()  { echo -e "  ${Y}!${NC} $1" >&2; _log "WARN" "$1"; }
 _item()  { echo -e "  ${G}$1${NC}) $2" >&2; }
-_pause() { echo "" >&2; read -rp "  按回车继续..."; }
+_pause() { echo "" >&2; [[ "${VAIO_INSTALL_API:-}" == 1 ]] && return 0; read -rp "  按回车继续..."; }
+
+# 提问层：菜单模式下就是 read -rp。接口安装模式（VAIO_INSTALL_API=1，面板安装）下按 KEY 从 VAIO_ANSWERS（JSON）取答案：
+# 没有该 KEY 等同直接回车（沿用菜单默认值）；可选映射把语义答案换成菜单选项（如 "acme=1 self=2"），不在映射里的答案无效；
+# 同一 KEY 在一次安装中被再次询问说明答案被校验拒绝，立即中止，绝不卡在提问上。
+# 用法: _ask 变量名 KEY "提示" [映射]
+_ask() {
+    local __ask_var="$1" __ask_key="$2" __ask_prompt="$3" __ask_map="${4:-}" __ask_value="" __ask_pair __ask_mapped
+    if [[ "${VAIO_INSTALL_API:-}" != 1 ]]; then
+        read -rp "$__ask_prompt" "$__ask_var"
+        return
+    fi
+    if [[ " ${_VAIO_ASKED:-} " == *" $__ask_key "* ]]; then
+        _install_api_abort invalid_answer "$__ask_key"
+    fi
+    _VAIO_ASKED="${_VAIO_ASKED:-} $__ask_key"
+    __ask_value=$(jq -r --arg k "$__ask_key" 'if has($k) then .[$k] | tostring else "" end' <<< "${VAIO_ANSWERS:-"{}"}" 2>/dev/null) || __ask_value=""
+    if [[ -n "$__ask_map" && -n "$__ask_value" ]]; then
+        __ask_mapped=""
+        for __ask_pair in $__ask_map; do
+            [[ "${__ask_pair%%=*}" == "$__ask_value" ]] && __ask_mapped="${__ask_pair#*=}"
+        done
+        [[ -n "$__ask_mapped" ]] || _install_api_abort invalid_answer "$__ask_key"
+        __ask_value="$__ask_mapped"
+    fi
+    printf '%s%s\n' "$__ask_prompt" "$__ask_value" >&2
+    printf -v "$__ask_var" '%s' "$__ask_value"
+}
+
+# 接口安装中止：记录原因供 --api install 返回，并结束安装子进程（调用方随后恢复备份）。
+_install_api_abort() {
+    [[ -n "${VAIO_INSTALL_ERROR:-}" ]] && printf '%s|%s\n' "$1" "$2" > "$VAIO_INSTALL_ERROR"
+    _err "安装参数无效或缺失: $2" >&2
+    exit 97
+}
 
 # URL 解码函数 (处理 %XX 编码的中文等字符)
 urldecode() {
@@ -7572,7 +7606,7 @@ ask_port() {
     echo -e "  ${D}(输入 0 或 q 返回上级菜单)${NC}" >&2
     
     while true; do
-        read -rp "  请输入端口 [回车使用 $recommend]: " custom_port
+        _ask custom_port port "  请输入端口 [回车使用 $recommend]: "
         
         # 检查退出命令
         if [[ "$custom_port" == "0" || "$custom_port" == "q" || "$custom_port" == "Q" ]]; then
@@ -7595,7 +7629,7 @@ ask_port() {
         # 0.1 检查是否使用了系统保留端口
         if [[ $custom_port -lt 1024 && $custom_port -ne 80 && $custom_port -ne 443 ]]; then
             _warn "端口 $custom_port 是系统保留端口，可能需要特殊权限" >&2
-            read -rp "  是否继续使用? [y/N]: " use_reserved
+            _ask use_reserved port.allow_reserved "  是否继续使用? [y/N]: " "yes=y no=n"
             if [[ ! "$use_reserved" =~ ^[yY]$ ]]; then
                 continue
             fi
@@ -7646,7 +7680,7 @@ ask_port() {
             
             # 其他情况：提示端口被占用
             _warn "端口 $custom_port 系统占用中" >&2
-            read -rp "  是否强制使用? (可能导致启动失败) [y/N]: " force
+            _ask force port.force "  是否强制使用? (可能导致启动失败) [y/N]: " "yes=y no=n"
             if [[ "$force" =~ ^[yY]$ ]]; then
                 echo "$custom_port"
                 return
@@ -7688,7 +7722,11 @@ handle_existing_protocol() {
     echo ""
     
     local choice
-    read -p "$(echo -e "  ${GREEN}请输入选项 [0-2]:${NC} ")" choice
+    if [[ "${VAIO_INSTALL_API:-}" == 1 ]]; then
+        choice=1        # 面板安装总是新增端口实例
+    else
+        read -p "$(echo -e "  ${GREEN}请输入选项 [0-2]:${NC} ")" choice
+    fi
     
     case "$choice" in
         1)
@@ -8938,7 +8976,7 @@ get_acme_cert() {
         echo -e "  2) 重新输入域名"
         echo -e "  3) 退出安装"
         echo ""
-        read -rp "  请选择 [1-3]: " choice
+        _ask choice acme.on_dns_fail "  请选择 [1-3]: " "self=1 cancel=3"
         
         case "$choice" in
             1)
@@ -8972,7 +9010,7 @@ get_acme_cert() {
     echo -e "  2) DNS 验证 (无需80端口，适合NAT/无公网IP)"
     echo -e "  3) 取消"
     echo ""
-    read -rp "  请选择 [1-3]: " verify_method
+    _ask verify_method acme.method "  请选择 [1-3]: " "http=1 cancel=3"
     
     case "$verify_method" in
         2)
@@ -9090,7 +9128,7 @@ get_acme_cert() {
         echo -e "  ${G}3${NC}) 使用自签名证书 (不推荐)"
         echo -e "  ${G}0${NC}) 取消安装"
         echo ""
-        read -rp "  请选择 [0]: " cert_choice
+        _ask cert_choice acme.on_fail "  请选择 [0]: " "retry=1 self=3 cancel=0"
         cert_choice="${cert_choice:-0}"
         
         case "$cert_choice" in
@@ -9165,7 +9203,7 @@ setup_cert_and_nginx() {
                 echo -e "  ${G}1)${NC} 申请真实证书 (推荐 - 订阅功能可用)"
                 echo -e "  ${G}2)${NC} 继续使用自签名证书 (订阅功能不可用)"
                 echo ""
-                read -rp "  请选择 [1]: " self_cert_choice
+                _ask self_cert_choice cert.existing_self "  请选择 [1]: " "replace=1 keep=2"
                 
                 if [[ "$self_cert_choice" != "2" ]]; then
                     # 用户选择申请真实证书，清除旧证书，走正常申请流程
@@ -9194,7 +9232,7 @@ setup_cert_and_nginx() {
                     echo -e "  ${G}1)${NC} 使用真实域名 (使用现有证书，支持订阅服务)"
                     echo -e "  ${G}2)${NC} 无域名模式 (使用随机 SNI，更隐蔽)"
                     echo ""
-                    read -rp "  请选择 [1]: " reality_cert_choice
+                    _ask reality_cert_choice cert.reality "  请选择 [1]: " "domain=1 sni=2"
                     
                     if [[ "$reality_cert_choice" == "2" ]]; then
                         # 用户选择无域名模式，清除证书域名变量和旧证书
@@ -9310,10 +9348,11 @@ setup_cert_and_nginx() {
         echo -e "  ${D}提示: 域名必须已解析到本机 IP${NC}"
         _line
         echo ""
-        read -rp "  请输入你的域名: " input_domain
+        _ask input_domain cert.domain "  请输入你的域名: "
         
         if ! _is_valid_dns_name "$input_domain"; then
             _err "域名格式无效"
+            [[ "${VAIO_INSTALL_API:-}" == 1 ]] && _install_api_abort invalid_answer cert.domain
             return 1
         fi
         
@@ -9335,6 +9374,7 @@ setup_cert_and_nginx() {
         else
             _err "证书申请失败"
             rm -f "$CFG/.nginx_port_tmp"
+            [[ "${VAIO_INSTALL_API:-}" == 1 ]] && _install_api_abort acme_failed cert.domain
             return 1
         fi
     else
@@ -9345,15 +9385,16 @@ setup_cert_and_nginx() {
         echo -e "  ${G}1)${NC} 使用真实域名 (推荐 - 自动申请 Let's Encrypt 证书)"
         echo -e "  ${G}2)${NC} 无域名 (使用自签证书 - 安全性较低，易被识别)"
         echo ""
-        read -rp "  请选择 [1-2，默认 2]: " cert_choice
+        _ask cert_choice cert.mode "  请选择 [1-2，默认 2]: " "acme=1 self=2"
         
         if [[ "$cert_choice" == "1" ]]; then
             echo -e "  ${Y}提示: 域名必须已解析到本机 IP${NC}"
-            read -rp "  请输入你的域名: " input_domain
+            _ask input_domain cert.domain "  请输入你的域名: "
             
             if [[ -n "$input_domain" ]]; then
                 if ! _is_valid_dns_name "$input_domain"; then
                     _err "域名格式无效"
+                    [[ "${VAIO_INSTALL_API:-}" == 1 ]] && _install_api_abort invalid_answer cert.domain
                     return 1
                 fi
                 CERT_DOMAIN="$input_domain"
@@ -9372,6 +9413,8 @@ setup_cert_and_nginx() {
                     rm -f "$CFG/.nginx_port_tmp"
                     return 0
                 else
+                    # 面板安装选了 Let's Encrypt 却申请失败：中止并恢复，不悄悄换成自签证书
+                    [[ "${VAIO_INSTALL_API:-}" == 1 ]] && { rm -f "$CFG/.nginx_port_tmp"; _install_api_abort acme_failed cert.domain; }
                     _warn "证书申请失败，使用自签证书"
                     gen_self_cert "$CERT_DOMAIN"
                     echo "$CERT_DOMAIN" > "$CFG/cert_domain"
@@ -9436,7 +9479,7 @@ ask_sni_config() {
         
         local sni_choice=""
         while true; do
-            read -rp "  请选择 [1-2，默认 1]: " sni_choice
+            _ask sni_choice sni.mode "  请选择 [1-2，默认 1]: " "random=1 custom=2"
             
             if [[ -z "$sni_choice" ]]; then
                 sni_choice="1"
@@ -9460,7 +9503,7 @@ ask_sni_config() {
         
         local sni_choice=""
         while true; do
-            read -rp "  请选择 [1-2，默认 1]: " sni_choice
+            _ask sni_choice sni.mode "  请选择 [1-2，默认 1]: " "random=1 custom=2"
             
             if [[ -z "$sni_choice" ]]; then
                 sni_choice="1"
@@ -9482,7 +9525,7 @@ ask_sni_config() {
     while true; do
         echo "" >&2
         echo -e "  ${C}请输入自定义SNI域名 (回车使用随机SNI):${NC}" >&2
-        read -rp "  SNI: " custom_sni
+        _ask custom_sni sni "  SNI: "
         
         if [[ -z "$custom_sni" ]]; then
             # 重新生成一个随机SNI
@@ -22999,8 +23042,12 @@ do_install_server() {
     echo -e "  ${W}服务端安装向导${NC}"
     echo -e "  系统: ${C}$DISTRO${NC}"
     
-    # 选择协议
-    select_protocol || return 1
+    # 选择协议（面板安装时由 --api install 指定协议与内核）
+    if [[ "${VAIO_INSTALL_API:-}" == 1 ]]; then
+        SELECTED_PROTOCOL="$VAIO_INSTALL_PROTOCOL"
+    else
+        select_protocol || return 1
+    fi
     local protocol="$SELECTED_PROTOCOL"
     [[ -n "$protocol" ]] && _proto_user_hint "$protocol"
     if _snell_managed "$protocol"; then
@@ -23012,7 +23059,11 @@ do_install_server() {
     # 检查协议是否为空（用户选择返回）
     [[ -z "$protocol" ]] && return 1
 
-    select_install_core "$protocol" || return 1
+    if [[ "${VAIO_INSTALL_API:-}" == 1 ]]; then
+        SELECTED_CORE="$VAIO_INSTALL_CORE"
+    else
+        select_install_core "$protocol" || return 1
+    fi
     
     # 确定核心类型
     local core="$SELECTED_CORE"
@@ -23130,7 +23181,7 @@ do_install_server() {
             echo ""
             
             while true; do
-                read -rp "  请选择 [1-3]: " master_choice
+                _ask master_choice install.master_conflict "  请选择 [1-3]: " "replace=1 other_port=2 cancel=3"
                 case "$master_choice" in
                     1)
                         _info "卸载 $existing_master_name..."
@@ -23699,7 +23750,7 @@ do_install_server() {
             [[ -n "$CERT_DOMAIN" && "$_is_real_cert" == "true" ]] && echo -e "  订阅端口: ${G}$NGINX_PORT${NC}"
             _line
             echo ""
-            read -rp "  确认安装? [Y/n]: " confirm
+            _ask confirm install.confirm "  确认安装? [Y/n]: " "yes=Y no=n"
             [[ "$confirm" =~ ^[nN]$ ]] && return
             
             _info "生成配置..."
@@ -24539,6 +24590,9 @@ do_install_server() {
                 fi
             fi
         fi
+
+        # 面板安装：记录成功与新实例端口（do_install_server 失败时也返回 0，接口据此判断）
+        [[ "${VAIO_INSTALL_API:-}" == 1 && -n "${VAIO_INSTALL_RESULT:-}" ]] && printf 'ok|%s|%s\n' "$current_protocol" "$installed_port" > "$VAIO_INSTALL_RESULT"
 
         # 显示刚安装的协议配置（不清屏，指定端口）
         show_single_protocol_info "$current_protocol" false "$installed_port"
@@ -33450,6 +33504,163 @@ _api_account_result() {
     esac
 }
 
+# ── 面板安装接口（--api install）：调用菜单同一安装流程，提问由请求参数回答 ──
+# 安装字段清单：面板按此生成表单。type: port / enum / domain / host；when 为显示与必填条件。
+_api_install_schema() {
+    jq -nc '
+      def port: {key:"port", type:"port", label:"端口", optional:true, placeholder:"留空使用推荐端口"};
+      def cert: {key:"cert.mode", type:"enum", label:"证书", default:"self", options:[
+          {value:"self", label:"自签证书"},
+          {value:"acme", label:"Let'"'"'s Encrypt（域名需已解析到本机，80 端口可用）"}]};
+      def domain: {key:"cert.domain", type:"domain", label:"域名", when:{"cert.mode":"acme"}};
+      def sni: {key:"sni", type:"host", label:"SNI", optional:true, when:{"cert.mode":"self"}, placeholder:"留空使用随机 SNI"};
+      {version:1, protocols:{
+        "vless-vision":{name:"VLESS-Vision", cores:["xray"], fields:[port, cert, domain, sni,
+          {key:"install.master_conflict", type:"enum", label:"已安装 Trojan 时", default:"other_port", options:[
+            {value:"other_port", label:"保留 Trojan，换端口安装"},
+            {value:"replace", label:"卸载 Trojan 后安装"}]}]}
+      }}'
+}
+
+# 校验请求并生成提问答案（VAIO_ANSWERS）。输出 {answers} 或 {error, field}。
+_api_install_answers() {
+    jq -c --argjson s "$2" '
+      def host: type == "string" and test("^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$") and contains(".") and (contains("..") | not);
+      def valid($f; $v): if $f.type == "port" then ($v | type == "number" and . == floor and . >= 1 and . <= 65535)
+          elif $f.type == "enum" then ($v | type == "string") and ([$f.options[].value] | index($v)) != null
+          else ($v | host) end;
+      .params as $p
+      | if ($p | type) != "object" or (($p | keys) - ["protocol", "core", "answers"] | length) > 0
+          or ($p.protocol | type) != "string" or ($p.core | type) != "string" then {error:"invalid_request"}
+        elif $s.protocols[$p.protocol] == null then {error:"unsupported_protocol"}
+        elif ($s.protocols[$p.protocol].cores | index($p.core)) == null then {error:"unsupported_core"}
+        elif (($p.answers // {}) | type) != "object" then {error:"invalid_request"}
+        else
+          $s.protocols[$p.protocol] as $ps | ($p.answers // {}) as $a
+          | ([$ps.fields[] | {key, value:($a[.key] // .default)} | select(.value != null)] | from_entries) as $v
+          | def applies($f): ($f.when // {}) | to_entries | all($v[.key] == .value);
+            ([$a | keys[] | select(. as $k | [$ps.fields[].key] | index($k) == null)][0]) as $unknown
+          | ([$ps.fields[] | select(.key as $k | ($a | has($k)) and (valid(.; $a[$k]) | not))][0].key) as $bad
+          | ([$ps.fields[] | select(.key as $k | applies(.) and (.optional | not) and ($v | has($k) | not))][0].key) as $missing
+          | if $unknown != null then {error:"invalid_answer", field:$unknown}
+            elif $bad != null then {error:"invalid_answer", field:$bad}
+            elif $missing != null then {error:"missing_answer", field:$missing}
+            else
+              ([$ps.fields[] | select(applies(.)) | .key] | map({key:., value:$v[.]}) | map(select(.value != null)) | from_entries) as $given
+              | {answers: ({"install.confirm":"yes", "port.allow_reserved":"yes",
+                  "cert.existing_self":(if $v["cert.mode"] == "acme" then "replace" else "keep" end),
+                  "acme.method":"http", "acme.on_dns_fail":"cancel", "acme.on_fail":"cancel",
+                  "sni.mode":(if $given.sni then "custom" else "random" end)} + ($given | map_values(tostring)))}
+            end
+        end' <<< "$1"
+}
+
+# 安装可能改动的文件：脚本数据目录顶层文件、证书与伪装站点。返回存在的路径。
+_api_install_paths() {
+    local f
+    for f in "$CFG"/* "$CFG"/.[!.]* "$CFG"/certs/* /etc/nginx/conf.d/vless-fake.conf /etc/nginx/http.d/vless-fake.conf \
+        /etc/nginx/sites-available/vless-fake /etc/nginx/sites-enabled/vless-fake; do
+        [[ -f "$f" && ! -L "$f" ]] || continue
+        case "${f##*/}" in *.log|.txn.lock) continue ;; esac
+        printf '%s\n' "$f"
+    done
+}
+
+# 恢复安装前的文件，删除安装新建的文件，按恢复后的配置重启内核。成功返回 0。
+_api_install_restore() {
+    local backup="$1" core="$2" f failed=0
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        grep -Fxq "$f" "$backup/files" || rm -f "$f" || failed=1
+    done < <(_api_install_paths)
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        mkdir -p "${f%/*}" && cp -p "$backup/$(printf '%s' "$f" | _api_sha256)" "$f" || failed=1
+    done < "$backup/files"
+    if [[ "$core" == singbox ]]; then
+        if [[ -f "$CFG/singbox.json" ]]; then svc restart vless-singbox >/dev/null 2>&1 || failed=1; else svc stop vless-singbox >/dev/null 2>&1 || true; fi
+    else
+        if [[ -f "$CFG/config.json" ]]; then svc restart vless-reality >/dev/null 2>&1 || failed=1; else svc stop vless-reality >/dev/null 2>&1 || true; fi
+    fi
+    return "$failed"
+}
+
+_api_install() {
+    local request="$1" results="$CFG/api-results" backups="$CFG/api-backups" fingerprint record prior backup log
+    local checked protocol core answers before port code field data f
+    checked=$(_api_install_answers "$request" "$(_api_install_schema)" 2>/dev/null) || { _api_reply failed invalid_request; return 1; }
+    if [[ "$(jq -r '.error // ""' <<< "$checked")" != "" ]]; then
+        _api_reply failed "$(jq -r .error <<< "$checked")" "$(jq -c 'if .field then {field} else null end' <<< "$checked")"
+        return 1
+    fi
+    protocol=$(jq -r .params.protocol <<< "$request")
+    core=$(jq -r .params.core <<< "$request")
+    answers=$(jq -c .answers <<< "$checked")
+    [[ -f "$DB_FILE" ]] || init_db >/dev/null 2>&1 || true
+    [[ -f "$DB_FILE" ]] || { _api_reply failed invalid_database; return 1; }
+    mkdir -p "$results" "$backups" && chmod 700 "$results" "$backups" || { _api_reply failed storage_error; return 1; }
+    fingerprint=$(jq -cS '{action, params}' <<< "$request" | _api_sha256)
+    record="$results/$api_id.json"
+    _api_txn_lock || { _api_reply failed lock_timeout; return 1; }
+    find "$results" "$backups" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null || true
+    if [[ -f "$record" ]]; then
+        prior=$(cat "$record")
+        _api_txn_unlock
+        [[ "$(jq -r .fingerprint <<< "$prior")" == "$fingerprint" ]] || { _api_reply failed request_id_conflict; return 1; }
+        case "$(jq -r .status <<< "$prior")" in
+            succeeded) _api_reply succeeded ok "$(jq -c .data <<< "$prior")"; return 0 ;;
+            failed) _api_reply failed "$(jq -r .code <<< "$prior")" "$(jq -c .data <<< "$prior")"; return 1 ;;
+            *) _api_reply unknown result_unknown '{"replay_allowed":false}'; return 1 ;;
+        esac
+    fi
+    # 意图先落盘：进程在此之后中断，重放只会得到 unknown，不会重复安装。
+    _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" '{fingerprint:$f,status:"running"}')" || { _api_txn_unlock; _api_reply failed storage_error; return 1; }
+    backup="$backups/$api_id"
+    mkdir -p "$backup" && chmod 700 "$backup" && _api_install_paths > "$backup/files" || {
+        rm -f "$record"; _api_txn_unlock; _api_reply failed storage_error; return 1; }
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        cp -p "$f" "$backup/$(printf '%s' "$f" | _api_sha256)" || { rm -f "$record"; _api_txn_unlock; _api_reply failed storage_error; return 1; }
+    done < "$backup/files"
+    before=$(db_list_ports "$core" "$protocol" 2>/dev/null || true)
+    log="$backup/log"
+    rm -f "$backup/error" "$backup/result"
+    # 独立子进程运行菜单安装流程：标准输入为空，任何漏网的 read 立即读到 EOF，不会卡住。
+    (
+        VAIO_INSTALL_API=1 VAIO_INSTALL_PROTOCOL="$protocol" VAIO_INSTALL_CORE="$core" VAIO_ANSWERS="$answers"
+        VAIO_INSTALL_ERROR="$backup/error" VAIO_INSTALL_RESULT="$backup/result" _VAIO_ASKED=""
+        export VAIO_INSTALL_API VAIO_INSTALL_PROTOCOL VAIO_INSTALL_CORE VAIO_ANSWERS VAIO_INSTALL_ERROR VAIO_INSTALL_RESULT
+        do_install_server
+    ) </dev/null >>"$log" 2>&1 || true
+    port=""
+    if [[ ! -s "$backup/error" && -s "$backup/result" ]]; then
+        IFS='|' read -r _ _ port < "$backup/result"
+        # 结果标记之外再核对数据库：端口必须是本次新增的实例
+        if [[ "$port" =~ ^[0-9]+$ ]] && db_list_ports "$core" "$protocol" 2>/dev/null | grep -Fxq "$port" && ! grep -Fxq "$port" <<< "$before"; then
+            data=$(jq -nc --arg c "$core" --arg p "$protocol" --argjson port "$port" '{target:{core:$c,protocol:$p,port:$port}}')
+            _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" --argjson d "$data" '{fingerprint:$f,status:"succeeded",data:$d}')"
+            _api_txn_unlock
+            _api_reply succeeded ok "$data"
+            return 0
+        fi
+    fi
+    code=install_failed field=""
+    [[ -s "$backup/error" ]] && IFS='|' read -r code field < "$backup/error"
+    # 只返回脚本自身的中文提示（不含凭据），便于面板显示失败原因。
+    data=$(jq -nc --arg m "$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -E '✗|!' | tail -n1 | sed -E 's/^[[:space:]]*(✗|!)[[:space:]]*//')" --arg k "$field" \
+        '{message:$m} + (if $k == "" then {} else {field:$k} end)')
+    if _api_install_restore "$backup" "$core" >>"$log" 2>&1; then
+        _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" --arg c "$code" --argjson d "$data" '{fingerprint:$f,status:"failed",code:$c,data:($d + {rolled_back:true})}')"
+        _api_txn_unlock
+        _api_reply failed "$code" "$(jq -c '. + {rolled_back:true}' <<< "$data")"
+        return 1
+    fi
+    _api_account_store "$record" "$(jq -nc --arg f "$fingerprint" '{fingerprint:$f,status:"unknown"}')"
+    _api_txn_unlock
+    _api_reply unknown result_unknown '{"replay_allowed":false}'
+    return 1
+}
+
 _api_dispatch() {
     local request action api_id="" inventory target matches count forwards
     command -v jq >/dev/null 2>&1 || {
@@ -33473,12 +33684,13 @@ _api_dispatch() {
     action=$(jq -r .action <<< "$request")
     case "$action" in
         capabilities)
-            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" --arg ops "$API_ACCOUNT_OPS" --arg authority "$(db_authority_get)" --argjson modes "$(_proto_user_modes_json)" '
-              {stage:"read_only_foundation",actions:["capabilities","inventory","plan","result","account_apply"],write_actions:[],
+            _api_reply succeeded ok "$(jq -nc --arg x "$XRAY_PROTOCOLS" --arg s "$SINGBOX_PROTOCOLS" --arg p "$STANDALONE_PROTOCOLS" --arg ops "$API_ACCOUNT_OPS" --arg authority "$(db_authority_get)" --argjson modes "$(_proto_user_modes_json)" --argjson install "$(_api_install_schema)" '
+              {stage:"read_only_foundation",actions:["capabilities","inventory","plan","result","account_apply","install"],write_actions:[],
                user_authority:$authority,
                user_modes:$modes,
                accounts_api:{version:3,actions:["account_apply","result","account_share"],ops:($ops|split(" ")),
                  transaction:true,idempotent:true,snell_member_add:"assign_empty_instance"},
+               install_api:{version:1,actions:["install","result"],transaction:true,idempotent:true,schema:$install},
                forward_api:{version:1,actions:["forward_apply","result"],ops:["add","update","delete","enable","disable"],backends:["realm","nftables"]},
                protocols:([($x|split(" ")[])|{core:"xray",protocol:.,write_supported:false}] +
                  [($s|split(" ")[])|{core:"singbox",protocol:.,write_supported:false}] +
@@ -33502,6 +33714,10 @@ _api_dispatch() {
             ;;
         account_share)
             _api_account_share "$request"
+            return $?
+            ;;
+        install)
+            _api_install "$request"
             return $?
             ;;
         forward_apply)
