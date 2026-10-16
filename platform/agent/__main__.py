@@ -96,6 +96,11 @@ class Agent:
                 self.snapshot_at = 0
                 return dict(status="succeeded", message=(("已更新到 " + result["to"]) if result.get("changed") else "已是最新版本 " + result["to"]),
                             result={"core": result})
+            if task.get("action") == "script_install":
+                if hasattr(self.script_api, "invalidate"):
+                    self.script_api.invalidate()
+                target = result.pop("target", {})
+                return dict(status="succeeded", message="已安装 " + str(target.get("protocol", "")) + "，端口 " + str(target.get("port", "")), result=result)
             return dict(status="succeeded", message="操作完成", result=result)
         except TransactionUnknown as error:
             return dict(status="unknown", message=str(error), result={})
@@ -140,6 +145,10 @@ class Agent:
             snapshot["accounts_version"] = 1 if snapshot["script_api"].get("accounts_api") == 1 else 0
             snapshot["forwards"] = snapshot["script_api"].pop("forwards", [])
             snapshot["forward_version"] = 1 if snapshot["script_api"].get("forward_api") == 1 else 0
+            # Installs through the script's own flow; the schema drives the panel's form.
+            schema = snapshot["script_api"].pop("install_schema", None)
+            if schema:
+                snapshot["install_schema"], snapshot["install_version"] = schema, 1
         snapshot["addresses"] = dict(getattr(self, "addresses", {}))
         snapshot["cores"] = dict(getattr(self, "cores", {}))
         snapshot["core_update_version"] = 1

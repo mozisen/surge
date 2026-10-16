@@ -81,7 +81,13 @@ const actions = {
     agent_upgrade: '一键升级',
     forward_apply: '端口转发',
     agent_set_url: '切换面板地址',
-    core_update: '更新内核'
+    core_update: '更新内核',
+    script_install: '安装协议'
+};
+// 脚本安装任务的一行摘要：协议名 + 指定端口
+const scriptInstallSummary = t => {
+    const p = t.request.params || {};
+    return (names[p.protocol] || p.protocol || '') + (p.answers?.port ? ':' + p.answers.port : '');
 };
 const coreLabels = {xray: 'Xray', singbox: 'Sing-box', 'snell-v5': 'Snell v5', 'snell-v6': 'Snell v6'};
 // 内核更新任务的一行摘要：内核名 + 版本变化
@@ -263,7 +269,7 @@ function nodeCards() {
 }
 
 function taskTable(list) {
-    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='core_update'?esc(coreSummary(t)):t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
+    return list.length ? `<div class="table-wrap"><table><thead><tr><th>操作 / 实例</th><th>服务器</th><th>状态</th><th>创建时间</th><th>结果</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(actions[t.action]||t.action)}</strong><br><span class="muted mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).length+' 项统一用户操作':t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='script_install'?esc(scriptInstallSummary(t)):t.action==='core_update'?esc(coreSummary(t)):t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+' : '+t.request.port}</span></td><td>${esc(t.node_name)}</td><td>${badge(t.status)}</td><td class="muted">${date(t.created)}</td><td><button class="small" data-action="task" data-id="${t.id}">查看记录</button>${t.status==='unknown'?` <button class="small" data-action="resolve-task" data-id="${t.id}">核对结果</button>`:''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><p>暂无任务。节点上的操作会在这里留下记录。</p></div>';
 }
 
 let overviewSummary = null;
@@ -344,7 +350,7 @@ function detail(node) {
     selected = node;
     const s = node.snapshot,
         m = s.metrics || {};
-    shell(`<div class="heading"><div><a class="back-link" href="#nodes">返回服务器</a><h1>${esc(node.name)} ${badge(node.status)}</h1><div class="detail-info"><span>${esc(node.group_name)}</span><span>${esc(s.hostname||'等待连接')}</span><span>${esc(s.arch||'—')}</span><span>节点程序 ${esc(s.agent_version||'—')}</span></div></div><div class="action-row">${node.upgrade_available?`<button data-action="upgrade-agent" title="节点程序 ${esc(s.agent_version)}，当前面板 ${esc(node.panel_version)}">${s.upgrade_version===1&&node.status==='online'?'一键升级':'升级节点'}</button>`:''}<button data-action="history">历史曲线</button><button data-action="node-settings">节点设置</button><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div></div>${node.maintenance || node.status!=='online' || s.error?`<div class="notice warn">${esc(node.connection_hint)}</div>`:''}${node.notes?`<div class="notice node-notes">${esc(node.notes)}</div>`:''}${authorityNotice(node)}${!node.adopted?`<div class="notice"><div><strong>${node.status==='pending'?'等待节点连接':'配置已识别，尚未接管'}</strong><br>${node.status==='pending'?'在服务器运行安装脚本，节点将自动上线。':'请检查下面的协议与端口。接管后面板可以修改节点配置。'}</div><button data-action="${node.status==='pending'?'renew':'adopt'}" ${node.status==='offline'?'disabled':''}>${node.status==='pending'?'重新生成脚本':'确认接管'}</button></div>`:''}<div class="stats">${stat('系统负载',m.load??'—',`${m.cpu_count||'—'} 个逻辑核心`)}${stat('内存使用',m.memory_total?(m.memory_used/m.memory_total*100).toFixed(0):'—',bytes(m.memory_used)+' / '+bytes(m.memory_total),m.memory_total?'%':'')}${stat('磁盘使用',m.disk_total?(m.disk_used/m.disk_total*100).toFixed(0):'—',bytes(m.disk_used)+' / '+bytes(m.disk_total),m.disk_total?'%':'')}${stat('协议实例',(s.instances||[]).length,'配置以节点实际状态为准')}</div><div class="tabs"><button data-action="tab" data-tab="protocols" class="${detailTab==='protocols'?'active':''}">协议管理</button><button data-action="tab" data-tab="tasks" class="${detailTab==='tasks'?'active':''}">执行记录</button></div><div class="split"><section><div class="panel"><div class="panel-head"><h2>${detailTab==='protocols'?'已安装协议':'节点任务'} <span class="count">${detailTab==='protocols'?(s.instances||[]).length:tasks.filter(t=>t.node_id===node.id).length}</span></h2><button class="quiet small" data-action="refresh">${icon('refresh')}刷新</button></div>${detailTab==='protocols'?protocolTable(node):taskTable(tasks.filter(t=>t.node_id===node.id))}</div></section><aside class="detail-aside">${authorityBlock(node)}${coreBlock(node)}<section class="info-block"><h3>节点信息</h3>${s.script_api?`<div class="kv"><span>脚本接口</span><span>${s.script_api.status==='ready'?'只读预览':'暂不可用'}</span></div><p class="helper">${s.script_api.status==='ready'?`${esc(s.script_api.version)} · ${Number(s.script_api.protocol_count)||0} 种协议与内核组合。新增协议写接口尚未开放。`:'接口检查失败，请查看节点依赖及脚本校验。'}现有管理功能使用已验收的独立适配器。</p>`:''}<div class="kv"><span>系统</span><span>${esc(s.os||'—')}</span></div><div class="kv"><span>运行时间</span><span>${m.uptime?Math.floor(m.uptime/86400)+' 天':'—'}</span></div><div class="kv"><span>网卡累计接收</span><span>${bytes(m.network_rx)}</span></div><div class="kv"><span>网卡累计发送</span><span>${bytes(m.network_tx)}</span></div><div class="kv"><span>最后心跳</span><span>${date(node.last_seen)}</span></div><div class="kv"><span>流量同步</span><span>${esc(({ok:'正常',unavailable:'暂不可用',stale:'等待同步',error:'同步异常',unknown:'未知',no_core:'未找到内核',no_stats:'暂无统计',snell_error:'Snell 同步失败',singbox_error:'Sing-box 同步失败',partial_singbox_error:'部分统计失败',temp_error:'临时文件错误'})[s.traffic_status]||'暂不可用')}</span></div></section><section class="info-block"><h3>${icon('shield')} 操作说明</h3><p>共享核心的配置修改会重启对应核心，可能短暂影响同服务的其他协议。</p><p>不支持写入的协议仅展示状态。配置备份保留在节点本地。</p></section></aside></div>`, 'nodes');
+    shell(`<div class="heading"><div><a class="back-link" href="#nodes">返回服务器</a><h1>${esc(node.name)} ${badge(node.status)}</h1><div class="detail-info"><span>${esc(node.group_name)}</span><span>${esc(s.hostname||'等待连接')}</span><span>${esc(s.arch||'—')}</span><span>节点程序 ${esc(s.agent_version||'—')}</span></div></div><div class="action-row">${node.upgrade_available?`<button data-action="upgrade-agent" title="节点程序 ${esc(s.agent_version)}，当前面板 ${esc(node.panel_version)}">${s.upgrade_version===1&&node.status==='online'?'一键升级':'升级节点'}</button>`:''}<button data-action="history">历史曲线</button><button data-action="node-settings">节点设置</button><button class="primary" data-action="install" ${!node.adopted||node.status!=='online'||node.maintenance?'disabled':''}>${icon('plus')}安装协议</button></div></div>${node.maintenance || node.status!=='online' || s.error?`<div class="notice warn">${esc(node.connection_hint)}</div>`:''}${node.notes?`<div class="notice node-notes">${esc(node.notes)}</div>`:''}${authorityNotice(node)}${!node.adopted?`<div class="notice"><div><strong>${node.status==='pending'?'等待节点连接':'配置已识别，尚未接管'}</strong><br>${node.status==='pending'?'在服务器运行安装脚本，节点将自动上线。':'请检查下面的协议与端口。接管后面板可以修改节点配置。'}</div><button data-action="${node.status==='pending'?'renew':'adopt'}" ${node.status==='offline'?'disabled':''}>${node.status==='pending'?'重新生成脚本':'确认接管'}</button></div>`:''}<div class="stats">${stat('系统负载',m.load??'—',`${m.cpu_count||'—'} 个逻辑核心`)}${stat('内存使用',m.memory_total?(m.memory_used/m.memory_total*100).toFixed(0):'—',bytes(m.memory_used)+' / '+bytes(m.memory_total),m.memory_total?'%':'')}${stat('磁盘使用',m.disk_total?(m.disk_used/m.disk_total*100).toFixed(0):'—',bytes(m.disk_used)+' / '+bytes(m.disk_total),m.disk_total?'%':'')}${stat('协议实例',(s.instances||[]).length,'配置以节点实际状态为准')}</div><div class="tabs"><button data-action="tab" data-tab="protocols" class="${detailTab==='protocols'?'active':''}">协议管理</button><button data-action="tab" data-tab="tasks" class="${detailTab==='tasks'?'active':''}">执行记录</button></div><div class="split"><section><div class="panel"><div class="panel-head"><h2>${detailTab==='protocols'?'已安装协议':'节点任务'} <span class="count">${detailTab==='protocols'?(s.instances||[]).length:tasks.filter(t=>t.node_id===node.id).length}</span></h2><button class="quiet small" data-action="refresh">${icon('refresh')}刷新</button></div>${detailTab==='protocols'?protocolTable(node):taskTable(tasks.filter(t=>t.node_id===node.id))}</div></section><aside class="detail-aside">${authorityBlock(node)}${coreBlock(node)}<section class="info-block"><h3>节点信息</h3>${s.script_api?`<div class="kv"><span>脚本接口</span><span>${s.script_api.status==='ready'?'只读预览':'暂不可用'}</span></div><p class="helper">${s.script_api.status==='ready'?`${esc(s.script_api.version)} · ${Number(s.script_api.protocol_count)||0} 种协议与内核组合。${s.install_version===1?`可通过脚本安装：${Object.keys(s.install_schema?.protocols||{}).map(p=>esc(names[p]||p)).join('、')}。`:'新增协议写接口尚未开放。'}`:'接口检查失败，请查看节点依赖及脚本校验。'}现有管理功能使用已验收的独立适配器。</p>`:''}<div class="kv"><span>系统</span><span>${esc(s.os||'—')}</span></div><div class="kv"><span>运行时间</span><span>${m.uptime?Math.floor(m.uptime/86400)+' 天':'—'}</span></div><div class="kv"><span>网卡累计接收</span><span>${bytes(m.network_rx)}</span></div><div class="kv"><span>网卡累计发送</span><span>${bytes(m.network_tx)}</span></div><div class="kv"><span>最后心跳</span><span>${date(node.last_seen)}</span></div><div class="kv"><span>流量同步</span><span>${esc(({ok:'正常',unavailable:'暂不可用',stale:'等待同步',error:'同步异常',unknown:'未知',no_core:'未找到内核',no_stats:'暂无统计',snell_error:'Snell 同步失败',singbox_error:'Sing-box 同步失败',partial_singbox_error:'部分统计失败',temp_error:'临时文件错误'})[s.traffic_status]||'暂不可用')}</span></div></section><section class="info-block"><h3>${icon('shield')} 操作说明</h3><p>共享核心的配置修改会重启对应核心，可能短暂影响同服务的其他协议。</p><p>不支持写入的协议仅展示状态。配置备份保留在节点本地。</p></section></aside></div>`, 'nodes');
 }
 async function render() {
     const route = location.hash.slice(1) || 'overview';
@@ -512,7 +518,7 @@ function showTask(id) {
         return;
     }
     const r = t.result || {};
-    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='core_update'?esc(coreSummary(t)):t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
+    modal(t.action === 'share' ? '协议配置详情' : actions[t.action] + ' · 执行记录', `<p class="task-head">${badge(t.status)} <span class="mono">${t.action==='platform_apply'?(t.request.params?.ops||[]).map(o=>esc(o.op)).join(', '):t.action==='agent_upgrade'?'节点程序与节点脚本':t.action==='script_install'?esc(scriptInstallSummary(t)):t.action==='core_update'?esc(coreSummary(t)):t.action==='forward_apply'?esc(forwardSummary(t)):t.action==='agent_set_url'?esc(t.request.params?.url||''):esc(t.request.protocol)+':'+t.request.port}</span> · ${esc(t.node_name)}</p><div class="kv"><span>创建时间</span><span>${date(t.created)}</span></div><div class="kv"><span>开始时间</span><span>${date(t.started)}</span></div><div class="kv"><span>完成时间</span><span>${date(t.finished)}</span></div><p>${esc(t.message||'等待节点执行，请保持 Agent 在线。')}</p>${r.steps?`<pre>${r.steps.map((x,i)=>(i+1)+'. '+esc(x)).join('\n')}</pre>`:''}${r.backup?`<p>节点备份：<code>${esc(r.backup)}</code></p>`:''}${r.connection&&!r.config_details?'<p class="helper">此节点尚未返回完整配置详情，请升级节点程序后重新读取。</p>':''}${r.config_details?`<label for="config-details">协议配置详情</label><textarea id="config-details" readonly rows="16">${esc(formatConfigDetails(r.config_details))}</textarea><button data-action="copy-config-details">复制配置详情</button>`:''}${r.connection?`<label for="connection">连接信息</label><textarea id="connection" readonly>${esc(r.connection)}</textarea><button data-action="copy-connection">复制连接信息</button><p>连接二维码</p><img class="connection-qr" src="/api/tasks/${encodeURIComponent(id)}/qr" alt="连接信息二维码" width="240" height="240">`:''}${t.action==='share'&&!r.connection&&t.status==='succeeded'?'<p>连接信息已过期，请重新导出。</p>':''}<div class="modal-foot">${t.status==='queued'?`<button data-action="cancel-task" data-id="${id}">取消等待</button>`:''}<button data-action="close">关闭</button></div>`, true);
 }
 
 function installPortCandidate(instances, current) {
@@ -573,10 +579,10 @@ function startInstall(nodeId) {
     if (!installTargetId) return modal('暂无可安装的服务器', '<p>需要已接管、在线且未在维护中的服务器。请先添加服务器，或等待服务器上线、结束维护。</p>');
     install();
 }
-function installServerField(protocol) {
+function installServerField(protocol, supports = n => installCombinations(n).some(k => k.split(':')[1] === protocol)) {
     const current = installNode();
     return `<div class="inline-field install-server"><label for="install-server">服务器</label><select id="install-server">${installServers().map(n => {
-        const ok = !protocol || installCombinations(n).some(k => k.split(':')[1] === protocol);
+        const ok = !protocol || supports(n);
         return `<option value="${esc(n.id)}"${n.id === current.id ? ' selected' : ''}${ok ? '' : ' disabled'}>${esc(n.name)}${ok ? '' : '（不支持此协议）'}</option>`;
     }).join('')}</select></div>`;
 }
@@ -603,22 +609,90 @@ function installCoreLabel(core, protocol) {
     return protocol.startsWith('snell') ? '独立核心' : core === 'xray' ? 'Xray' : 'Sing-box';
 }
 
+// Protocols the node script installs through its own flow (--api install); the node reports the form schema.
+function scriptInstallProtocols(node = installNode()) {
+    const schema = node.snapshot.install_version === 1 ? node.snapshot.install_schema?.protocols || {} : {};
+    const adapters = new Set(installCombinations(node).map(k => k.split(':')[1]));
+    return Object.entries(schema).filter(([p]) => !adapters.has(p));
+}
+
 function install() {
     const combinations = installCombinations();
     const instances = installNode().snapshot.instances || [];
     const protocols = [...new Set(combinations.map(k=>k.split(':')[1]))];
-    const cards = protocols.map(p=>{
-        const cores = [...new Set(combinations.filter(k=>k.split(':')[1]===p).map(k=>installCoreLabel(k.split(':')[0], p)))].join(' / ');
+    const scripted = scriptInstallProtocols();
+    const card = (value, p, cores, meta) => {
         const count = instances.filter(i=>i.protocol===p).length;
-        return `<button type="submit" class="protocol-card" value="${esc(p)}"><strong>${esc(names[p]||p)}</strong><span class="protocol-card-cores">${esc(cores)}</span><span class="protocol-card-meta">${esc(INSTALL_CARD_META[p]||'')}</span>${count?`<span class="protocol-card-count">已安装 ${count} 个</span>`:''}</button>`;
-    }).join('');
-    modal('选择要安装的协议', `<form id="protocol-choice-form"><div class="install-scroll"><div class="install-top">${installServerField()}</div><p>选择协议后填写端口等参数；新实例使用独立端口，不影响已有配置。</p>${combinations.length ? `<div class="protocol-grid">${cards}</div>` : '<p class="notice">此服务器的节点程序未声明可用写入能力，请先升级节点程序，或选择其他服务器。</p>'}</div><div class="modal-foot"><button type="button" data-action="close">取消</button></div></form>`, false, 'install');
+        return `<button type="submit" class="protocol-card" value="${esc(value)}"><strong>${esc(names[p]||p)}</strong><span class="protocol-card-cores">${esc(cores)}</span><span class="protocol-card-meta">${esc(meta)}</span>${count?`<span class="protocol-card-count">已安装 ${count} 个</span>`:''}</button>`;
+    };
+    const cards = protocols.map(p=>card(p, p, [...new Set(combinations.filter(k=>k.split(':')[1]===p).map(k=>installCoreLabel(k.split(':')[0], p)))].join(' / '), INSTALL_CARD_META[p]||''))
+        .concat(scripted.map(([p, item])=>card('script:' + p, p, item.cores.map(c=>installCoreLabel(c, p)).join(' / '), '脚本安装 · 支持自有域名'))).join('');
+    modal('选择要安装的协议', `<form id="protocol-choice-form"><div class="install-scroll"><div class="install-top">${installServerField()}</div><p>选择协议后填写端口等参数；新实例使用独立端口，不影响已有配置。</p>${cards ? `<div class="protocol-grid">${cards}</div>` : '<p class="notice">此服务器的节点程序未声明可用写入能力，请先升级节点程序，或选择其他服务器。</p>'}</div><div class="modal-foot"><button type="button" data-action="close">取消</button></div></form>`, false, 'install');
     bindInstallServer(install);
     $('#protocol-choice-form .protocol-card')?.focus();
     $('#protocol-choice-form').addEventListener('submit', e=>{
         e.preventDefault();
-        const protocol = e.submitter?.value;
+        const protocol = e.submitter?.value || '';
         if (protocols.includes(protocol)) installForm(protocol);
+        else if (scripted.some(([p]) => 'script:' + p === protocol)) scriptInstallForm(protocol.slice(7));
+    });
+}
+
+// Field is shown (and required) only while every `when` condition matches the current enum choices.
+function scriptFieldShown(field, form) {
+    return Object.entries(field.when || {}).every(([k, v]) => form.querySelector(`[data-key="${CSS.escape(k)}"]`)?.value === v);
+}
+
+function scriptInstallForm(protocol) {
+    const node = installNode();
+    const item = Object.fromEntries(scriptInstallProtocols(node))[protocol];
+    if (!item) return install();
+    const input = (f, i) => {
+        const id = 'script-field-' + i;
+        const attrs = `id="${id}" data-key="${esc(f.key)}" data-type="${esc(f.type)}"`;
+        const control = f.type === 'enum'
+            ? `<select ${attrs}>${f.options.map(o=>`<option value="${esc(o.value)}"${o.value===f.default?' selected':''}>${esc(o.label)}</option>`).join('')}</select>`
+            : f.type === 'port'
+                ? `<div class="input-action"><input ${attrs} type="number" min="1" max="65535" placeholder="${esc(f.placeholder||'')}"><button type="button" class="install-generate" data-generate="${id}">生成</button></div>`
+                : `<input ${attrs} maxlength="253" autocomplete="off" spellcheck="false" placeholder="${esc(f.placeholder||'')}">`;
+        return `<div class="script-field" data-field="${i}"><label for="${id}">${esc(f.label)}</label>${control}</div>`;
+    };
+    const core = item.cores.length > 1 ? `<div class="inline-field"><label for="script-core">内核</label><select id="script-core">${item.cores.map(c=>`<option value="${esc(c)}">${installCoreLabel(c, protocol)}</option>`).join('')}</select></div>` : '';
+    modal(`安装 ${names[protocol]||protocol}`, `<form id="script-install-form"><div class="install-scroll"><div class="install-top">${installServerField(protocol, n => scriptInstallProtocols(n).some(([p]) => p === protocol))}${core}</div><p class="install-guidance">由节点脚本按菜单安装流程执行，参数与脚本菜单一致；失败时节点恢复安装前状态。</p><div class="install-grid">${item.fields.map(input).join('')}</div></div><div class="install-status"><div class="error" role="alert"></div></div><div class="modal-foot"><p class="install-warning">安装可能需要数分钟（下载内核、申请证书），共享核心会短暂重启。请在防火墙放行端口；Let’s Encrypt 还需要 80 端口。</p><button type="submit" class="primary">安装实例</button></div></form>`, false, 'install', install);
+    bindInstallServer(() => scriptInstallForm(protocol));
+    const form = $('#script-install-form');
+    const sync = () => item.fields.forEach((f, i) => {
+        const shown = scriptFieldShown(f, form);
+        const box = form.querySelector(`[data-field="${i}"]`);
+        box.hidden = !shown;
+        const el = box.querySelector('[data-key]');
+        el.required = shown && !f.optional && f.type !== 'enum';
+    });
+    form.querySelectorAll('select[data-key]').forEach(el => el.addEventListener('change', sync));
+    form.querySelectorAll('[data-generate]').forEach(b => b.addEventListener('click', () => {
+        $('#' + b.dataset.generate).value = installPortCandidate(node.snapshot.instances || [], $('#' + b.dataset.generate).value);
+    }));
+    sync();
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const b = $('[type=submit]', form);
+        b.disabled = true;
+        try {
+            const answers = {};
+            item.fields.forEach(f => {
+                const el = form.querySelector(`[data-key="${CSS.escape(f.key)}"]`);
+                const value = String(el.value).trim();
+                if (!scriptFieldShown(f, form) || value === '') return;
+                answers[f.key] = f.type === 'port' ? Number(value) : value;
+            });
+            const data = await post('/nodes/' + node.id + '/script-install', {protocol, core: $('#script-core')?.value || item.cores[0], answers});
+            activeTaskId = data.id;
+            await refresh();
+            showTask(data.id);
+        } catch (err) {
+            formError(err);
+            b.disabled = false;
+        }
     });
 }
 

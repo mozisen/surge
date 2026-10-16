@@ -25,6 +25,7 @@ jobs:
       - run: node tests/install-form.cjs
       - run: node tests/traffic-display.cjs
       - run: node tests/platform-users.cjs
+      - run: node tests/script-install-form.cjs
       - run: sh -n scripts/install-agent.sh && sh -n scripts/install-panel.sh && sh -n scripts/vaio-panel && sh -n scripts/vaio-agent && bash -n vendor/vless-server.sh
       - run: bash ../tests/platform-billing.sh && bash ../tests/realtime-traffic.sh && bash ../tests/snell-users.sh && bash ../tests/singbox-stats-query.sh && bash ../tests/ss-traffic.sh && bash ../tests/platform-api.sh && bash ../tests/accounts.sh && bash ../tests/accounts-api.sh && bash ../tests/user-authority.sh && bash ../tests/protocol-users.sh && bash ../tests/single-user-instances.sh && bash ../tests/install-api.sh && bash ../tests/install-api-flow.sh
       - run: sudo -E env PATH="$PATH" bash ../tests/accounts-cli.sh

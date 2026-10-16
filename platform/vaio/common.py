@@ -256,6 +256,89 @@ def validate_set_url_task(data):
     return {"action": "agent_set_url", "params": {"url": url}}
 
 
+SCRIPT_INSTALL_CORES = ("xray", "singbox", "standalone")
+SCRIPT_INSTALL_TYPES = ("port", "enum", "domain", "host")
+_ANSWER_KEY = r"[a-z][a-z0-9._-]{0,40}"
+_ANSWER_TEXT = r"[A-Za-z0-9._-]{1,253}"
+
+
+def _plain(value, maximum):
+    return value if isinstance(value, str) and len(value) <= maximum and not re.search(r"[\x00-\x1f\x7f<>]", value) else None
+
+
+def sanitize_install_schema(data):
+    """Install form schema declared by the node script (--api capabilities); anything malformed is dropped.
+    It only drives the form: the script validates every answer again before installing."""
+    clean = {}
+    protocols = data.get("protocols") if isinstance(data, dict) and data.get("version") == 1 else None
+    for name, item in (protocols.items() if isinstance(protocols, dict) else []):
+        if len(clean) >= 40 or not isinstance(name, str) or not re.fullmatch(r"[a-z0-9-]{1,32}", name) or not isinstance(item, dict):
+            continue
+        cores = [c for c in item.get("cores", []) if c in SCRIPT_INSTALL_CORES] if isinstance(item.get("cores"), list) else []
+        fields = []
+        for field in item.get("fields", [])[:20] if isinstance(item.get("fields"), list) else []:
+            if not isinstance(field, dict) or not isinstance(field.get("key"), str) or not re.fullmatch(_ANSWER_KEY, field["key"]) \
+                    or field.get("type") not in SCRIPT_INSTALL_TYPES or not _plain(field.get("label"), 40):
+                continue
+            entry = {"key": field["key"], "type": field["type"], "label": field["label"], "optional": field.get("optional") is True}
+            if _plain(field.get("placeholder"), 80):
+                entry["placeholder"] = field["placeholder"]
+            if field["type"] == "enum":
+                options = [{"value": o["value"], "label": o["label"]} for o in field.get("options", [])[:10]
+                           if isinstance(o, dict) and isinstance(o.get("value"), str) and re.fullmatch(r"[a-z0-9_-]{1,32}", o["value"]) and _plain(o.get("label"), 80)] \
+                    if isinstance(field.get("options"), list) else []
+                if not options:
+                    continue
+                entry["options"] = options
+                if field.get("default") in [o["value"] for o in options]:
+                    entry["default"] = field["default"]
+            when = field.get("when")
+            if isinstance(when, dict) and when:
+                if len(when) > 3 or not all(isinstance(k, str) and re.fullmatch(_ANSWER_KEY, k) and isinstance(v, str) and re.fullmatch(r"[a-z0-9_-]{1,32}", v)
+                                            for k, v in when.items()):
+                    continue
+                entry["when"] = dict(when)
+            fields.append(entry)
+        if cores and _plain(item.get("name"), 40):
+            clean[name] = {"name": item["name"], "cores": cores, "fields": fields}
+    return {"version": 1, "protocols": clean} if clean else None
+
+
+def validate_script_install_task(data, schema=None):
+    """Install through the node script's own flow. With the node's schema (panel side) the protocol, core and
+    answer keys and types must match it; the script re-validates semantics (ports, domains, conflicts)."""
+    if not isinstance(data, dict) or set(data) != {"action", "params"} or data["action"] != "script_install" \
+            or not isinstance(data["params"], dict) or set(data["params"]) != {"protocol", "core", "answers"}:
+        raise ValueError("安装任务字段无效")
+    params = data["params"]
+    if not isinstance(params["protocol"], str) or not re.fullmatch(r"[a-z0-9-]{1,32}", params["protocol"]) \
+            or params["core"] not in SCRIPT_INSTALL_CORES:
+        raise ValueError("协议或内核无效")
+    answers = params["answers"]
+    if not isinstance(answers, dict) or len(answers) > 20:
+        raise ValueError("安装参数无效")
+    for key, value in answers.items():
+        if not isinstance(key, str) or not re.fullmatch(_ANSWER_KEY, key) or not (
+                (type(value) is int and 1 <= value <= 65535) or (isinstance(value, str) and re.fullmatch(_ANSWER_TEXT, value))):
+            raise ValueError("安装参数无效：" + str(key)[:40])
+    if schema is not None:
+        item = (schema or {}).get("protocols", {}).get(params["protocol"])
+        if not item or params["core"] not in item["cores"]:
+            raise ValueError("该服务器的节点脚本不支持面板安装此协议")
+        fields = {f["key"]: f for f in item["fields"]}
+        for key, value in answers.items():
+            field = fields.get(key)
+            if field is None:
+                raise ValueError("安装参数无效：" + key)
+            if field["type"] == "port" and type(value) is not int:
+                raise ValueError(field["label"] + "必须是 1-65535 的整数")
+            if field["type"] == "enum" and value not in [o["value"] for o in field["options"]]:
+                raise ValueError(field["label"] + "选项无效")
+            if field["type"] in ("domain", "host") and (not isinstance(value, str) or not re.fullmatch(DNS_NAME, value)):
+                raise ValueError(field["label"] + "格式无效")
+    return {"action": "script_install", "params": {"protocol": params["protocol"], "core": params["core"], "answers": dict(answers)}}
+
+
 FORWARD_FIELDS = ("backend", "remark", "transport", "listen_host", "listen_port", "remote_host", "remote_port", "enabled")
 FORWARD_OPS = {"add": {"op", "rule"}, "update": {"op", "id", "base", "rule"}, "delete": {"op", "id", "base"},
                "enable": {"op", "id", "base"}, "disable": {"op", "id", "base"}}

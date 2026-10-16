@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from vaio.install_options import SS_METHODS
-from vaio.common import MUTATIONS, PROTOCOLS, config_revision, validate_core_task, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task
+from vaio.common import MUTATIONS, PROTOCOLS, config_revision, validate_core_task, validate_forward_task, validate_platform_task, validate_script_install_task, validate_task, validate_upgrade_task
 from .addresses import discover
 from .config_details import config_details
 from .inventory import mutable, read_db, rows, service_for, ss_server_key, ss_user_stats, users_for
@@ -40,6 +40,23 @@ FORWARD_FAILURES = {
     "storage_error": "节点无法写入事务记录，请检查磁盘空间与权限",
     "request_id_conflict": "任务 ID 已用于其他请求，已拒绝",
 }
+
+# Script install failure codes. invalid_answer / missing_answer / acme_failed / install_failed come with
+# rolled_back when the script already ran the flow and restored its backup.
+INSTALL_FAILURES = {
+    "invalid_answer": "参数无效或被节点拒绝",
+    "missing_answer": "缺少必填参数",
+    "acme_failed": "Let's Encrypt 证书申请失败，请确认域名已解析到本机且 80 端口可用",
+    "install_failed": "安装失败",
+    "unsupported_protocol": "该节点脚本不支持面板安装此协议",
+    "unsupported_core": "该协议不支持所选内核",
+    "invalid_request": "安装请求格式无效",
+    "request_id_conflict": "任务 ID 已用于不同请求，已拒绝执行",
+    "lock_timeout": "节点正在执行其他配置事务，请稍后重试",
+    "invalid_database": "节点数据库格式无效，请在节点检查",
+    "storage_error": "节点无法写入事务记录，请检查磁盘空间与权限",
+}
+INSTALL_FIELD_NAMES = {"port": "端口", "cert.mode": "证书", "cert.domain": "域名", "sni": "SNI", "install.master_conflict": "主协议冲突处理"}
 
 # Script account_apply failure codes → operator-facing messages. Every failure was
 # rejected before writing or rolled back; none is replayed.
@@ -122,7 +139,10 @@ class Bridge:
         upgrade = isinstance(task, dict) and task.get("action") == "agent_upgrade"
         forward = isinstance(task, dict) and task.get("action") == "forward_apply"
         core = isinstance(task, dict) and task.get("action") == "core_update"
-        if core:
+        script_install = isinstance(task, dict) and task.get("action") == "script_install"
+        if script_install:
+            validated = validate_script_install_task({k: v for k, v in task.items() if k != "id"})
+        elif core:
             validated = validate_core_task({k: v for k, v in task.items() if k != "id"})
         elif forward:
             validated = validate_forward_task({k: v for k, v in task.items() if k != "id"})
@@ -163,6 +183,8 @@ class Bridge:
                         result = cores.update(self.runtime, self.cfg, self.state, validated["params"]["core"])
                     except cores.RestoreFailed as error:
                         raise TransactionUnknown(str(error)) from None
+                elif script_install:
+                    result = self._script_install(validated, identity)
                 elif forward:
                     result = self._forward_apply(validated, identity)
                 elif platform:
@@ -248,6 +270,42 @@ class Bridge:
             detail = str(data.get("message") or "")[:200]
             raise TransactionRolledBack("端口转发应用失败，节点已回滚" + ("：" + detail if detail else ""))
         raise ValueError(FORWARD_FAILURES.get(code, "端口转发被节点拒绝"))
+
+    def _script_install(self, task, identity):
+        """Install through the script's own menu flow (--api install); an unknown outcome is never replayed."""
+        if self.script_api is None:
+            raise ValueError("节点脚本接口不可用，无法安装")
+        if (self.state / "enforcement-pending.json").exists():
+            raise TransactionUnknown("自动策略执行结果未知，请先在节点核对")
+        try:
+            reply = self.script_api.install(task["params"], identity)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            reply = None
+        if reply is None or reply.get("status") == "unknown":
+            try:
+                reply = self.script_api.result(identity)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                reply = None
+            if reply is None or reply.get("status") not in ("succeeded", "failed"):
+                raise TransactionUnknown("安装结果未确认，未重放；请在节点核对 " + str(self.cfg / "api-backups" / identity))
+        data = reply.get("data") if isinstance(reply.get("data"), dict) else {}
+        if reply["status"] == "succeeded":
+            target = data.get("target") if isinstance(data.get("target"), dict) else {}
+            if target.get("protocol") != task["params"]["protocol"] or type(target.get("port")) is not int:
+                raise TransactionUnknown("节点脚本返回的安装结果无效，请在节点核对")
+            return {"target": {"core": task["params"]["core"], "protocol": target["protocol"], "port": target["port"]},
+                    "steps": ["节点脚本校验安装参数", "备份脚本数据、证书与伪装站点", "按脚本安装流程生成配置并启动服务", "核对新增实例"]}
+        code = reply.get("code")
+        field = data.get("field") if isinstance(data.get("field"), str) else ""
+        message = INSTALL_FAILURES.get(code, "安装被节点拒绝")
+        if field:
+            message += "：" + INSTALL_FIELD_NAMES.get(field, field[:40])
+        detail = str(data.get("message") or "")[:200]
+        if detail and code == "install_failed":
+            message += "：" + detail
+        if data.get("rolled_back") is True:
+            raise TransactionRolledBack(message + "（节点已恢复安装前状态）")
+        raise ValueError(message)
 
     def _upgrade(self, identity):
         """Hand the upgrade to a detached updater; its outcome is reported in later snapshots."""

@@ -1,5 +1,6 @@
 """Script API bridge. Protocol capabilities never grant task execution rights; only the
-unified-account transaction (account_apply) and port-forward changes (forward_apply) are written through it."""
+unified-account transaction (account_apply), port-forward changes (forward_apply) and installs through
+the script's own flow (install) are written through it."""
 import hashlib
 import json
 import os
@@ -9,7 +10,7 @@ import time
 import uuid
 from pathlib import Path
 
-from vaio.common import sanitize_forwards
+from vaio.common import sanitize_forwards, sanitize_install_schema
 
 from .runtime import ROOT, UPSTREAM_SHA
 
@@ -63,6 +64,11 @@ class ScriptAPI:
         request = {'api_version': 1, 'request_id': self._request_id(request_id), 'action': 'forward_apply', 'params': params}
         return self._call(request, 300)[1]
 
+    def install(self, params, request_id):
+        """Install through the script's menu flow (certificates, Nginx, core downloads): allow up to 20 minutes."""
+        request = {'api_version': 1, 'request_id': self._request_id(request_id), 'action': 'install', 'params': params}
+        return self._call(request, 1200)[1]
+
     def share(self, target, name, host, port=None):
         """A member's connection link from the script (read-only; nothing is recorded).
         host/port replace the address in the link (relay entry); credentials stay the landing instance's."""
@@ -109,12 +115,15 @@ class ScriptAPI:
             # Version 2 adds set_authority, 3 adds account_share and user modes; earlier operations are unchanged.
             accounts_ready = isinstance(accounts, dict) and accounts.get('version') in (1, 2, 3) \
                 and isinstance(accounts.get('actions'), list) and 'account_apply' in accounts['actions']
+            install = c.get('install_api')
+            schema = sanitize_install_schema(install.get('schema')) if isinstance(install, dict) and install.get('version') == 1 else None
             forward = c.get('forward_api')
             forward_ready = isinstance(forward, dict) and forward.get('version') == 1
             self.cached = {'status': 'ready', 'version': version, 'stage': 'read_only',
                            'protocol_count': len(protocols), 'instance_count': len(instances),
                            'accounts_api': 1 if accounts_ready else 0, 'forward_api': 1 if forward_ready else 0,
-                           'forwards': sanitize_forwards(i.get('forwards')) if forward_ready else []}
+                           'forwards': sanitize_forwards(i.get('forwards')) if forward_ready else [],
+                           **({'install_schema': schema} if schema else {})}
         except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
             self.cached = {'status': 'unavailable', 'stage': 'read_only'}
         self.checked = now

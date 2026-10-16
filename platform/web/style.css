@@ -2646,12 +2646,16 @@ dialog.install .install-warning {
 .install-grid .install-group {
     display: contents;
 }
+.script-field {
+    min-width: 0;
+}
 .install-grid .install-wide {
     grid-column: 1 / -1;
     margin: -4px 0 0;
 }
 #install-form .install-group[hidden],
-#install-form .install-grid [hidden] {
+#install-form .install-grid [hidden],
+#script-install-form .install-grid [hidden] {
     display: none;
 }
 .install-users {
@@ -2675,7 +2679,7 @@ dialog.install .install-warning {
 }
 @media (max-width: 760px) {
     .install-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
     }
     .install-top {
         gap: 8px;

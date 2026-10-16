@@ -20,7 +20,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import __version__
 from . import platform_users
-from .common import CORE_NAMES, FORWARD_FIELDS, MUTATIONS, LEGACY_COMBINATIONS, PROTOCOLS, digest, require_text, validate_forward_rule, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task, validate_core_task
+from .common import CORE_NAMES, FORWARD_FIELDS, MUTATIONS, LEGACY_COMBINATIONS, PROTOCOLS, digest, require_text, validate_forward_rule, validate_forward_task, validate_platform_task, validate_task, validate_upgrade_task, validate_core_task, validate_script_install_task
 from .install_options import ADVANCED_INSTALL_FIELDS, REALITY_INSTALL_FIELDS
 from .store import Store
 
@@ -1343,6 +1343,22 @@ def create_app(config=None):
             raise ValueError("请选择要更新的内核")
         return node_task(node_id, "core_update", validate_core_task({"action": "core_update", "params": {"core": data["core"]}}),
                          lambda node, snapshot: core_block(snapshot, data["core"]))
+
+    @app.post("/api/nodes/<node_id>/script-install")
+    @admin
+    def node_script_install(node_id):
+        """Install a protocol through the node script's own flow; the form follows the schema the node reports."""
+        data = body()
+        if set(data) != {"protocol", "core", "answers"}:
+            raise ValueError("安装参数无效")
+        validated = {}
+
+        def check(node, snapshot):
+            if snapshot.get("install_version") != 1 or not snapshot.get("install_schema"):
+                return "节点程序需更新到 1.6.0 及以上，节点脚本需 3.7.4-preview.16 及以上"
+            validated["task"] = validate_script_install_task({"action": "script_install", "params": data}, snapshot["install_schema"])
+            return None
+        return node_task(node_id, "script_install", lambda: validated["task"], check)
 
     @app.post("/api/nodes/core-update-all")
     @admin
