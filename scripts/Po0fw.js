@@ -40,7 +40,7 @@
  * - @slot 严格数字校验
  * - 持久化状态按 token hash 保存，不受 token 排列顺序影响
  * - 蜂窝 📶 标记兼容精确 IP 与 /24
- * - 可选 ICMP Ping 探针 + 失败后重复加白
+ * - Surge 指定代理 HTTP HEAD 连通性测试，失败后限次重新加白
  */
 
 
@@ -64,10 +64,10 @@ var HTTP_RETRY_DELAY_MS = 1500;
 // network-changed 后等待网络稳定
 var NETWORK_CHANGED_DELAY_MS = 1500;
 
-// Surge JS 无原生 ICMP socket，委托给同出口的 Ping 探针。
-var DEFAULT_PING_API = "http://127.0.0.1:18765/ping";
-var PING_RETRY_DELAY_MS = 1800;
-var MAX_PING_RETRIES = 5;
+// Surge 原生代理连通性测试，默认采用 HTTP 204 检测地址。
+var DEFAULT_PROXY_TEST_URL = "http://cp.cloudflare.com/generate_204";
+var PROXY_RETRY_DELAY_MS = 1800;
+var MAX_PROXY_RETRIES = 5;
 
 
 /* =========================================================
@@ -481,6 +481,10 @@ function httpRequestOnce(
             cb
           );
 
+        } else if (method === "HEAD") {
+
+          $httpClient.head(opts, cb);
+
         } else {
 
           $httpClient.get(
@@ -786,8 +790,8 @@ function getArgumentTokens() {
 
 
 /* =========================================================
- * Surge 模块自定义参数：ping_ip / retry_count / ping_api / ping_key。
- * 不填 ping_ip 则维持原来的单次加白行为。
+ * 模块参数：test_proxy / retry_count / test_url
+ * 不配置 test_proxy 时只执行原来的自动加白。
  * ======================================================= */
 function getArgumentOption(name) {
   if (typeof $argument === "undefined" || $argument === null) return "";
@@ -803,40 +807,51 @@ function getArgumentOption(name) {
       return obj[name] === undefined ? "" : String(obj[name]);
     } catch (e) {}
   }
-  var pairs = arg.split("&");
-  for (var i = 0; i < pairs.length; i++) {
-    var at = pairs[i].indexOf("=");
-    if (at < 1 || pairs[i].slice(0, at) !== name) continue;
-    var value = pairs[i].slice(at + 1);
+  // Only recognized argument keys split values; proxy names and test URLs
+  // may legitimately contain '&'.
+  var keyPattern = /(?:^|&)(tokens|test_proxy|retry_count|test_url)=/g;
+  var fields = [];
+  var match;
+  while ((match = keyPattern.exec(arg)) !== null) {
+    fields.push({ name: match[1], start: match.index, from: keyPattern.lastIndex });
+  }
+  for (var i = 0; i < fields.length; i++) {
+    if (fields[i].name !== name) continue;
+    var end = (i + 1 < fields.length) ? fields[i + 1].start : arg.length;
+    var value = arg.slice(fields[i].from, end);
     try { return decodeURIComponent(value); } catch (e) { return value; }
   }
   return "";
 }
-function isValidIPv4(ip) {
-  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(ip)) return false;
-  return ip.split(".").every(function (part) {
-    return part.length > 0 && Number(part) >= 0 && Number(part) <= 255;
-  });
-}
-function getPingConfig() {
-  var ip = getArgumentOption("ping_ip").trim();
-  var cfg = { enabled: !!ip, ip: ip, retryCount: 0, api: "", key: "", error: "" };
+
+function getProxyTestConfig() {
+  var proxy = getArgumentOption("test_proxy").trim();
+  var cfg = {
+    enabled: !!proxy,
+    proxy: proxy,
+    url: getArgumentOption("test_url").trim() || DEFAULT_PROXY_TEST_URL,
+    retryCount: 0,
+    error: ""
+  };
   if (!cfg.enabled) return cfg;
-  if (!isValidIPv4(ip)) {
-    cfg.error = "ping_ip 必须是合法的 IPv4 地址";
+
+  if (!isSurge) {
+    cfg.error = "指定代理测试仅支持 Surge，其他客户端请留空 test_proxy";
     return cfg;
   }
-  var rawCount = getArgumentOption("retry_count").trim();
-  if (rawCount === "") rawCount = "3";
-  if (!/^\d+$/.test(rawCount) || Number(rawCount) > MAX_PING_RETRIES) {
-    cfg.error = "retry_count 必须为 0-" + MAX_PING_RETRIES + " 的整数（额外加白次数）";
+  if (/^(DIRECT|REJECT|REJECT-TINYGIF)$/i.test(proxy)) {
+    cfg.error = "test_proxy 请填写 Surge 中实际的代理节点名称，不要填写 DIRECT/REJECT";
+    return cfg;
+  }
+  var rawCount = getArgumentOption("retry_count").trim() || "3";
+  if (!/^\d+$/.test(rawCount) || Number(rawCount) > MAX_PROXY_RETRIES) {
+    cfg.error = "retry_count 必须为 0-" + MAX_PROXY_RETRIES + " 的整数（额外加白次数）";
     return cfg;
   }
   cfg.retryCount = Number(rawCount);
-  cfg.api = getArgumentOption("ping_api").trim() || DEFAULT_PING_API;
-  cfg.key = getArgumentOption("ping_key").trim();
-  if (!/^https?:\/\/[^\s]+$/i.test(cfg.api) || cfg.api.indexOf("#") !== -1) {
-    cfg.error = "ping_api 必须是可访问的 HTTP(S) Ping 探针地址";
+  if (!/^https?:\/\/[^\s]+$/i.test(cfg.url) ||
+      cfg.url.indexOf("#") >= 0 || /[\s]/.test(cfg.url)) {
+    cfg.error = "test_url 必须是合法的 HTTP(S) 测试地址";
   }
   return cfg;
 }
@@ -1442,61 +1457,71 @@ function ensureWhitelisted(
 
 
 /* =========================================================
- * 真正的 ICMP Ping 由可选的本地助手发起，HTTP 只传输检测结果。
- * 预期响应：{"ip":"1.2.3.4","ok":true/false}。
+ * Surge 原生代理测试：经 policy 指定的节点发送 HTTP HEAD。
+ * 不走 ping API，不需要 ICMP 服务；成功标准：默认 URL 返回 204，
+ * 自定义 URL 返回 2xx/3xx。代理网络失败则重试加白。
  * ======================================================= */
-function probeIcmp(config) {
-  var sep = config.api.indexOf("?") >= 0 ? "&" : "?";
+function testProxyConnection(config) {
+  if (typeof $httpClient === "undefined" || typeof $httpClient.head !== "function") {
+    return Promise.resolve({ ok: false, fatal: true, error: "当前客户端没有 $httpClient.head 接口" });
+  }
   var opts = {
-    url: config.api + sep + "ip=" + encodeURIComponent(config.ip) + "&_t=" + Date.now(),
-    headers: { "Accept": "application/json" }
+    url: config.url,
+    policy: config.proxy,
+    timeout: 5,
+    "auto-redirect": false,
+    headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" }
   };
-  if (config.key) opts.headers["X-Ping-Key"] = config.key;
-  if (isSurge) opts.policy = "DIRECT";
-  if (isLoon || isQX) opts.timeout = 4000;
-  else if (isSurgeFamily) opts.timeout = 4;
-  return httpRequestOnce("GET", opts).then(function (r) {
-    if (r.error) return { ok: false, error: "Ping 探针不可用：" + r.error };
-    if (r.status !== 200) {
-      return { ok: false, error: "Ping 探针 HTTP " + (r.status || "?") };
+  var started = Date.now();
+  return httpRequestOnce("HEAD", opts).then(function (r) {
+    var latency = Date.now() - started;
+    if (r.error) {
+      var message = String(r.error);
+      var fatal = /unknown policy|invalid policy|policy not found|no such policy|不存在的策略|未找到策略/i.test(message);
+      return { ok: false, fatal: fatal, error: message, latency: latency };
     }
-    var data;
-    try { data = JSON.parse(r.body); } catch (e) {
-      return { ok: false, error: "Ping 探针响应不是 JSON" };
-    }
-    if (!data || data.ip !== config.ip || typeof data.ok !== "boolean") {
-      return { ok: false, error: "Ping 探针响应格式不正确" };
-    }
-    return { ok: data.ok, error: "" };
+    var code = Number(r.status);
+    if (!code) return { ok: false, error: "未收到 HTTP 状态码", latency: latency };
+    var isDefault = config.url === DEFAULT_PROXY_TEST_URL;
+    var ok = isDefault ? code === 204 : (code >= 200 && code < 400);
+    return {
+      ok: ok,
+      code: code,
+      latency: latency,
+      error: ok ? "" : ("HTTP " + code + (isDefault ? "（期望 204）" : ""))
+    };
   });
 }
+
 function ensureAndVerify(item, index, config) {
   var requests = 0;
   function attempt() {
     requests++;
     return ensureWhitelisted(item, index).then(function (ctx) {
       ctx.addRequests = requests;
-      ctx.pingConfigured = config.enabled;
-      ctx.pingTarget = config.ip;
+      ctx.proxyConfigured = config.enabled;
+      ctx.proxyName = config.proxy;
       if (!config.enabled || !ctx.st.applied) return ctx;
-      return probeIcmp(config).then(function (result) {
-        ctx.ping = result;
-        // 探针故障不能视为 Ping 不通，否则会盲目重复加白。
-        if (result.ok || result.error || requests > config.retryCount) return ctx;
-        return delay(PING_RETRY_DELAY_MS).then(attempt);
+      return testProxyConnection(config).then(function (result) {
+        ctx.proxyTest = result;
+        if (result.ok || result.fatal || requests > config.retryCount) return ctx;
+        return delay(PROXY_RETRY_DELAY_MS).then(attempt);
       });
     });
   }
   return attempt();
 }
-function describePing(ctx) {
-  if (!ctx.pingConfigured) return "";
-  if (!ctx.ping) return "\n    ⚠️ 未执行 Ping（加白 API 尚未成功）";
-  if (ctx.ping.error) return "\n    ⚠️ " + ctx.ping.error;
-  return "\n    " + (ctx.ping.ok ? "✅" : "❌") +
-    " ICMP Ping " + ctx.pingTarget +
-    (ctx.ping.ok ? " 通" : " 不通") +
-    " · 加白请求 " + ctx.addRequests + " 次";
+
+function describeProxyTest(ctx) {
+  if (!ctx.proxyConfigured) return "";
+  if (!ctx.proxyTest) return "\n    ⚠️ 代理未测试（加白 API 未成功）";
+  var p = ctx.proxyTest;
+  if (p.ok) {
+    return "\n    ✅ 代理 " + ctx.proxyName + " 可用（HTTP " + p.code +
+      " · " + p.latency + "ms）· 加白 " + ctx.addRequests + " 次";
+  }
+  return "\n    ❌ 代理 " + ctx.proxyName + " 测试失败：" + p.error +
+    " · 加白 " + ctx.addRequests + " 次";
 }
 
 /* =========================================================
@@ -1631,7 +1656,7 @@ function describe(
     ) +
     "\n    " +
     ips +
-    describePing(ctx)
+    describeProxyTest(ctx)
   );
 }
 
@@ -1877,14 +1902,14 @@ var parsed =
     rawTokens
   );
 
-var pingConfig = getPingConfig();
+var proxyConfig = getProxyTestConfig();
 
 
 /* ---------- 参数错误 ---------- */
 
-if (pingConfig.error) {
-  notify("po0 防火墙加白", "Ping 参数配置错误", pingConfig.error);
-  finish("po0 加白：Ping 参数错误", pingConfig.error, false);
+if (proxyConfig.error) {
+  notify("po0 防火墙加白", "代理测试参数配置错误", proxyConfig.error);
+  finish("po0 加白：代理参数错误", proxyConfig.error, false);
 
 } else if (
   parsed.errors.length > 0
@@ -1975,7 +2000,7 @@ if (pingConfig.error) {
             return ensureAndVerify(
               t,
               i,
-              pingConfig
+              proxyConfig
             );
           }
         )
@@ -2009,7 +2034,7 @@ if (pingConfig.error) {
 
         if (
           st.applied &&
-          (!pingConfig.enabled || (results[i].ping && results[i].ping.ok))
+          (!proxyConfig.enabled || (results[i].proxyTest && results[i].proxyTest.ok))
         ) {
 
           okCount++;
@@ -2057,10 +2082,9 @@ if (pingConfig.error) {
               ? "1"
               : "0"
           ) +
-          (pingConfig.enabled
-              ? ("|ping=" + (results[i].ping ?
-                  (results[i].ping.error ? "error" :
-                    (results[i].ping.ok ? "1" : "0")) : "skip"))
+          (proxyConfig.enabled
+              ? ("|proxy=" + (results[i].proxyTest ?
+                   (results[i].proxyTest.ok ? "1" : "0") : "skip"))
               : "");
 
 
@@ -2104,7 +2128,7 @@ if (pingConfig.error) {
             ? " 📶"
             : ""
         ) +
-        (pingConfig.enabled ? " · Ping " + pingConfig.ip : "");
+        (proxyConfig.enabled ? " · 代理 " + proxyConfig.proxy : "");
 
 
       var content =
