@@ -1,9 +1,9 @@
 #!name=po0 防火墙自动加白
-#!desc=po0 自动加白 + 指定 Surge 代理 HEAD 连通性检测；失败重试。新增可调详细日志：逐轮 API/HEAD、异常、重试、历史。
+#!desc=po0 加白 + 指定 Surge 代理连通性检测与失败重试。日志默认简洁，一眼看懂结果；需要时可启用 debug 排障。
 #!category=po0
 #!author=reallinzc
-#!arguments=tokens:"",test_proxy:"",retry_count:3,test_url:"http://cp.cloudflare.com/generate_204",log_level:"detail"
-#!arguments-desc=tokens: po0 API token（多个用英文逗号分隔，支持 @槽位）；test_proxy: 完整节点名称，留空仅加白；retry_count: 连通性失败后额外加白 0-5 次；test_url: HEAD 检测 URL（默认 204）；log_level: detail=每步详细记录（默认），summary=仅小结与错误，off=不输出控制台日志。
+#!arguments=tokens:"",test_proxy:"",retry_count:3,test_url:"http://cp.cloudflare.com/generate_204",log_level:"simple"
+#!arguments-desc=tokens: po0 API token（多个用英文逗号分隔，支持 @槽位）；test_proxy: 完整节点名称，留空仅加白；retry_count: 连通性失败后额外加白 0-5 次；test_url: HEAD 检测 URL（默认 204）；log_level: simple=简洁日志（默认，只显示结果与重试），debug=完整排障日志，off=不输出控制台日志；旧 detail/summary 自动兼容为简洁日志。
 
 [Rule]
 # 加白 API 必须直连，确保 API 看到的是本机真实出口 IP 而不是代理出口
