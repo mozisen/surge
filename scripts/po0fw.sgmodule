@@ -1,15 +1,15 @@
 #!name=po0 防火墙自动加白
-#!desc=调用 po0 防火墙 API 将本机当前出口 IP 加入白名单。支持多 token（英文逗号分割，对应多台机器），network-changed 事件与每 10 分钟 cron 自动触发。
+#!desc=本机出口自动加白。可选指定 IPv4 进行真实 ICMP Ping 验证，失败后按次数重试加白。Ping 需要额外的同出口探针服务。
 #!category=po0
 #!author=reallinzc
-#!arguments=tokens:""
-#!arguments-desc=tokens: po0 防火墙 API token（pgnfw_ 开头），多台机器用英文逗号 , 分割；可选在 token 后加 @槽位（如 pgnfw_xxx@0）钉固定坑位、永不被淘汰
+#!arguments=tokens:"",ping_ip:"",retry_count:3,ping_api:"http://127.0.0.1:18765/ping",ping_key:""
+#!arguments-desc=tokens: pgnfw_ token，逗号分隔，可加 @槽位。ping_ip: 待验证 IPv4（留空关闭检测）；retry_count: Ping 不通时额外加白次数 0-5；ping_api: 真实 ICMP 探针接口地址（必须与客户端使用相同出口，默认本机 127.0.0.1）；ping_key: 可选探针密钥。Surge 脚本无法独立发送 ICMP，需要运行配套探针。
 
 [Rule]
 # 加白 API 必须直连，确保 API 看到的是本机真实出口 IP 而不是代理出口
 IP-CIDR,124.221.69.228/32,DIRECT,no-resolve
 
 [Script]
-po0-fw-cron = type=cron,cronexp="*/10 * * * *",script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=60,argument="tokens={{{tokens}}}"
-po0-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=60,argument="tokens={{{tokens}}}"
-po0-fw-start = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=60,script-update-interval=3600,argument="tokens={{{tokens}}}"
+po0-fw-cron = type=cron,cronexp="*/10 * * * *",script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&ping_ip={{{ping_ip}}}&retry_count={{{retry_count}}}&ping_api={{{ping_api}}}&ping_key={{{ping_key}}}"
+po0-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&ping_ip={{{ping_ip}}}&retry_count={{{retry_count}}}&ping_api={{{ping_api}}}&ping_key={{{ping_key}}}"
+po0-fw-start = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&ping_ip={{{ping_ip}}}&retry_count={{{retry_count}}}&ping_api={{{ping_api}}}&ping_key={{{ping_key}}}"
