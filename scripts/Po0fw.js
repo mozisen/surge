@@ -72,7 +72,7 @@ var PROXY_RETRY_DELAY_MS = 1800;
 var MAX_PROXY_RETRIES = 5;
 
 // 运行日志：detail 全流程，summary 仅概要/警告，off 关闭控制台日志。
-var LOG_LEVEL = "detail";
+var LOG_LEVEL = "summary";
 var RUN_ID = Date.now().toString(36);
 var RUN_STARTED_AT = Date.now();
 var RUN_TRIGGER = "unknown";
@@ -171,12 +171,13 @@ function safeTestUrl(url) {
 }
 
 function logEvent(level, phase, message) {
-  if (LOG_LEVEL === "off" || (LOG_LEVEL === "summary" && level === "DETAIL")) return;
+  if (LOG_LEVEL === "off" || (LOG_LEVEL !== "debug" && level !== "BRIEF")) return;
   try {
     if (typeof console === "undefined" || typeof console.log !== "function") return;
-    var ts = new Date().toISOString();
-    console.log("[po0fw][" + ts + "][" + RUN_ID + "][" + level + "][" + phase + "] " +
-      redactSensitive(message));
+    // Surge 已显示时间、会话 ID，避免重复打印。
+    console.log("[po0] " + redactSensitive(
+      level === "BRIEF" ? message : "[" + phase + "] " + message
+    ));
   } catch (e) {}
 }
 
@@ -1655,6 +1656,8 @@ function ensureAndVerify(item, index, config) {
             config.retryCount + "，本轮结束；后续 cron 或网络事件将再次尝试");
           return ctx;
         }
+        logEvent("BRIEF", "重试", "⚠️ " + config.proxy + " 连接失败，准备第 " +
+          (requests + 1) + "/" + maxRequests + " 次加白");
         logEvent("WARN", "流程/重试", tag + " 节点仍不可用，" +
           PROXY_RETRY_DELAY_MS + "ms 后重新请求 po0 加白；下一轮 " +
           (requests + 1) + "/" + maxRequests);
@@ -1675,6 +1678,28 @@ function describeProxyTest(ctx) {
   }
   return "\n    ❌ 代理 " + ctx.proxyName + " 测试失败：" + p.error +
     " · 加白 " + ctx.addRequests + " 次";
+}
+
+function briefResult(results, config, okCount) {
+  var allOk = okCount === results.length;
+  var label = RUN_TRIGGER === "network-changed" ? "网络变化" :
+    RUN_TRIGGER === "cron" ? "定时检查" :
+    RUN_TRIGGER === "engine-started" ? "Surge 启动" : "手动执行";
+  var lead = (allOk ? "✅ " : "❌ ") + label + "｜";
+  var lines = results.map(function(ctx, index) {
+    var st = ctx.st || {}, p = ctx.proxyTest;
+    var success = !!st.applied && (!config.enabled || (p && p.ok));
+    var line = (results.length > 1 ? "#" + (index + 1) + " " : "") +
+      (success ? "加白成功" : (st.applied ? "代理检测失败（加白成功）" : "加白失败"));
+    if (st.currentIp) line += " · 出口 " + st.currentIp;
+    if (st.whitelist && st.limit !== undefined) line += " · 白名单 " + st.whitelist.length + "/" + st.limit;
+    if (!st.applied) line += "（" + (st.error || "服务器未确认生效") + "）";
+    else if (config.enabled) line += " · " + config.proxy +
+      (p && p.ok ? " " + p.latency + "ms" : " 不可用（" + ((p && p.error) || "未检测") + "）");
+    if (ctx.addRequests > 1) line += " · 加白 " + ctx.addRequests + " 次";
+    return line;
+  });
+  return lead + (results.length > 1 ? okCount + "/" + results.length + " 成功\n" : "") + lines.join("\n");
 }
 
 /* =========================================================
@@ -2057,9 +2082,11 @@ var parsed =
 
 var proxyConfig = getProxyTestConfig();
 var configuredLogLevel = getArgumentOption("log_level").trim().toLowerCase();
-var logLevelError = configuredLogLevel && !/^(detail|summary|off)$/.test(configuredLogLevel)
-  ? "log_level 必须为 detail、summary 或 off" : "";
-LOG_LEVEL = logLevelError ? "detail" : (configuredLogLevel || "detail");
+var logLevelError = configuredLogLevel && !/^(simple|summary|detail|debug|off)$/.test(configuredLogLevel)
+  ? "log_level 必须为 simple、debug 或 off" : "";
+// 旧参数 detail 自动使用简洁日志，debug 才输出详细排障信息。
+LOG_LEVEL = configuredLogLevel === "off" ? "off" :
+  configuredLogLevel === "debug" ? "debug" : "summary";
 RUN_TRIGGER = getArgumentOption("trigger") || getEventName() || "manual/unknown";
 
 logEvent("INFO", "启动", "trigger=" + RUN_TRIGGER +
@@ -2075,6 +2102,7 @@ logEvent("INFO", "启动", "trigger=" + RUN_TRIGGER +
 
 if (logLevelError || proxyConfig.error) {
   var validationError = logLevelError || proxyConfig.error;
+  logEvent("BRIEF", "配置", "❌ 配置错误：" + validationError);
   logEvent("ERROR", "配置", validationError);
   writeLogbookSummary("参数配置错误：" + validationError);
   saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
@@ -2090,6 +2118,7 @@ if (logLevelError || proxyConfig.error) {
     parsed.errors.join(
       "\n"
     );
+  logEvent("BRIEF", "配置", "❌ Token 配置错误：" + configError);
   logEvent("ERROR", "配置", configError);
   writeLogbookSummary("Token 配置错误：" + configError);
   saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
@@ -2116,6 +2145,7 @@ if (logLevelError || proxyConfig.error) {
   parsed.items.length === 0
 ) {
 
+  logEvent("BRIEF", "配置", "❌ 未配置有效 Token");
   logEvent("ERROR", "配置", "未配置有效 token，终止执行");
   writeLogbookSummary("未配置有效 Token");
   saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
@@ -2353,6 +2383,7 @@ if (logLevelError || proxyConfig.error) {
 
       var totalDuration = Date.now() - RUN_STARTED_AT;
       var needNotify = changed || !allOk;
+      logEvent("BRIEF", "结果", briefResult(results, proxyConfig, okCount));
       logEvent(allOk ? "INFO" : "WARN", "本轮汇总",
         "trigger=" + RUN_TRIGGER + " passed=" + okCount + "/" + results.length +
         " duration=" + totalDuration + "ms" +
@@ -2368,10 +2399,7 @@ if (logLevelError || proxyConfig.error) {
       if (
         needNotify
       ) {
-        writeLogbookSummary("trigger=" + RUN_TRIGGER + " result=" + okCount + "/" +
-          results.length + " exit=" + exitText +
-          " proxy=" + (proxyConfig.enabled ? proxyConfig.proxy : "off") +
-          " duration=" + totalDuration + "ms; " + content);
+        writeLogbookSummary(briefResult(results, proxyConfig, okCount));
         notify(
           "po0 防火墙加白",
           title,
@@ -2398,6 +2426,7 @@ if (logLevelError || proxyConfig.error) {
         );
 
 
+      logEvent("BRIEF", "异常", "❌ 脚本异常：" + message);
       logEvent("ERROR", "脚本异常", message);
       writeLogbookSummary("脚本异常：" + message);
       saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
