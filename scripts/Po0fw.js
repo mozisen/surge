@@ -180,6 +180,18 @@ function logEvent(level, phase, message) {
   } catch (e) {}
 }
 
+function writeLogbookSummary(message) {
+  try {
+    if (typeof $surge !== "undefined" && $surge &&
+        typeof $surge.logbook === "function") {
+      $surge.logbook("[po0fw] " + redactSensitive(message));
+    }
+  } catch (e) {
+    logEvent("WARN", "日志簿", "写入 Surge Logbook 失败：" +
+      redactSensitive(e && e.message ? e.message : e));
+  }
+}
+
 function saveRunSummary(record) {
   try {
     var records = JSON.parse(storeRead(RUN_HISTORY_KEY) || "[]");
@@ -2064,6 +2076,7 @@ logEvent("INFO", "启动", "trigger=" + RUN_TRIGGER +
 if (logLevelError || proxyConfig.error) {
   var validationError = logLevelError || proxyConfig.error;
   logEvent("ERROR", "配置", validationError);
+  writeLogbookSummary("参数配置错误：" + validationError);
   saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
     ok: false, duration_ms: Date.now() - RUN_STARTED_AT, error: validationError });
   notify("po0 防火墙加白", "模块参数配置错误", validationError);
@@ -2078,6 +2091,7 @@ if (logLevelError || proxyConfig.error) {
       "\n"
     );
   logEvent("ERROR", "配置", configError);
+  writeLogbookSummary("Token 配置错误：" + configError);
   saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
     ok: false, duration_ms: Date.now() - RUN_STARTED_AT, error: configError });
 
@@ -2103,6 +2117,7 @@ if (logLevelError || proxyConfig.error) {
 ) {
 
   logEvent("ERROR", "配置", "未配置有效 token，终止执行");
+  writeLogbookSummary("未配置有效 Token");
   saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
     ok: false, duration_ms: Date.now() - RUN_STARTED_AT, error: "未配置有效 token" });
   notify(
@@ -2353,7 +2368,10 @@ if (logLevelError || proxyConfig.error) {
       if (
         needNotify
       ) {
-
+        writeLogbookSummary("trigger=" + RUN_TRIGGER + " result=" + okCount + "/" +
+          results.length + " exit=" + exitText +
+          " proxy=" + (proxyConfig.enabled ? proxyConfig.proxy : "off") +
+          " duration=" + totalDuration + "ms; " + content);
         notify(
           "po0 防火墙加白",
           title,
@@ -2381,6 +2399,7 @@ if (logLevelError || proxyConfig.error) {
 
 
       logEvent("ERROR", "脚本异常", message);
+      writeLogbookSummary("脚本异常：" + message);
       saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
         ok: false, duration_ms: Date.now() - RUN_STARTED_AT, error: redactSensitive(message) });
       notify(
