@@ -41,6 +41,8 @@
  * - 持久化状态按 token hash 保存，不受 token 排列顺序影响
  * - 蜂窝 📶 标记兼容精确 IP 与 /24
  * - Surge 指定代理 HTTP HEAD 连通性测试，失败后限次重新加白
+ * - 结构化运行日志（时间、触发来源、每轮 API/代理检测/重试）
+ * - 日志级别和最近 20 次运行摘要（不会保存 token）
  */
 
 
@@ -68,6 +70,14 @@ var NETWORK_CHANGED_DELAY_MS = 1500;
 var DEFAULT_PROXY_TEST_URL = "http://cp.cloudflare.com/generate_204";
 var PROXY_RETRY_DELAY_MS = 1800;
 var MAX_PROXY_RETRIES = 5;
+
+// 运行日志：detail 全流程，summary 仅概要/警告，off 关闭控制台日志。
+var LOG_LEVEL = "detail";
+var RUN_ID = Date.now().toString(36);
+var RUN_STARTED_AT = Date.now();
+var RUN_TRIGGER = "unknown";
+var RUN_HISTORY_KEY = STORE_PREFIX + "run_history";
+var MAX_RUN_HISTORY = 20;
 
 
 /* =========================================================
@@ -134,6 +144,59 @@ if (isLoon || isQX) {
   REQUEST_TIMEOUT = 15000;
 } else if (isSurgeFamily) {
   REQUEST_TIMEOUT = 15;
+}
+
+
+
+/* =========================================================
+ * 结构化日志与运行摘要历史
+ * - 使用控制台输出运行轨迹；日志时间戳为 UTC ISO 8601。
+ * - 不输出完整 token 或 API 地址中的 token。
+ * - 运行摘要保存在 $persistentStore，最多保留最近 20 次。
+ * ======================================================= */
+function redactSensitive(value) {
+  var text = String(value === undefined || value === null ? "" : value);
+  return text
+    .replace(/\/api\/firewall\/[^/?\s"'<>]+/gi, "/api/firewall/[REDACTED]")
+    .replace(/pgnfw_[A-Za-z0-9_-]+/g, "pgnfw_[REDACTED]")
+    .slice(0, 320);
+}
+
+function safeTestUrl(url) {
+  return String(url || "")
+    .replace(/\/\/[^/@\s]+@/, "//[AUTH]@")
+    .split("?")[0]
+    .split("#")[0]
+    .slice(0, 180);
+}
+
+function logEvent(level, phase, message) {
+  if (LOG_LEVEL === "off" || (LOG_LEVEL === "summary" && level === "DETAIL")) return;
+  try {
+    if (typeof console === "undefined" || typeof console.log !== "function") return;
+    var ts = new Date().toISOString();
+    console.log("[po0fw][" + ts + "][" + RUN_ID + "][" + level + "][" + phase + "] " +
+      redactSensitive(message));
+  } catch (e) {}
+}
+
+function saveRunSummary(record) {
+  try {
+    var records = JSON.parse(storeRead(RUN_HISTORY_KEY) || "[]");
+    if (!Array.isArray(records)) records = [];
+    records.push(record);
+    if (records.length > MAX_RUN_HISTORY) {
+      records = records.slice(-MAX_RUN_HISTORY);
+    }
+    var stored = storeWrite(JSON.stringify(records), RUN_HISTORY_KEY);
+    if (stored === false) {
+      logEvent("WARN", "存储", "最近运行摘要保存失败，当前环境可能不支持持久化存储");
+    } else {
+      logEvent("DETAIL", "存储", "已保存最近运行摘要，当前 " + records.length + "/" + MAX_RUN_HISTORY + " 条");
+    }
+  } catch (e) {
+    logEvent("WARN", "存储", "最近运行摘要保存异常：" + redactSensitive(e && e.message ? e.message : e));
+  }
 }
 
 
@@ -586,19 +649,30 @@ function isRetryableServerError(r) {
 function httpRequest(
   method,
   opts,
-  attempt
+  attempt,
+  logTag
 ) {
 
   attempt =
     attempt ||
     1;
 
+  var httpStartedAt = Date.now();
+  var tag = logTag || "po0 API";
+  logEvent("DETAIL", "API/HTTP", tag + " 底层 POST 尝试 " + attempt + "/" + HTTP_RETRY +
+    " policy=" + (isSurge ? "DIRECT" : "由客户端路由决定") +
+    " timeout=" + (REQUEST_TIMEOUT === null ? "默认" : REQUEST_TIMEOUT));
 
   return httpRequestOnce(
     method,
     opts
   ).then(
     function (r) {
+
+      var spent = Date.now() - httpStartedAt;
+      logEvent(r.error ? "WARN" : "DETAIL", "API/HTTP", tag + " 底层尝试 " + attempt +
+        " 结果 HTTP=" + (r.status || "-") + " duration=" + spent + "ms" +
+        (r.error ? " error=" + r.error : ""));
 
       if (
         !r.error &&
@@ -627,6 +701,8 @@ function httpRequest(
       }
 
 
+      logEvent("WARN", "API/重试", tag + " 传输异常或可重试响应；等待 " +
+        (HTTP_RETRY_DELAY_MS * attempt) + "ms 重试底层请求");
       return delay(
         HTTP_RETRY_DELAY_MS *
         attempt
@@ -636,7 +712,8 @@ function httpRequest(
           return httpRequest(
             method,
             opts,
-            attempt + 1
+            attempt + 1,
+            tag
           );
         }
       );
@@ -809,7 +886,7 @@ function getArgumentOption(name) {
   }
   // Only recognized argument keys split values; proxy names and test URLs
   // may legitimately contain '&'.
-  var keyPattern = /(?:^|&)(tokens|test_proxy|retry_count|test_url)=/g;
+  var keyPattern = /(?:^|&)(tokens|test_proxy|retry_count|test_url|log_level|trigger)=/g;
   var fields = [];
   var match;
   while ((match = keyPattern.exec(arg)) !== null) {
@@ -1028,7 +1105,8 @@ function wasCellular(
 
 function apiCall(
   token,
-  slot
+  slot,
+  logTag
 ) {
 
   var url =
@@ -1089,14 +1167,17 @@ function apiCall(
 
   return httpRequest(
     "POST",
-    opts
+    opts,
+    1,
+    logTag
   ).then(
     function (r) {
 
       if (r.error) {
 
         return {
-          error: r.error
+          error: redactSensitive(r.error),
+          httpStatus: r.status || null
         };
       }
 
@@ -1132,7 +1213,8 @@ function apiCall(
 
           currentIp:
             data &&
-            data.currentIp
+            data.currentIp,
+          httpStatus: r.status
         };
       }
 
@@ -1204,7 +1286,8 @@ function apiCall(
 
           currentIp:
             data &&
-            data.currentIp
+            data.currentIp,
+          httpStatus: r.status
         };
       }
 
@@ -1215,12 +1298,8 @@ function apiCall(
 
           error:
             "响应异常: " +
-            String(
-              r.body
-            ).slice(
-              0,
-              100
-            )
+            redactSensitive(String(r.body).slice(0, 100)),
+          httpStatus: r.status
         };
       }
 
@@ -1291,6 +1370,8 @@ function apiCall(
           }
         );
 
+
+      data.httpStatus = r.status || null;
 
       data.applied =
         data.enabled === true &&
@@ -1379,7 +1460,8 @@ function ensureWhitelisted(
 
   return apiCall(
     item.token,
-    item.slot
+    item.slot,
+    "token#" + (index + 1)
   ).then(
     function (st) {
 
@@ -1495,16 +1577,75 @@ function testProxyConnection(config) {
 
 function ensureAndVerify(item, index, config) {
   var requests = 0;
+  var tag = "token#" + (index + 1);
+  var maxRequests = config.enabled ? config.retryCount + 1 : 1;
+  var slotLabel = item.slot === null || item.slot === undefined ? "auto" : String(item.slot);
   function attempt() {
     requests++;
+    var attemptStartedAt = Date.now();
+    logEvent("DETAIL", "加白/开始", tag + " 第 " + requests + "/" + maxRequests +
+      " 轮；POST /api/firewall/[REDACTED]/add；slot=" + slotLabel +
+      "；加白 API 策略=" + (isSurge ? "DIRECT" : "客户端路由"));
     return ensureWhitelisted(item, index).then(function (ctx) {
       ctx.addRequests = requests;
       ctx.proxyConfigured = config.enabled;
       ctx.proxyName = config.proxy;
-      if (!config.enabled || !ctx.st.applied) return ctx;
+      var st = ctx.st || {};
+      var apiDuration = Date.now() - attemptStartedAt;
+      ctx.apiDuration = apiDuration;
+      if (!st.applied) {
+        logEvent("WARN", "加白/失败", tag + " 轮次=" + requests +
+          " HTTP=" + (st.httpStatus || "-") +
+          " duration=" + apiDuration + "ms" +
+          " currentIp=" + (st.currentIp || "-") +
+          " enabled=" + st.enabled +
+          " reason=" + (st.error || "服务端未确认加白生效") +
+          "；跳过本轮代理检测");
+        return ctx;
+      }
+
+      logEvent("DETAIL", "加白/成功", tag + " 轮次=" + requests +
+        " HTTP=" + (st.httpStatus || "-") +
+        " duration=" + apiDuration + "ms" +
+        " currentIp=" + (st.currentIp || "-") +
+        " whitelist=" + ((st.whitelist || []).join(",") || "-") +
+        " slots=" + (st.whitelist || []).map(function (ip) {
+          return (st.slotOf && st.slotOf[ip] !== undefined) ? ip + "@" + st.slotOf[ip] : ip;
+        }).join(",") +
+        " count=" + (st.whitelist ? st.whitelist.length : 0) +
+        "/" + (st.limit === undefined ? "?" : st.limit));
+      if (!config.enabled) {
+        logEvent("DETAIL", "代理/跳过", tag + " test_proxy 未配置，仅加白");
+        return ctx;
+      }
+
+      logEvent("DETAIL", "代理/开始", tag + " 第 " + requests +
+        " 次 HEAD policy=" + config.proxy +
+        " url=" + safeTestUrl(config.url) + " timeout=5s");
       return testProxyConnection(config).then(function (result) {
         ctx.proxyTest = result;
-        if (result.ok || result.fatal || requests > config.retryCount) return ctx;
+        logEvent(result.ok ? "DETAIL" : "WARN", "代理/结果", tag +
+          " policy=" + config.proxy +
+          " result=" + (result.ok ? "PASS" : "FAIL") +
+          " HTTP=" + (result.code || "-") +
+          " latency=" + (result.latency === undefined ? "-" : result.latency) + "ms" +
+          (result.error ? " reason=" + result.error : ""));
+        if (result.ok) {
+          logEvent("DETAIL", "流程/结束", tag + " 代理已可用，停止重试；加白轮次=" + requests);
+          return ctx;
+        }
+        if (result.fatal) {
+          logEvent("WARN", "流程/停止", tag + " 检测环境或策略配置错误，不再盲目重试");
+          return ctx;
+        }
+        if (requests > config.retryCount) {
+          logEvent("WARN", "流程/停止", tag + " 已达到额外重试次数 " +
+            config.retryCount + "，本轮结束；后续 cron 或网络事件将再次尝试");
+          return ctx;
+        }
+        logEvent("WARN", "流程/重试", tag + " 节点仍不可用，" +
+          PROXY_RETRY_DELAY_MS + "ms 后重新请求 po0 加白；下一轮 " +
+          (requests + 1) + "/" + maxRequests);
         return delay(PROXY_RETRY_DELAY_MS).then(attempt);
       });
     });
@@ -1903,13 +2044,30 @@ var parsed =
   );
 
 var proxyConfig = getProxyTestConfig();
+var configuredLogLevel = getArgumentOption("log_level").trim().toLowerCase();
+var logLevelError = configuredLogLevel && !/^(detail|summary|off)$/.test(configuredLogLevel)
+  ? "log_level 必须为 detail、summary 或 off" : "";
+LOG_LEVEL = logLevelError ? "detail" : (configuredLogLevel || "detail");
+RUN_TRIGGER = getArgumentOption("trigger") || getEventName() || "manual/unknown";
+
+logEvent("INFO", "启动", "trigger=" + RUN_TRIGGER +
+  " iface=" + (onCellular() ? "cellular" : "wifi/other") +
+  " tokens=" + parsed.items.length +
+  " proxy=" + (proxyConfig.enabled ? proxyConfig.proxy : "disabled") +
+  " test_url=" + (proxyConfig.enabled ? safeTestUrl(proxyConfig.url) : "-") +
+  " extra_retries=" + proxyConfig.retryCount +
+  " log_level=" + LOG_LEVEL);
 
 
 /* ---------- 参数错误 ---------- */
 
-if (proxyConfig.error) {
-  notify("po0 防火墙加白", "代理测试参数配置错误", proxyConfig.error);
-  finish("po0 加白：代理参数错误", proxyConfig.error, false);
+if (logLevelError || proxyConfig.error) {
+  var validationError = logLevelError || proxyConfig.error;
+  logEvent("ERROR", "配置", validationError);
+  saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
+    ok: false, duration_ms: Date.now() - RUN_STARTED_AT, error: validationError });
+  notify("po0 防火墙加白", "模块参数配置错误", validationError);
+  finish("po0 加白：参数错误", validationError, false);
 
 } else if (
   parsed.errors.length > 0
@@ -1919,6 +2077,9 @@ if (proxyConfig.error) {
     parsed.errors.join(
       "\n"
     );
+  logEvent("ERROR", "配置", configError);
+  saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
+    ok: false, duration_ms: Date.now() - RUN_STARTED_AT, error: configError });
 
 
   notify(
@@ -1941,6 +2102,9 @@ if (proxyConfig.error) {
   parsed.items.length === 0
 ) {
 
+  logEvent("ERROR", "配置", "未配置有效 token，终止执行");
+  saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
+    ok: false, duration_ms: Date.now() - RUN_STARTED_AT, error: "未配置有效 token" });
   notify(
     "po0 防火墙加白",
     "未配置 token",
@@ -1963,8 +2127,7 @@ if (proxyConfig.error) {
     parsed.items;
 
 
-  var eventName =
-    getEventName();
+  var eventName = RUN_TRIGGER;
 
 
   var startDelay =
@@ -1977,11 +2140,7 @@ if (proxyConfig.error) {
     startDelay > 0
   ) {
 
-    console.log(
-      "检测到 network-changed，等待 " +
-      startDelay +
-      "ms 后执行加白"
-    );
+    logEvent("DETAIL", "网络", "network-changed，等待 " + startDelay + "ms 路由稳定后加白");
   }
 
 
@@ -2020,6 +2179,7 @@ if (proxyConfig.error) {
        */
 
       var exitIps = [];
+      var runItems = [];
 
 
       for (
@@ -2060,6 +2220,35 @@ if (proxyConfig.error) {
             results[i]
           )
         );
+        var p = results[i].proxyTest;
+        var itemOk = !!st.applied && (!proxyConfig.enabled || (p && p.ok));
+        var itemError = st.error || (proxyConfig.enabled && !p ? "代理未检测" :
+          (p && !p.ok ? p.error : ""));
+        logEvent(itemOk ? "INFO" : "WARN", "Token/小结", "token#" + (i + 1) +
+          " status=" + (itemOk ? "PASS" : "FAIL") +
+          " ip=" + (st.currentIp || "-") +
+          " api_http=" + (st.httpStatus || "-") +
+          " api_ok=" + !!st.applied +
+          " slot=" + (results[i].slot === null ? "auto" : results[i].slot) +
+          " add_rounds=" + (results[i].addRequests || 0) +
+          " proxy_http=" + (p ? (p.code || "-") : "-") +
+          " proxy_ms=" + (p ? p.latency : "-") +
+          (itemError ? " reason=" + itemError : ""));
+        runItems.push({
+          token_index: i + 1,
+          slot: results[i].slot,
+          ok: itemOk,
+          ip: st.currentIp || null,
+          api_http: st.httpStatus || null,
+          api_ok: !!st.applied,
+          add_rounds: results[i].addRequests || 0,
+          whitelist_count: st.whitelist ? st.whitelist.length : null,
+          limit: st.limit === undefined ? null : st.limit,
+          proxy_ok: p ? !!p.ok : null,
+          proxy_http: p ? (p.code || null) : null,
+          proxy_ms: p && p.latency !== undefined ? p.latency : null,
+          error: redactSensitive(itemError)
+        });
 
 
         /*
@@ -2147,9 +2336,22 @@ if (proxyConfig.error) {
        * 防止连续失败时 changed=false 导致错误被静默吞掉。
        */
 
+      var totalDuration = Date.now() - RUN_STARTED_AT;
+      var needNotify = changed || !allOk;
+      logEvent(allOk ? "INFO" : "WARN", "本轮汇总",
+        "trigger=" + RUN_TRIGGER + " passed=" + okCount + "/" + results.length +
+        " duration=" + totalDuration + "ms" +
+        " exitIps=" + exitText +
+        " stateChanged=" + changed + " notify=" + needNotify);
+      saveRunSummary({
+        run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
+        duration_ms: totalDuration, ok: allOk, passed: okCount,
+        total: results.length, proxy: proxyConfig.enabled ? proxyConfig.proxy : null,
+        test_url: proxyConfig.enabled ? safeTestUrl(proxyConfig.url) : null,
+        state_changed: changed, notified: needNotify, items: runItems
+      });
       if (
-        changed ||
-        !allOk
+        needNotify
       ) {
 
         notify(
@@ -2178,16 +2380,19 @@ if (proxyConfig.error) {
         );
 
 
+      logEvent("ERROR", "脚本异常", message);
+      saveRunSummary({ run_id: RUN_ID, at: new Date().toISOString(), trigger: RUN_TRIGGER,
+        ok: false, duration_ms: Date.now() - RUN_STARTED_AT, error: redactSensitive(message) });
       notify(
         "po0 防火墙加白",
         "脚本异常",
-        message
+        redactSensitive(message)
       );
 
 
       finish(
         "po0 加白：脚本异常",
-        message,
+        redactSensitive(message),
         false
       );
     }
