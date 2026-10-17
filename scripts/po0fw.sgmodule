@@ -1,15 +1,15 @@
 #!name=po0 防火墙自动加白
-#!desc=本机出口自动加白。可选指定 IPv4 进行真实 ICMP Ping 验证，失败后按次数重试加白。Ping 需要额外的同出口探针服务。
+#!desc=po0 API 自动加白；可选指定 Surge 代理节点发送 HTTP HEAD 连通性测试，失败自动重试加白，无需外部探针。
 #!category=po0
 #!author=reallinzc
-#!arguments=tokens:"",ping_ip:"",retry_count:3,ping_api:"http://127.0.0.1:18765/ping",ping_key:""
-#!arguments-desc=tokens: pgnfw_ token，逗号分隔，可加 @槽位。ping_ip: 待验证 IPv4（留空关闭检测）；retry_count: Ping 不通时额外加白次数 0-5；ping_api: 真实 ICMP 探针接口地址（必须与客户端使用相同出口，默认本机 127.0.0.1）；ping_key: 可选探针密钥。Surge 脚本无法独立发送 ICMP，需要运行配套探针。
+#!arguments=tokens:"",test_proxy:"",retry_count:3,test_url:"http://cp.cloudflare.com/generate_204"
+#!arguments-desc=tokens: po0 API token，可多个逗号分隔、支持 @槽位；test_proxy: 与 Surge [Proxy] 内的节点名称完全一致（留空不检测）；retry_count: 测试失败后额外加白次数 0-5，默认 3；test_url: HTTP(S) HEAD 测试地址，默认 Cloudflare generate_204，预期 HTTP 204。
 
 [Rule]
 # 加白 API 必须直连，确保 API 看到的是本机真实出口 IP 而不是代理出口
 IP-CIDR,124.221.69.228/32,DIRECT,no-resolve
 
 [Script]
-po0-fw-cron = type=cron,cronexp="*/10 * * * *",script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&ping_ip={{{ping_ip}}}&retry_count={{{retry_count}}}&ping_api={{{ping_api}}}&ping_key={{{ping_key}}}"
-po0-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&ping_ip={{{ping_ip}}}&retry_count={{{retry_count}}}&ping_api={{{ping_api}}}&ping_key={{{ping_key}}}"
-po0-fw-start = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&ping_ip={{{ping_ip}}}&retry_count={{{retry_count}}}&ping_api={{{ping_api}}}&ping_key={{{ping_key}}}"
+po0-fw-cron = type=cron,cronexp="*/10 * * * *",script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&test_proxy={{{test_proxy}}}&retry_count={{{retry_count}}}&test_url={{{test_url}}}"
+po0-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&test_proxy={{{test_proxy}}}&retry_count={{{retry_count}}}&test_url={{{test_url}}}"
+po0-fw-start = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&test_proxy={{{test_proxy}}}&retry_count={{{retry_count}}}&test_url={{{test_url}}}"
