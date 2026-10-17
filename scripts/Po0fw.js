@@ -1690,12 +1690,12 @@ function briefResult(results, config, okCount) {
     var st = ctx.st || {}, p = ctx.proxyTest;
     var success = !!st.applied && (!config.enabled || (p && p.ok));
     var line = (results.length > 1 ? "#" + (index + 1) + " " : "") +
-      (success ? "加白成功" : (st.applied ? "代理检测失败（加白成功）" : "加白失败"));
+      (success ? "加白成功" : (st.applied ? "代理不通（已加白）" : "加白失败"));
     if (st.currentIp) line += " · 出口 " + st.currentIp;
     if (st.whitelist && st.limit !== undefined) line += " · 白名单 " + st.whitelist.length + "/" + st.limit;
     if (!st.applied) line += "（" + (st.error || "服务器未确认生效") + "）";
     else if (config.enabled) line += " · " + config.proxy +
-      (p && p.ok ? " " + p.latency + "ms" : " 不可用（" + ((p && p.error) || "未检测") + "）");
+      (p && p.ok ? " " + p.latency + "ms" : " 不可用（" + String((p && p.error) || "未检测").replace(/timeout|timed out/gi, "超时") + "）");
     if (ctx.addRequests > 1) line += " · 加白 " + ctx.addRequests + " 次";
     return line;
   });
