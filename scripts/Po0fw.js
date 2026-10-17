@@ -40,6 +40,7 @@
  * - @slot 严格数字校验
  * - 持久化状态按 token hash 保存，不受 token 排列顺序影响
  * - 蜂窝 📶 标记兼容精确 IP 与 /24
+ * - 可选 ICMP Ping 探针 + 失败后重复加白
  */
 
 
@@ -62,6 +63,11 @@ var HTTP_RETRY_DELAY_MS = 1500;
 
 // network-changed 后等待网络稳定
 var NETWORK_CHANGED_DELAY_MS = 1500;
+
+// Surge JS 无原生 ICMP socket，委托给同出口的 Ping 探针。
+var DEFAULT_PING_API = "http://127.0.0.1:18765/ping";
+var PING_RETRY_DELAY_MS = 1800;
+var MAX_PING_RETRIES = 5;
 
 
 /* =========================================================
@@ -778,6 +784,63 @@ function getArgumentTokens() {
 }
 
 
+
+/* =========================================================
+ * Surge 模块自定义参数：ping_ip / retry_count / ping_api / ping_key。
+ * 不填 ping_ip 则维持原来的单次加白行为。
+ * ======================================================= */
+function getArgumentOption(name) {
+  if (typeof $argument === "undefined" || $argument === null) return "";
+  if (typeof $argument === "object") {
+    return $argument[name] === undefined ? "" : String($argument[name]);
+  }
+  if (typeof $argument !== "string") return "";
+  var arg = $argument.trim();
+  if (/^["'].*["']$/.test(arg)) arg = arg.slice(1, -1);
+  if (arg.charAt(0) === "{") {
+    try {
+      var obj = JSON.parse(arg);
+      return obj[name] === undefined ? "" : String(obj[name]);
+    } catch (e) {}
+  }
+  var pairs = arg.split("&");
+  for (var i = 0; i < pairs.length; i++) {
+    var at = pairs[i].indexOf("=");
+    if (at < 1 || pairs[i].slice(0, at) !== name) continue;
+    var value = pairs[i].slice(at + 1);
+    try { return decodeURIComponent(value); } catch (e) { return value; }
+  }
+  return "";
+}
+function isValidIPv4(ip) {
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(ip)) return false;
+  return ip.split(".").every(function (part) {
+    return part.length > 0 && Number(part) >= 0 && Number(part) <= 255;
+  });
+}
+function getPingConfig() {
+  var ip = getArgumentOption("ping_ip").trim();
+  var cfg = { enabled: !!ip, ip: ip, retryCount: 0, api: "", key: "", error: "" };
+  if (!cfg.enabled) return cfg;
+  if (!isValidIPv4(ip)) {
+    cfg.error = "ping_ip 必须是合法的 IPv4 地址";
+    return cfg;
+  }
+  var rawCount = getArgumentOption("retry_count").trim();
+  if (rawCount === "") rawCount = "3";
+  if (!/^\d+$/.test(rawCount) || Number(rawCount) > MAX_PING_RETRIES) {
+    cfg.error = "retry_count 必须为 0-" + MAX_PING_RETRIES + " 的整数（额外加白次数）";
+    return cfg;
+  }
+  cfg.retryCount = Number(rawCount);
+  cfg.api = getArgumentOption("ping_api").trim() || DEFAULT_PING_API;
+  cfg.key = getArgumentOption("ping_key").trim();
+  if (!/^https?:\/\/[^\s]+$/i.test(cfg.api) || cfg.api.indexOf("#") !== -1) {
+    cfg.error = "ping_api 必须是可访问的 HTTP(S) Ping 探针地址";
+  }
+  return cfg;
+}
+
 /* =========================================================
  * 蜂窝网络判断
  * ======================================================= */
@@ -1377,6 +1440,65 @@ function ensureWhitelisted(
 }
 
 
+
+/* =========================================================
+ * 真正的 ICMP Ping 由可选的本地助手发起，HTTP 只传输检测结果。
+ * 预期响应：{"ip":"1.2.3.4","ok":true/false}。
+ * ======================================================= */
+function probeIcmp(config) {
+  var sep = config.api.indexOf("?") >= 0 ? "&" : "?";
+  var opts = {
+    url: config.api + sep + "ip=" + encodeURIComponent(config.ip) + "&_t=" + Date.now(),
+    headers: { "Accept": "application/json" }
+  };
+  if (config.key) opts.headers["X-Ping-Key"] = config.key;
+  if (isSurge) opts.policy = "DIRECT";
+  if (isLoon || isQX) opts.timeout = 4000;
+  else if (isSurgeFamily) opts.timeout = 4;
+  return httpRequestOnce("GET", opts).then(function (r) {
+    if (r.error) return { ok: false, error: "Ping 探针不可用：" + r.error };
+    if (r.status !== 200) {
+      return { ok: false, error: "Ping 探针 HTTP " + (r.status || "?") };
+    }
+    var data;
+    try { data = JSON.parse(r.body); } catch (e) {
+      return { ok: false, error: "Ping 探针响应不是 JSON" };
+    }
+    if (!data || data.ip !== config.ip || typeof data.ok !== "boolean") {
+      return { ok: false, error: "Ping 探针响应格式不正确" };
+    }
+    return { ok: data.ok, error: "" };
+  });
+}
+function ensureAndVerify(item, index, config) {
+  var requests = 0;
+  function attempt() {
+    requests++;
+    return ensureWhitelisted(item, index).then(function (ctx) {
+      ctx.addRequests = requests;
+      ctx.pingConfigured = config.enabled;
+      ctx.pingTarget = config.ip;
+      if (!config.enabled || !ctx.st.applied) return ctx;
+      return probeIcmp(config).then(function (result) {
+        ctx.ping = result;
+        // 探针故障不能视为 Ping 不通，否则会盲目重复加白。
+        if (result.ok || result.error || requests > config.retryCount) return ctx;
+        return delay(PING_RETRY_DELAY_MS).then(attempt);
+      });
+    });
+  }
+  return attempt();
+}
+function describePing(ctx) {
+  if (!ctx.pingConfigured) return "";
+  if (!ctx.ping) return "\n    ⚠️ 未执行 Ping（加白 API 尚未成功）";
+  if (ctx.ping.error) return "\n    ⚠️ " + ctx.ping.error;
+  return "\n    " + (ctx.ping.ok ? "✅" : "❌") +
+    " ICMP Ping " + ctx.pingTarget +
+    (ctx.ping.ok ? " 通" : " 不通") +
+    " · 加白请求 " + ctx.addRequests + " 次";
+}
+
 /* =========================================================
  * 输出单 token 状态
  * ======================================================= */
@@ -1508,7 +1630,8 @@ function describe(
         : "?"
     ) +
     "\n    " +
-    ips
+    ips +
+    describePing(ctx)
   );
 }
 
@@ -1754,10 +1877,16 @@ var parsed =
     rawTokens
   );
 
+var pingConfig = getPingConfig();
+
 
 /* ---------- 参数错误 ---------- */
 
-if (
+if (pingConfig.error) {
+  notify("po0 防火墙加白", "Ping 参数配置错误", pingConfig.error);
+  finish("po0 加白：Ping 参数错误", pingConfig.error, false);
+
+} else if (
   parsed.errors.length > 0
 ) {
 
@@ -1843,9 +1972,10 @@ if (
             i
           ) {
 
-            return ensureWhitelisted(
+            return ensureAndVerify(
               t,
-              i
+              i,
+              pingConfig
             );
           }
         )
@@ -1878,7 +2008,8 @@ if (
 
 
         if (
-          st.applied
+          st.applied &&
+          (!pingConfig.enabled || (results[i].ping && results[i].ping.ok))
         ) {
 
           okCount++;
@@ -1925,7 +2056,12 @@ if (
             st.applied
               ? "1"
               : "0"
-          );
+          ) +
+          (pingConfig.enabled
+              ? ("|ping=" + (results[i].ping ?
+                  (results[i].ping.error ? "error" :
+                    (results[i].ping.ok ? "1" : "0")) : "skip"))
+              : "");
 
 
         if (
@@ -1967,7 +2103,8 @@ if (
           onCellular()
             ? " 📶"
             : ""
-        );
+        ) +
+        (pingConfig.enabled ? " · Ping " + pingConfig.ip : "");
 
 
       var content =
