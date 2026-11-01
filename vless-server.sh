@@ -11739,18 +11739,27 @@ generate_singbox_config() {
                 local private_key=$(echo "$cfg" | jq -r '.private_key // empty')
                 local short_id=$(echo "$cfg" | jq -r '.short_id // empty')
                 local sni=$(echo "$cfg" | jq -r '.sni // "www.microsoft.com"')
+                # 握手目标与 Xray 的 Reality dest 保持一致：真实证书模式下回落到本机 Nginx
+                local hs_server="$sni" hs_port=443 cert_domain=""
+                [[ -f "$CFG/cert_domain" ]] && cert_domain=$(cat "$CFG/cert_domain")
+                if [[ -n "$cert_domain" && "$sni" == "$cert_domain" ]] && _is_real_cert; then
+                    hs_server="127.0.0.1"
+                    hs_port=8443
+                    _ensure_nginx_https_for_reality "$cert_domain"
+                fi
                 local users_json
                 users_json=$(_singbox_effective_users "$proto" "$cfg") || return 1
                 inbound=$(jq -n \
                     --argjson port "$port" --argjson users "$users_json" \
                     --arg private_key "$private_key" --arg short_id "$short_id" \
+                    --arg hs_server "$hs_server" --argjson hs_port "$hs_port" \
                     --arg sni "$sni" --arg listen_addr "$listen_addr" --arg tag "vless-in-${port}" '
                     {
                         type:"vless", tag:$tag, listen:$listen_addr,
                         listen_port:$port, users:$users,
                         tls:{enabled:true, server_name:$sni, reality:{
                             enabled:true,
-                            handshake:{server:$sni, server_port:443},
+                            handshake:{server:$hs_server, server_port:$hs_port},
                             private_key:$private_key,
                             short_id:[$short_id]
                         }}
