@@ -2702,6 +2702,18 @@ _build_singbox_stats_core() (
     stage="验证新核心及现有配置"
     "$work/bin/sing-box" version | grep -q with_v2ray_api || return 1
     [[ "$("$work/bin/sing-box" version | awk '/^sing-box version / {print $3; exit}')" == "$version" ]] || { _err "构建输出版本与目标不一致"; return 1; }
+    if [[ ! -f "$CFG/singbox.json" ]]; then
+        # 卸载最后一个 Sing-box 协议时会删除配置；此时只替换核心，保留统计能力，不启动服务。
+        [[ -z "$(get_singbox_protocols)" ]] || { _err "存在 Sing-box 协议但缺少 $CFG/singbox.json，请先重建配置；未更换原核心"; return 1; }
+        stage="备份并替换核心"
+        backup=$(mktemp -d "$CFG/singbox-stats-backup.XXXXXX") || return 1
+        chmod 700 "$backup"
+        cp -p /usr/local/bin/sing-box "$backup/sing-box" || return 1
+        install -m 755 "$work/bin/sing-box" /usr/local/bin/sing-box.stats-new &&
+            mv -f /usr/local/bin/sing-box.stats-new /usr/local/bin/sing-box || return 1
+        _ok "Sing-box v$version 统计核心已更新；当前没有 Sing-box 协议，未启动服务。备份: $backup"
+        return 0
+    fi
     "$work/bin/sing-box" check -c "$CFG/singbox.json" || { _err "新核心不兼容现有配置，已取消替换"; return 1; }
     stage="安装 grpcurl 查询工具"
     install_singbox_stats_client || return 1
@@ -2750,7 +2762,8 @@ _update_singbox_preserving_stats() {
     _info "保留用户统计，先下载校验目标 v$target，再备份、替换、验证；无包或失败时保留/恢复原核心。"
     if _build_singbox_stats_core "$target"; then update_rc=0; else update_rc=$?; fi
     # 若更新前服务停止，只为 API 验证临时启动，结束后恢复停止状态。
-    if [[ "$running" == false ]]; then
+    # 没有配置时不会启动服务，服务文件也可能已删除，无需恢复。
+    if [[ "$running" == false && -f "$CFG/singbox.json" ]]; then
         svc stop vless-singbox || { _err "无法恢复更新前的停止状态"; return 1; }
     fi
     return "$update_rc"
