@@ -24147,6 +24147,7 @@ external_link_to_clash() {
     reality-opts:
       public-key: $pbk
       short-id: $sid
+      support-x25519mlkem768: true
     client-fingerprint: chrome
 EOF
             elif [[ "$transport" == "ws" ]]; then
@@ -24982,6 +24983,7 @@ gen_clash_sub() {
     reality-opts:
       public-key: $public_key
       short-id: $short_id
+      support-x25519mlkem768: true
     client-fingerprint: chrome"
                 ;;
             vless-xhttp)
@@ -25000,6 +25002,7 @@ gen_clash_sub() {
     reality-opts:
       public-key: $public_key
       short-id: $short_id
+      support-x25519mlkem768: true
     client-fingerprint: chrome"
                 ;;
             vless-ws)
