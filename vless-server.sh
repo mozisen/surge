@@ -3453,6 +3453,26 @@ remove_traffic_cron() {
     _ok "已移除流量统计定时任务"
 }
 
+# 公网 IP 变更检测定时任务（每 30 分钟）
+setup_ip_check_cron() {
+    local script_path="/usr/local/bin/vless-server.sh"
+    [[ -x "$script_path" ]] || script_path=$(readlink -f "$0")
+    [[ -x "$script_path" ]] || return 1
+    local cron_cmd
+    cron_cmd="$(build_cron_command "*/30 * * * *" "$script_path" "--check-ip" "$CFG/ip-check.log") # check-ip"
+    ensure_cron_service_running false || return 1
+    install_cron_entry "check-ip" "$cron_cmd"
+}
+
+remove_ip_check_cron() {
+    remove_cron_entry "check-ip"
+}
+
+_has_installed_protocols() {
+    [[ -f "$DB_FILE" ]] || return 1
+    jq -e '[(.xray // {}), (.singbox // {}) | keys[]] | length > 0' "$DB_FILE" >/dev/null 2>&1
+}
+
 setup_tg_user_bot_cron() {
     local silent="${1:-false}"
     local script_path="/usr/local/bin/vless-server.sh"
@@ -3493,6 +3513,9 @@ repair_scheduled_jobs() {
     if [[ "$(tg_get_config "user_bot_enabled")" == "true" ]]; then
         setup_tg_user_bot_cron "true" || \
             _log "WARN" "TG 用户机器人定时任务自动修复失败"
+    fi
+    if [[ ! -f "$CFG/ip-check.disabled" ]] && _has_installed_protocols; then
+        setup_ip_check_cron || _log "WARN" "公网 IP 检测定时任务自动修复失败"
     fi
 }
 
@@ -6042,21 +6065,28 @@ sync_time() {
 # 指定地址族探测公网 IP，并严格校验返回值的地址类型。
 # DNS64/NAT64 可能让 curl -6 连接成功，但探测站返回 NAT64
 # 出口的 IPv4；此时必须拒绝该结果，否则会生成 [1.2.3.4] 这类无效地址。
-_probe_public_ip() {
-    local family="$1" endpoint result
-    for endpoint in "https://ip.sb" "https://ifconfig.me"; do
-        result=$(curl "-$family" -sf --connect-timeout 5 --max-time 8 "$endpoint" 2>/dev/null) || continue
-        result=$(printf '%s' "$result" | tr -d '[:space:]')
-        result="${result#[}"
-        result="${result%]}"
+PUBLIC_IP_ENDPOINTS="https://ip.sb https://ifconfig.me"
 
-        if [[ "$family" == "4" ]]; then
-            _is_valid_ipv4_literal "$result" || continue
-        else
-            _is_valid_ipv6_literal "$result" || continue
-        fi
-        printf '%s\n' "$result"
-        return 0
+# 用单个探测站探测公网 IP，返回值必须是对应地址族的合法字面量。
+_probe_public_ip_from() {
+    local family="$1" endpoint="$2" result
+    result=$(curl "-$family" -sf --connect-timeout 5 --max-time 8 "$endpoint" 2>/dev/null) || return 1
+    result=$(printf '%s' "$result" | tr -d '[:space:]')
+    result="${result#[}"
+    result="${result%]}"
+
+    if [[ "$family" == "4" ]]; then
+        _is_valid_ipv4_literal "$result" || return 1
+    else
+        _is_valid_ipv6_literal "$result" || return 1
+    fi
+    printf '%s\n' "$result"
+}
+
+_probe_public_ip() {
+    local family="$1" endpoint
+    for endpoint in $PUBLIC_IP_ENDPOINTS; do
+        _probe_public_ip_from "$family" "$endpoint" && return 0
     done
     return 1
 }
@@ -6112,6 +6142,205 @@ get_connection_addresses() {
         ipv6=$(get_local_ipv6)
     fi
     printf '%s|%s\n' "$ipv4" "$ipv6"
+}
+
+#═══════════════════════════════════════════════════════════════════════════════
+# 公网 IP 变更检测（定时任务每 30 分钟执行 --check-ip）
+#═══════════════════════════════════════════════════════════════════════════════
+# 状态文件：
+#   public_ip          上次确认的地址，格式 ipv4|ipv6
+#   public_ip.pending  只有一个探测站给出、尚未确认的新地址，每行 族|地址
+#   ip-check.disabled  存在时关闭自动检测（出口 IP 不等于入口 IP 的机器）
+#   ip-changed.notice  变更说明，打开主菜单时显示一次
+
+_get_pending_ip() {
+    local family="$1"
+    [[ -f "$CFG/public_ip.pending" ]] || return 0
+    awk -F'|' -v f="$family" '$1 == f {print $2; exit}' "$CFG/public_ip.pending"
+}
+
+_set_pending_ip() {
+    local family="$1" value="$2" file="$CFG/public_ip.pending" rest=""
+    [[ -f "$file" ]] && rest=$(awk -F'|' -v f="$family" '$1 != f' "$file")
+    {
+        [[ -n "$rest" ]] && printf '%s\n' "$rest"
+        [[ -n "$value" ]] && printf '%s|%s\n' "$family" "$value"
+    } > "$file.tmp"
+    if [[ -s "$file.tmp" ]]; then
+        mv "$file.tmp" "$file"
+    else
+        rm -f "$file.tmp" "$file"
+    fi
+}
+
+# 输出确认后的新地址；地址未变、探测失败或尚未确认时输出空。
+# 两个探测站结果一致才直接确认；只有一个结果或结果不一致时，
+# 需要下一次检测得到同一地址才确认，避免探测站异常导致误改。
+_confirm_public_ip() {
+    local family="$1" recorded="$2" endpoint addr results=() pending
+    for endpoint in $PUBLIC_IP_ENDPOINTS; do
+        addr=$(_probe_public_ip_from "$family" "$endpoint") && results+=("$addr")
+    done
+    (( ${#results[@]} )) || return 0
+    for addr in "${results[@]}"; do
+        if [[ "$addr" == "$recorded" ]]; then
+            _set_pending_ip "$family" ""
+            return 0
+        fi
+    done
+    if (( ${#results[@]} >= 2 )) && [[ "${results[0]}" == "${results[1]}" ]]; then
+        _set_pending_ip "$family" ""
+        printf '%s\n' "${results[0]}"
+        return 0
+    fi
+    pending=$(_get_pending_ip "$family")
+    for addr in "${results[@]}"; do
+        if [[ -n "$pending" && "$addr" == "$pending" ]]; then
+            _set_pending_ip "$family" ""
+            printf '%s\n' "$addr"
+            return 0
+        fi
+    done
+    _set_pending_ip "$family" "${results[0]}"
+}
+
+# 上次确认的地址；首次运行时以数据库中保存的地址为基准。
+_recorded_public_ip() {
+    if [[ -s "$CFG/public_ip" ]]; then
+        head -n 1 "$CFG/public_ip"
+        return 0
+    fi
+    [[ -f "$DB_FILE" ]] || { echo "|"; return 0; }
+    jq -r '
+        def first_ip(f): [(.xray, .singbox) | .. | objects | .[f]? | strings | select(. != "")][0] // "";
+        "\(first_ip("ipv4"))|\(first_ip("ipv6"))"' "$DB_FILE" 2>/dev/null || echo "|"
+}
+
+# 按字面替换文本中的地址，前后紧邻地址字符时不替换（避免 1.2.3.4 命中 11.2.3.45）。
+_replace_ip_literal() {
+    local text="$1" old="$2" new="$3" family="$4" out="" before c1 c2
+    local cls_before='[0-9.]' cls_after='[0-9]'
+    [[ "$family" == 6 ]] && { cls_before='[0-9A-Fa-f:]'; cls_after='[0-9A-Fa-f:]'; }
+    [[ -n "$old" ]] || { printf '%s' "$text"; return 0; }
+    while [[ "$text" == *"$old"* ]]; do
+        before=${text%%"$old"*}
+        text=${text#*"$old"}
+        c1=${before: -1}
+        c2=${text:0:1}
+        if [[ "$c1" =~ $cls_before || "$c2" =~ $cls_after ]]; then
+            out+="$before$old"
+        else
+            out+="$before$new"
+        fi
+    done
+    printf '%s' "$out$text"
+}
+
+# 把 .join 文件中的旧地址换成新地址，JOIN_V4/JOIN_V6 行先解码再替换。
+_replace_ip_in_join_files() {
+    local family="$1" old="$2" new="$3" file tmp line key value decoded
+    for file in "$CFG"/*.join "$CFG/join.txt"; do
+        [[ -f "$file" ]] || continue
+        tmp=$(mktemp "$file.XXXXXX") || return 1
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" =~ ^(JOIN_V[46])=(.+)$ ]]; then
+                key=${BASH_REMATCH[1]}
+                value=${BASH_REMATCH[2]}
+                if decoded=$(printf '%s' "$value" | base64 -d 2>/dev/null) && [[ -n "$decoded" ]]; then
+                    decoded=$(_replace_ip_literal "$decoded" "$old" "$new" "$family")
+                    value=$(printf '%s' "$decoded" | base64 -w 0 2>/dev/null || printf '%s' "$decoded" | base64 | tr -d '\n')
+                fi
+                line="$key=$value"
+            else
+                line=$(_replace_ip_literal "$line" "$old" "$new" "$family")
+            fi
+            printf '%s\n' "$line"
+        done < "$file" > "$tmp"
+        chmod 600 "$tmp" && mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+    done
+}
+
+_apply_public_ip_change() {
+    local family="$1" old="$2" new="$3" field="ipv4"
+    [[ "$family" == 6 ]] && field="ipv6"
+    _db_apply --arg f "$field" --arg old "$old" --arg new "$new" \
+        '((.xray, .singbox) | .. | select(type == "object" and .[$f] == $old) | .[$f]) |= $new' || {
+        _log "ERROR" "公网 IP 变更写入数据库失败: $old -> $new"
+        return 1
+    }
+    _replace_ip_in_join_files "$family" "$old" "$new"
+}
+
+_write_ip_change_notice() {
+    local new4="$1" new6="$2"; shift 2
+    local line sub_uuid="" sub_port="" sub_domain="" sub_https="" scheme="http" host
+    {
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 检测到服务器公网 IP 变化："
+        for line in "$@"; do echo "  $line"; done
+        echo "  节点信息、分享链接和 JOIN 文件已更新为新地址。"
+        if [[ -f "$CFG/sub.info" ]] && _load_sub_info "$CFG/sub.info" 2>/dev/null; then
+            echo "  订阅文件已重新生成。"
+            if [[ -z "$sub_domain" ]]; then
+                [[ "$sub_https" == "true" ]] && scheme="https"
+                host="$new4"
+                [[ -z "$host" && -n "$new6" ]] && host="[$new6]"
+                echo "  订阅链接中的地址已变化，请在客户端改用新的订阅链接："
+                echo "  ${scheme}://${host}:${sub_port}/sub/${sub_uuid}/clash"
+            fi
+        else
+            echo "  客户端里保存的节点地址需要手动更新。"
+        fi
+    } >> "$CFG/ip-changed.notice"
+}
+
+# 检测公网 IP 是否变化，变化时更新数据库、JOIN 文件和订阅文件。
+check_public_ip_change() {
+    [[ -f "$CFG/ip-check.disabled" ]] && return 0
+    [[ -f "$DB_FILE" ]] || return 0
+    local old4 old6 new4="" new6="" changes=()
+    IFS='|' read -r old4 old6 <<< "$(_recorded_public_ip)"
+
+    if [[ -z "$old4" && -z "$old6" ]]; then
+        # 还没有任何基准地址：只记录当前地址，不做替换。
+        local cur4 cur6
+        cur4=$(get_ipv4); cur6=$(get_ipv6)
+        [[ -n "$cur4$cur6" ]] && printf '%s|%s\n' "$cur4" "$cur6" > "$CFG/public_ip"
+        return 0
+    fi
+
+    [[ -n "$old4" ]] && new4=$(_confirm_public_ip 4 "$old4")
+    [[ -n "$old6" ]] && new6=$(_confirm_public_ip 6 "$old6")
+
+    if [[ -n "$new4" ]]; then
+        _apply_public_ip_change 4 "$old4" "$new4" || return 1
+        changes+=("IPv4: $old4 -> $new4")
+        old4="$new4"
+        _CACHED_IPV4="$new4"
+    fi
+    if [[ -n "$new6" ]]; then
+        _apply_public_ip_change 6 "$old6" "$new6" || return 1
+        changes+=("IPv6: $old6 -> $new6")
+        old6="$new6"
+        _CACHED_IPV6="$new6"
+    fi
+    printf '%s|%s\n' "$old4" "$old6" > "$CFG/public_ip"
+    (( ${#changes[@]} )) || return 0
+
+    [[ -f "$CFG/sub.info" ]] && generate_sub_files >/dev/null 2>&1
+    _write_ip_change_notice "$old4" "$old6" "${changes[@]}"
+    _log "INFO" "公网 IP 变化: ${changes[*]}"
+    printf '%s\n' "${changes[@]}"
+}
+
+# 打开主菜单时显示一次 IP 变更提示
+show_ip_change_notice() {
+    [[ -s "$CFG/ip-changed.notice" ]] || return 0
+    _line
+    echo -e "  ${Y}服务器公网 IP 已变化${NC}" >&2
+    sed 's/^/  /' "$CFG/ip-changed.notice" >&2
+    _line
+    rm -f "$CFG/ip-changed.notice"
+    _pause
 }
 
 # 公网地址不是安装代理核心的必要条件。无公网服务器仍可通过内网、NAT
@@ -20329,8 +20558,15 @@ show_single_protocol_info() {
     local snell_mode=$(echo "$cfg" | jq -r '.mode // empty')
     local snell_tfo=$(echo "$cfg" | jq -r '.tfo // empty')
     
-    # 重新获取连接地址（数据库中的可能是旧的或由无公网旧版本写成空值）
-    if [[ -z "$ipv4" && -z "$ipv6" ]]; then
+    # 优先使用当前探测到的公网地址（数据库中的可能是 IP 变化前的旧值）；
+    # 公网探测失败时保留数据库值，仍为空才回落到本机接口地址。
+    local live_ipv4 live_ipv6
+    live_ipv4=$(get_ipv4)
+    live_ipv6=$(get_ipv6)
+    if [[ -n "$live_ipv4" || -n "$live_ipv6" ]]; then
+        ipv4="$live_ipv4"
+        ipv6="$live_ipv6"
+    elif [[ -z "$ipv4" && -z "$ipv6" ]]; then
         IFS='|' read -r ipv4 ipv6 <<< "$(get_connection_addresses)"
     fi
     
@@ -21601,6 +21837,7 @@ do_uninstall() {
     remove_cron_entry "tg-user-bot"
     remove_cron_entry "sync-traffic"
     remove_cron_entry "check-expire"
+    remove_cron_entry "check-ip"
     
     _info "删除服务文件..."
     if [[ "$DISTRO" == "alpine" ]]; then
@@ -30427,6 +30664,7 @@ main_menu() {
     # 兼容旧定时规则：补齐 cron PATH，并确认守护进程确实运行。
     repair_scheduled_jobs
     _refresh_watchdog_script 2>/dev/null || true
+    show_ip_change_notice
 
     # 初始化版本缓存目录
     _init_version_cache
@@ -31122,6 +31360,37 @@ case "${1:-}" in
         echo "完成。日志: $CFG/expire.log"
         exit 0
         ;;
+    --check-ip)
+        # 检测公网 IP 变化并刷新节点文件（由 cron 每 30 分钟调用）
+        check_root
+        case "${2:-}" in
+            off)
+                touch "$CFG/ip-check.disabled"
+                remove_ip_check_cron
+                echo "已关闭公网 IP 自动检测"
+                exit 0
+                ;;
+            on)
+                rm -f "$CFG/ip-check.disabled"
+                if setup_ip_check_cron; then
+                    echo "已开启公网 IP 自动检测（每 30 分钟）"
+                    exit 0
+                fi
+                echo "定时任务写入失败"
+                exit 1
+                ;;
+            "") ;;
+            *) echo "用法: $0 --check-ip [on|off]"; exit 1 ;;
+        esac
+        init_db
+        if [[ -f "$CFG/ip-check.disabled" ]]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 公网 IP 自动检测已关闭"
+            exit 0
+        fi
+        changes=$(check_public_ip_change) || { echo "[$(date '+%Y-%m-%d %H:%M:%S')] 公网 IP 变更处理失败"; exit 1; }
+        [[ -n "$changes" ]] && printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$changes"
+        exit 0
+        ;;
     --setup-expire-cron)
         # 安装过期检查定时任务
         check_root
@@ -31138,6 +31407,7 @@ case "${1:-}" in
         echo "  --tg-bot-poll        处理 Telegram 用户机器人消息 (用于定时任务)"
         echo "  --check-expire       检查并禁用过期用户 (用于定时任务)"
         echo "  --setup-expire-cron  安装过期检查定时任务"
+        echo "  --check-ip [on|off]  检测公网 IP 变化并刷新节点文件 (用于定时任务)；on/off 开关自动检测"
         echo "  --help, -h           显示帮助信息"
         echo ""
         echo "无参数时启动交互式菜单"
