@@ -13404,13 +13404,18 @@ get_all_services() {
     
     [[ ! -f "$DB_FILE" ]] && { echo ""; return; }
     
-    # 检查 Xray 协议
-    local xray_protos=$(jq -r '.xray | keys[]' "$DB_FILE" 2>/dev/null)
-    [[ -n "$xray_protos" ]] && services+="vless-reality:xray "
+    # 只有核心协议才由 vless-reality / vless-singbox 运行；Snell 等独立协议
+    # 虽记在 xray 下，但有自己的服务，不能据此拉起已无配置的核心服务。
+    # 协议列表由主脚本生成本文件时写入，与 XRAY_PROTOCOLS / SINGBOX_PROTOCOLS 一致。
+    local xray_core="__XRAY_PROTOCOLS__" singbox_core="__SINGBOX_PROTOCOLS__" p
+    for p in $(jq -r '.xray // {} | keys[]' "$DB_FILE" 2>/dev/null); do
+        [[ " $xray_core " == *" $p "* ]] && { services+="vless-reality:xray "; break; }
+    done
     
     # 所有 Sing-box 协议都由 vless-singbox 统一管理。
-    local singbox_protos=$(jq -r '.singbox | keys[]' "$DB_FILE" 2>/dev/null)
-    [[ -n "$singbox_protos" ]] && services+="vless-singbox:sing-box "
+    for p in $(jq -r '.singbox // {} | keys[]' "$DB_FILE" 2>/dev/null); do
+        [[ " $singbox_core " == *" $p "* ]] && { services+="vless-singbox:sing-box "; break; }
+    done
     
     echo "$services"
 }
@@ -13430,6 +13435,7 @@ while true; do
     sleep 60
 done
 EOFSCRIPT
+    sed -i -e "s|__XRAY_PROTOCOLS__|$XRAY_PROTOCOLS|" -e "s|__SINGBOX_PROTOCOLS__|$SINGBOX_PROTOCOLS|" "$CFG/watchdog.sh"
 
     # Hysteria2 端口跳跃规则脚本 (服务端) - 从数据库读取
     if is_protocol_installed "hy2"; then
@@ -13555,6 +13561,18 @@ EOFSCRIPT
 #═══════════════════════════════════════════════════════════════════════════════
 # 服务管理
 #═══════════════════════════════════════════════════════════════════════════════
+# 旧版本生成的看门狗把记在 xray 下的独立协议也当作 Xray 协议，
+# 会反复拉起已无配置的 vless-reality；升级脚本后重写一次。
+_refresh_watchdog_script() {
+    [[ -f "$CFG/watchdog.sh" ]] || return 0
+    grep -q 'xray_core=' "$CFG/watchdog.sh" && return 0
+    create_server_scripts || return 1
+    if is_service_active vless-watchdog; then
+        svc restart vless-watchdog >/dev/null 2>&1 || _log "WARN" "Watchdog 重启失败"
+    fi
+    return 0
+}
+
 create_watchdog_service() {
     [[ -x "$CFG/watchdog.sh" ]] || { _warn "Watchdog 脚本不存在，跳过监控服务"; return 1; }
 
@@ -30408,6 +30426,7 @@ main_menu() {
 
     # 兼容旧定时规则：补齐 cron PATH，并确认守护进程确实运行。
     repair_scheduled_jobs
+    _refresh_watchdog_script 2>/dev/null || true
 
     # 初始化版本缓存目录
     _init_version_cache
