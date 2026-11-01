@@ -3057,7 +3057,7 @@ _sync_all_user_traffic_unlocked() {
             
             if [[ "$traffic" -gt 0 ]]; then
                 db_update_user_traffic "xray" "$proto" "$user" "$traffic"
-                ((updated++))
+                updated=$((updated + 1))
                 
                 local quota=$(db_get_user_field "xray" "$proto" "$user" "quota")
                 local used=$(db_get_user_field "xray" "$proto" "$user" "used")
@@ -3110,7 +3110,7 @@ _sync_all_user_traffic_unlocked() {
 
                 if [[ "$traffic" -gt 0 ]]; then
                     db_update_user_traffic "singbox" "$proto" "$user" "$traffic"
-                    ((updated++))
+                    updated=$((updated + 1))
 
                     local quota=$(db_get_user_field "singbox" "$proto" "$user" "quota")
                     local used=$(db_get_user_field "singbox" "$proto" "$user" "used")
