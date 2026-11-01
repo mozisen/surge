@@ -7353,11 +7353,13 @@ get_ip_suffix() {
 # 分享链接生成
 #═══════════════════════════════════════════════════════════════════════════════
 
+# mihomo >= v1.19.31 从链接读取 support-x25519mlkem768；Xray >= 26.9.9 的 REALITY
+# 服务端要求客户端带 ML-KEM，否则当作普通访问回落。其他客户端会忽略该参数。
 gen_vless_link() {
     local ip="$1" port="$2" uuid="$3" pbk="$4" sid="$5" sni="$6" country="${7:-}"
     local ip_suffix=$(get_ip_suffix "$ip")
     local name="${country:+${country}-}VLESS+Reality${ip_suffix:+-${ip_suffix}}"
-    printf '%s\n' "vless://${uuid}@${ip}:${port}?encryption=none&security=reality&type=tcp&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&flow=xtls-rprx-vision#${name}"
+    printf '%s\n' "vless://${uuid}@${ip}:${port}?encryption=none&security=reality&type=tcp&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&support-x25519mlkem768=true&flow=xtls-rprx-vision#${name}"
 }
 
 gen_vless_encryption_link() {
@@ -7371,7 +7373,7 @@ gen_vless_xhttp_link() {
     local ip="$1" port="$2" uuid="$3" pbk="$4" sid="$5" sni="$6" path="${7:-/}" country="${8:-}"
     local ip_suffix=$(get_ip_suffix "$ip")
     local name="${country:+${country}-}VLESS-XHTTP${ip_suffix:+-${ip_suffix}}"
-    printf '%s\n' "vless://${uuid}@${ip}:${port}?encryption=none&security=reality&type=xhttp&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&path=$(urlencode "$path")&mode=auto#${name}"
+    printf '%s\n' "vless://${uuid}@${ip}:${port}?encryption=none&security=reality&type=xhttp&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&support-x25519mlkem768=true&path=$(urlencode "$path")&mode=auto#${name}"
 }
 
 gen_vless_xhttp_cdn_link() {
@@ -24219,7 +24221,7 @@ fetch_subscription() {
                         vless)
                             local link="vless://${uuid}@${server}:${port}?encryption=none"
                             [[ -n "$flow" ]] && link+="&flow=$flow"
-                            [[ "$tls" == "true" ]] && link+="&security=reality&type=${network:-tcp}&sni=$sni&fp=chrome&pbk=$pbk&sid=$sid" || link+="&security=none&type=${network:-tcp}"
+                            [[ "$tls" == "true" ]] && link+="&security=reality&type=${network:-tcp}&sni=$sni&fp=chrome&pbk=$pbk&sid=$sid&support-x25519mlkem768=true" || link+="&security=none&type=${network:-tcp}"
                             [[ "$network" == "ws" ]] && link+="&type=ws&path=$(urlencode "$path")&host=$host"
                             link+="#$(urlencode "$name")"
                             links+="$link"$'\n'
@@ -24275,7 +24277,7 @@ fetch_subscription() {
                 vless)
                     local link="vless://${uuid}@${server}:${port}?encryption=none"
                     [[ -n "$flow" ]] && link+="&flow=$flow"
-                    [[ "$tls" == "true" ]] && link+="&security=reality&type=${network:-tcp}&sni=$sni&fp=chrome&pbk=$pbk&sid=$sid" || link+="&security=none&type=${network:-tcp}"
+                    [[ "$tls" == "true" ]] && link+="&security=reality&type=${network:-tcp}&sni=$sni&fp=chrome&pbk=$pbk&sid=$sid&support-x25519mlkem768=true" || link+="&security=none&type=${network:-tcp}"
                     link+="#$(urlencode "$name")"
                     links+="$link"$'\n'
                     ;;

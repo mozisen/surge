@@ -7,7 +7,7 @@ fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 CFG="$fixture"
 load() { eval "$(awk -v fn="$1" 'index($0, fn "() {") == 1 {on=1} on {print} on && $0 == "}" {exit}' "$script")"; }
-for fn in gen_clash_sub external_link_to_clash; do load "$fn"; done
+for fn in gen_clash_sub external_link_to_clash gen_vless_link gen_vless_xhttp_link urlencode; do load "$fn"; done
 get_installed_protocols() { echo "vless vless-xhttp"; }
 get_connection_addresses() { echo "203.0.113.7|"; }
 get_ip_suffix() { echo 7; }
@@ -37,4 +37,13 @@ local_out=$(gen_clash_sub)
 check_block "$local_out" "本机节点" 2
 external_out=$(external_link_to_clash "vless://placeholder")
 check_block "$external_out" "外部节点" 1
+
+# 分享链接：mihomo >= v1.19.31 从链接参数读取开关
+for link in "$(gen_vless_link 203.0.113.7 443 u-1 PK ab www.example.com)" \
+            "$(gen_vless_xhttp_link 203.0.113.7 443 u-1 PK ab www.example.com /x)"; do
+    query=${link#*\?}; query=${query%%#*}
+    [[ "&$query&" == *"&support-x25519mlkem768=true&"* ]] || fail "分享链接缺少 support-x25519mlkem768: $link"
+    [[ "&$query&" == *"&fp=chrome&"* ]] || fail "分享链接缺少 fp=chrome: $link"
+done
+grep -q 'sid=$sid&support-x25519mlkem768=true"' "$script" || fail "外部订阅转换的 REALITY 链接缺少开关"
 echo "mihomo REALITY ML-KEM 输出测试通过"
