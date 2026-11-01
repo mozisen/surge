@@ -1,15 +1,15 @@
 #!name=po0 防火墙自动加白
-#!desc=调用 po0 防火墙 API 将本机当前出口 IP 加入白名单。支持多 token（英文逗号分割，对应多台机器），network-changed 事件与每 10 分钟 cron 自动触发。
+#!desc=po0 加白 + 指定 Surge 代理连通性检测与失败重试。日志默认简洁，一眼看懂结果；需要时可启用 debug 排障。
 #!category=po0
 #!author=reallinzc
-#!arguments=tokens:""
-#!arguments-desc=tokens: po0 防火墙 API token（pgnfw_ 开头），多台机器用英文逗号 , 分割；可选在 token 后加 @槽位（如 pgnfw_xxx@0）钉固定坑位、永不被淘汰
+#!arguments=tokens:"",test_proxy:"",retry_count:3,test_url:"http://cp.cloudflare.com/generate_204",log_level:"simple"
+#!arguments-desc=tokens: po0 API token（多个用英文逗号分隔，支持 @槽位）；test_proxy: 完整节点名称，留空仅加白；retry_count: 连通性失败后额外加白 0-5 次；test_url: HEAD 检测 URL（默认 204）；log_level: simple=简洁日志（默认，只显示结果与重试），debug=完整排障日志，off=不输出控制台日志；旧 detail/summary 自动兼容为简洁日志。
 
 [Rule]
 # 加白 API 必须直连，确保 API 看到的是本机真实出口 IP 而不是代理出口
 IP-CIDR,124.221.69.228/32,DIRECT,no-resolve
 
 [Script]
-po0-fw-cron = type=cron,cronexp="*/10 * * * *",script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=60,argument="tokens={{{tokens}}}"
-po0-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=60,argument="tokens={{{tokens}}}"
-po0-fw-start = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=60,script-update-interval=3600,argument="tokens={{{tokens}}}"
+po0-fw-cron = type=cron,cronexp="*/10 * * * *",script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&test_proxy={{{test_proxy}}}&retry_count={{{retry_count}}}&test_url={{{test_url}}}&log_level={{{log_level}}}&trigger=cron"
+po0-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&test_proxy={{{test_proxy}}}&retry_count={{{retry_count}}}&test_url={{{test_url}}}&log_level={{{log_level}}}&trigger=network-changed"
+po0-fw-start = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/mozisen/surge/refs/heads/main/scripts/Po0fw.js,timeout=90,script-update-interval=3600,argument="tokens={{{tokens}}}&test_proxy={{{test_proxy}}}&retry_count={{{retry_count}}}&test_url={{{test_url}}}&log_level={{{log_level}}}&trigger=engine-started"
