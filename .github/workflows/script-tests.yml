@@ -1,0 +1,47 @@
+name: Node script regression
+on:
+  push:
+    branches: ['codex/**']
+    paths: ['vless-server.sh', 'tests/**', '.github/workflows/script-tests.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.7'
+          cache: false
+      - name: Fetch verified statistics core and grpcurl
+        env:
+          CORE_VERSION: '1.14.4'
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/singbox-stats-binaries/v$CORE_VERSION/linux-amd64-glibc"
+          mkdir -p "$RUNNER_TEMP/core"
+          curl -fsSL "$base/manifest.json" -o "$RUNNER_TEMP/core/manifest.json"
+          curl -fsSL "$base/sing-box.tar.gz" -o "$RUNNER_TEMP/core/pkg.tar.gz"
+          echo "$(jq -r .archive_sha256 "$RUNNER_TEMP/core/manifest.json")  $RUNNER_TEMP/core/pkg.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/core/pkg.tar.gz" -C "$RUNNER_TEMP/core"
+          echo "$(jq -r .binary_sha256 "$RUNNER_TEMP/core/manifest.json")  $RUNNER_TEMP/core/sing-box" | sha256sum -c -
+          GOBIN="$RUNNER_TEMP/core" go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.4
+      - run: bash --version | head -1 && bash -n vless-server.sh
+      - name: Run every script test
+        env:
+          SINGBOX_TEST_BIN: ${{ runner.temp }}/core/sing-box
+          GRPCURL_TEST_BIN: ${{ runner.temp }}/core/grpcurl
+        run: |
+          failed=()
+          for t in tests/*.sh; do
+            echo "::group::$t"
+            if bash "$t"; then echo "OK $t"; else failed+=("$t"); echo "FAILED $t"; fi
+            echo "::endgroup::"
+          done
+          if ((${#failed[@]})); then printf 'FAILED %s\n' "${failed[@]}"; exit 1; fi
+      - run: git diff --check
