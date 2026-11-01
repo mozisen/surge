@@ -1,6 +1,4 @@
 
-[配套管理面板](https://github.com/mozisen/vaio-panel)
-
 
 在Zyx0rx大佬基础上维护，问题反馈：  
   
