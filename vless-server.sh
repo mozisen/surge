@@ -9716,12 +9716,30 @@ _pinned_github_asset_sha256() {
     esac
 }
 
-# 使用 GitHub Release API 提供的 digest；旧发布缺少 digest 时尝试其 checksum 资产。
+# 读取发布页随附的单文件校验（Xray 的 .dgst、常见的 .sha256）。走 github.com 下载地址，不占 API 配额。
+_github_sidecar_sha256() {
+    local asset_url="${1%%\?*}" ext checksum_file expected=""
+    checksum_file=$(mktemp "${TMPDIR:-/tmp}/vless-sidecar.XXXXXX") || return 1
+    for ext in dgst sha256 sha256sum; do
+        curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "${asset_url}.${ext}" 2>/dev/null || continue
+        # 只取恰好 64 位的十六进制字段；.dgst 中的 MD5/SHA1/SHA512 长度不同，不会误取。
+        expected=$(awk '{
+            for (i=1; i<=NF; i++) if (length($i) == 64 && $i !~ /[^0-9a-fA-F]/) { print tolower($i); exit }
+        }' "$checksum_file")
+        [[ -n "$expected" ]] && break
+    done
+    rm -f "$checksum_file"
+    [[ -n "$expected" ]] && printf '%s\n' "$expected"
+}
+
+# 使用 GitHub Release API 提供的 digest；旧发布缺少 digest 时尝试其 checksum 资产；
+# API 限流或不可达时改用发布页随附的校验文件。
+# 返回 0 校验通过，1 校验值不一致，2 取不到发布方校验值。
 _verify_github_release_asset() {
     local repo="$1" version="$2" asset_url="$3" file="$4"
     local asset_name="${asset_url%%\?*}"
     asset_name="${asset_name##*/}"
-    local release_json digest expected actual checksum_url checksum_file
+    local release_json="" digest expected actual checksum_url checksum_file
 
     # 固定资产不依赖 GitHub API 是否返回 digest，也避免 API 限流导致误报。
     expected=$(_pinned_github_asset_sha256 "$repo" "$version" "$asset_name" 2>/dev/null || true)
@@ -9730,8 +9748,11 @@ _verify_github_release_asset() {
         release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
             "https://api.github.com/repos/${repo}/releases/tags/v${version}" 2>/dev/null) ||
         release_json=$(curl -fsSL --connect-timeout 10 --max-time 30 \
-            "https://api.github.com/repos/${repo}/releases/tags/${version}" 2>/dev/null) || return 1
+            "https://api.github.com/repos/${repo}/releases/tags/${version}" 2>/dev/null) ||
+        release_json=""
+    fi
 
+    if [[ -z "$expected" && -n "$release_json" ]]; then
         digest=$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
             '[.assets[]? | select(.name == $n) | .digest // empty][0] // empty' 2>/dev/null)
         if [[ "$digest" == sha256:* ]]; then
@@ -9740,25 +9761,26 @@ _verify_github_release_asset() {
             checksum_url=$(printf '%s' "$release_json" | jq -r '
                 [.assets[]? | select(.name | test("sha256|checksums?"; "i")) | .browser_download_url][0] // empty
             ' 2>/dev/null)
-            [[ -n "$checksum_url" ]] || return 1
-            checksum_file=$(mktemp "${TMPDIR:-/tmp}/vless-checksum.XXXXXX") || return 1
-            if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "$checksum_url"; then
+            if [[ -n "$checksum_url" ]] && checksum_file=$(mktemp "${TMPDIR:-/tmp}/vless-checksum.XXXXXX"); then
+                if curl -fsSL --connect-timeout 10 --max-time 30 -o "$checksum_file" "$checksum_url"; then
+                    expected=$(awk -v name="$asset_name" '
+                        index($0, name) {
+                            for (i=1; i<=NF; i++) if ($i ~ /^[0-9a-fA-F]{64}$/) { print tolower($i); exit }
+                        }
+                    ' "$checksum_file")
+                fi
                 rm -f "$checksum_file"
-                return 1
             fi
-            expected=$(awk -v name="$asset_name" '
-                index($0, name) {
-                    for (i=1; i<=NF; i++) if ($i ~ /^[0-9a-fA-F]{64}$/) { print tolower($i); exit }
-                }
-            ' "$checksum_file")
-            rm -f "$checksum_file"
         fi
     fi
+
+    [[ -n "$expected" ]] || expected=$(_github_sidecar_sha256 "$asset_url")
+    [[ -n "$expected" ]] || return 2
 
     actual=$(_sha256_file "$file")
     actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
     expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
-    [[ -n "$expected" && -n "$actual" && "$actual" == "$expected" ]]
+    [[ -n "$actual" && "$actual" == "$expected" ]]
 }
 
 _verify_direct_download() {
@@ -9867,11 +9889,19 @@ _install_binary() {
         return 1
     fi
 
-    if ! _verify_github_release_asset "$repo" "$version" "$url" "$tmp/pkg"; then
+    local verify_rc=0
+    _verify_github_release_asset "$repo" "$version" "$url" "$tmp/pkg" || verify_rc=$?
+    if [[ "$verify_rc" != 0 ]]; then
         if [[ "${ALLOW_UNVERIFIED_DOWNLOADS:-0}" != "1" ]]; then
             rm -rf "$tmp"
-            _err "$name 下载包无法通过发布方 SHA-256 校验，已拒绝安装"
-            _warn "仅在你已自行核验来源时，才可临时设置 ALLOW_UNVERIFIED_DOWNLOADS=1"
+            if [[ "$verify_rc" == 2 ]]; then
+                _err "$name 无法获取发布方 SHA-256 校验值，已拒绝安装"
+                _warn "可能是 GitHub API 限流（未登录每小时 60 次）或无法访问 GitHub，请稍后重试"
+                _warn "仅在你已自行核验来源时，才可临时设置 ALLOW_UNVERIFIED_DOWNLOADS=1"
+            else
+                _err "$name 下载包与发布方 SHA-256 不一致，已拒绝安装"
+                _warn "可能是下载不完整或被篡改，请重试；仍不一致时不要跳过校验"
+            fi
             return 1
         fi
         _warn "已按显式设置跳过 $name 的完整性校验"
