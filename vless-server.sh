@@ -7512,6 +7512,23 @@ gen_snell_link() {
     printf '%s\n' "snell://${psk}@${ip}:${port}?${query}#${name}"
 }
 
+# 生成 Surge VLESS 节点行（Surge iOS 6.0.0+ / Mac 6.12.0+）。
+# 有公钥时为 REALITY，否则为 TLS；有 XHTTP 路径时走 XHTTP，否则为 RAW+Vision。
+gen_vless_surge_line() {
+    local name="$1" host="$2" port="$3" uuid="$4" sni="$5" pbk="$6" sid="$7" xhttp_path="${8:-}"
+    local line="$name = vless, $host, $port, username=$uuid"
+    [[ -z "$xhttp_path" ]] && line+=", flow=xtls-rprx-vision"
+    line+=", sni=$sni"
+    if [[ -n "$pbk" ]]; then
+        line+=", reality-public-key=$pbk"
+        [[ -n "$sid" ]] && line+=", reality-short-id=$sid"
+    else
+        line+=", tls=true"
+    fi
+    [[ -n "$xhttp_path" ]] && line+=", xhttp=true, xhttp-path=$xhttp_path"
+    printf '%s\n' "$line"
+}
+
 # 生成 Surge Snell 节点行。Snell v6 的 mode 属于协议握手参数，必须与
 # 服务端配置完全一致；v4/v5 不输出该字段。
 gen_snell_surge_line() {
@@ -20686,7 +20703,7 @@ show_single_protocol_info() {
                 echo -e "  SNI: ${G}$sni${NC}  ShortID: ${G}$short_id${NC}"
                 echo ""
                 echo -e "  ${Y}Surge 配置 (iOS 6.0.0+ / Mac 6.12.0+):${NC}"
-                echo -e "  ${C}${country_code}-Vless-Reality = vless, ${config_ip}, ${display_port}, username=${uuid}, flow=xtls-rprx-vision, sni=${sni}, reality-public-key=${public_key}${short_id:+, reality-short-id=${short_id}}${NC}"
+                echo -e "  ${C}$(gen_vless_surge_line "${country_code}-Vless-Reality" "$config_ip" "$display_port" "$uuid" "$sni" "$public_key" "$short_id")${NC}"
                 echo ""
                 echo -e "  ${Y}Loon 配置:${NC}"
                 echo -e "  ${C}${country_code}-Vless-Reality = VLESS, ${config_ip}, ${display_port}, \"${uuid}\", transport=tcp, flow=xtls-rprx-vision, public-key=\"${public_key}\", short-id=${short_id}, udp=true, over-tls=true, sni=${sni}${NC}"
@@ -20698,7 +20715,10 @@ show_single_protocol_info() {
             echo -e "  SNI: ${G}$sni${NC}  ShortID: ${G}$short_id${NC}"
             echo -e "  Path: ${G}$path${NC}"
             echo ""
-            echo -e "  ${D}注: Loon/Surge 暂不支持 XHTTP 传输，请使用分享链接导入 Shadowrocket${NC}"
+            echo -e "  ${Y}Surge 配置 (iOS 6.0.0+ / Mac 6.12.0+):${NC}"
+            echo -e "  ${C}$(gen_vless_surge_line "${country_code}-Vless-XHTTP" "$config_ip" "$display_port" "$uuid" "$sni" "$public_key" "$short_id" "${path:-/}")${NC}"
+            echo ""
+            echo -e "  ${D}注: Loon 暂不支持 XHTTP 传输，请使用 Surge 或分享链接导入 Shadowrocket${NC}"
             ;;
         vless-xhttp-cdn)
             local domain=$(echo "$cfg" | jq -r '.domain // empty')
@@ -20711,7 +20731,10 @@ show_single_protocol_info() {
             echo -e "  ${Y}客户端配置:${NC}"
             echo -e "  ${C}地址=${domain}, 端口=443, TLS=开启${NC}"
             echo ""
-            echo -e "  ${D}注: Loon/Surge 暂不支持 XHTTP 传输，请使用分享链接导入 Shadowrocket${NC}"
+            echo -e "  ${Y}Surge 配置 (iOS 6.0.0+ / Mac 6.12.0+):${NC}"
+            echo -e "  ${C}$(gen_vless_surge_line "${country_code}-Vless-XHTTP-CDN" "$domain" 443 "$uuid" "$domain" "" "" "${path:-/}")${NC}"
+            echo ""
+            echo -e "  ${D}注: Loon 暂不支持 XHTTP 传输，请使用 Surge 或分享链接导入 Shadowrocket${NC}"
             ;;
         vless-vision)
             echo -e "  UUID: ${G}$uuid${NC}"
@@ -25518,11 +25541,30 @@ gen_surge_sub() {
             local version=$(echo "$cfg" | jq -r '.version // empty')
             local snell_mode=$(echo "$cfg" | jq -r '.mode // "default"')
             local snell_tfo=$(echo "$cfg" | jq -r '.tfo // "true"')
+            local public_key=$(echo "$cfg" | jq -r '.public_key // empty')
+            local short_id=$(echo "$cfg" | jq -r '.short_id // empty')
+            local path=$(echo "$cfg" | jq -r '.path // empty')
+            local domain=$(echo "$cfg" | jq -r '.domain // empty')
+            local security_mode=$(echo "$cfg" | jq -r '.security_mode // "reality"')
             
             local name="${country_code}-$(get_protocol_name $protocol)-${ip_suffix}"
             local proxy=""
             
             case "$protocol" in
+                vless)
+                    # VLESS+Encryption 模式没有 REALITY 公钥，不生成 REALITY 节点。
+                    [[ -n "$server_ip" && "$security_mode" != "encryption" ]] &&
+                        proxy=$(gen_vless_surge_line "$name" "$server_ip" "$port" "$uuid" "$sni" "$public_key" "$short_id")
+                    ;;
+                vless-xhttp)
+                    [[ -n "$server_ip" ]] &&
+                        proxy=$(gen_vless_surge_line "$name" "$server_ip" "$port" "$uuid" "$sni" "$public_key" "$short_id" "${path:-/}")
+                    ;;
+                vless-xhttp-cdn)
+                    # 经 CDN 和本机 Nginx TLS 接入，地址为域名、端口固定 443。
+                    [[ -n "$domain" ]] &&
+                        proxy=$(gen_vless_surge_line "$name" "$domain" 443 "$uuid" "$domain" "" "" "${path:-/}")
+                    ;;
                 trojan)
                     [[ -n "$server_ip" ]] && proxy="$name = trojan, $server_ip, $port, password=$password, sni=$sni, skip-cert-verify=true"
                     ;;
