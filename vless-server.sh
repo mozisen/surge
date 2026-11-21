@@ -20685,6 +20685,9 @@ show_single_protocol_info() {
                 echo -e "  公钥: ${G}$public_key${NC}"
                 echo -e "  SNI: ${G}$sni${NC}  ShortID: ${G}$short_id${NC}"
                 echo ""
+                echo -e "  ${Y}Surge 配置 (iOS 6.0.0+ / Mac 6.12.0+):${NC}"
+                echo -e "  ${C}${country_code}-Vless-Reality = vless, ${config_ip}, ${display_port}, username=${uuid}, flow=xtls-rprx-vision, sni=${sni}, reality-public-key=${public_key}${short_id:+, reality-short-id=${short_id}}${NC}"
+                echo ""
                 echo -e "  ${Y}Loon 配置:${NC}"
                 echo -e "  ${C}${country_code}-Vless-Reality = VLESS, ${config_ip}, ${display_port}, \"${uuid}\", transport=tcp, flow=xtls-rprx-vision, public-key=\"${public_key}\", short-id=${short_id}, udp=true, over-tls=true, sni=${sni}${NC}"
             fi
