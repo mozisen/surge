@@ -7485,11 +7485,13 @@ _can_gen_qr() {
 
 # 生成各协议分享链接
 gen_hy2_link() {
-    local ip="$1" port="$2" password="$3" sni="$4" country="${5:-}"
+    local ip="$1" port="$2" password="$3" sni="$4" country="${5:-}" obfs_password="${6:-}"
     local ip_suffix=$(get_ip_suffix "$ip")
     local name="${country:+${country}-}Hysteria2${ip_suffix:+-${ip_suffix}}"
+    local obfs=""
+    [[ -n "$obfs_password" ]] && obfs="&obfs=salamander&obfs-password=$(urlencode "$obfs_password")"
     # 链接始终使用实际端口，端口跳跃需要客户端手动配置
-    printf '%s\n' "hysteria2://${password}@${ip}:${port}?sni=${sni}&insecure=1#${name}"
+    printf '%s\n' "hysteria2://${password}@${ip}:${port}?sni=${sni}&insecure=1${obfs}#${name}"
 }
 
 gen_trojan_link() {
@@ -12153,6 +12155,7 @@ generate_singbox_config() {
             hy2)
                 local password=$(echo "$cfg" | jq -r '.password // empty')
                 local sni=$(echo "$cfg" | jq -r '.sni // "www.bing.com"')
+                local obfs_password=$(echo "$cfg" | jq -r '.obfs_password // empty')
                 
                 # 智能证书选择：优先使用 ACME 证书，否则使用 hy2 独立自签证书
                 local cert_path="$CFG/certs/hy2/server.crt"
@@ -12176,6 +12179,7 @@ generate_singbox_config() {
                     --arg key "$key_path" \
                     --arg tag "hy2-in-${port}" \
                     --arg listen_addr "$listen_addr" \
+                    --arg obfs "$obfs_password" \
                 '{
                     type: "hysteria2",
                     tag: $tag,
@@ -12190,7 +12194,7 @@ generate_singbox_config() {
                         alpn: ["h3"]
                     },
                     masquerade: "https://www.bing.com"
-                }')
+                } + (if $obfs != "" then {obfs: {type: "salamander", password: $obfs}} else {} end)')
                 ;;
             tuic)
                 local uuid=$(echo "$cfg" | jq -r '.uuid // empty')
@@ -13037,7 +13041,7 @@ gen_vless_xhttp_server_config() {
 # Hysteria2 服务端配置
 gen_hy2_server_config() {
     local password="$1" port="$2" sni="${3:-bing.com}"
-    local hop_enable="${4:-0}" hop_start="${5:-20000}" hop_end="${6:-50000}"
+    local hop_enable="${4:-0}" hop_start="${5:-20000}" hop_end="${6:-50000}" obfs_password="${7:-}"
     mkdir -p "$CFG"
     
     # 生成自签证书（Sing-box 使用）
@@ -13077,14 +13081,16 @@ gen_hy2_server_config() {
     # 写入数据库（Sing-box 从数据库读取配置生成 singbox.json）
     register_protocol "hy2" "$(build_config \
         password "$password" port "$port" sni "$sni" \
-        hop_enable "$hop_enable" hop_start "$hop_start" hop_end "$hop_end")"
+        hop_enable "$hop_enable" hop_start "$hop_start" hop_end "$hop_end" \
+        obfs_password "$obfs_password")"
     
     # 保存 join 信息
     local extra_lines=()
     [[ "$hop_enable" == "1" ]] && extra_lines=("" "# 端口跳跃已启用" "# 客户端请手动将端口改为: ${hop_start}-${hop_end}")
     
-    _save_join_info "hy2" "HY2|%s|$port|$password|$sni" \
-        gen_hy2_link "%s" "$port" "$password" "$sni" --extra "${extra_lines[@]}"
+    [[ -n "$obfs_password" ]] && extra_lines+=("" "# 已启用 Salamander 混淆，客户端需填写混淆密码: ${obfs_password}")
+    _save_join_info "hy2" "HY2|%s|$port|$password|$sni${obfs_password:+|$obfs_password}" \
+        gen_hy2_link "%s" "$port" "$password" "$sni" "" "$obfs_password" --extra "${extra_lines[@]}"
     cp "$CFG/hy2.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -20623,7 +20629,7 @@ show_all_share_links() {
                     vmess-ws) link=$(gen_vmess_ws_link "$ipv4" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
                     ss2022) link=$(gen_ss2022_link "$ipv4" "$display_port" "$method" "$password" "$country_code") ;;
                     ss-legacy) link=$(gen_ss_legacy_link "$ipv4" "$display_port" "$method" "$password" "$country_code") ;;
-                    hy2) link=$(gen_hy2_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
+                    hy2) link=$(gen_hy2_link "$ipv4" "$display_port" "$password" "$sni" "$country_code" "$(echo "$cfg" | jq -r '.obfs_password // empty')") ;;
                     trojan) link=$(gen_trojan_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
                     trojan-ws) link=$(gen_trojan_ws_link "$ipv4" "$display_port" "$password" "$sni" "$path" "$country_code") ;;
                     snell) link=$(gen_snell_link "$ipv4" "$display_port" "$psk" "$version" "$country_code") ;;
@@ -20676,7 +20682,7 @@ show_all_share_links() {
                     vmess-ws) link=$(gen_vmess_ws_link "$ip6" "$display_port" "$uuid" "$sni" "$path" "$country_code") ;;
                     ss2022) link=$(gen_ss2022_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
                     ss-legacy) link=$(gen_ss_legacy_link "$ip6" "$display_port" "$method" "$password" "$country_code") ;;
-                    hy2) link=$(gen_hy2_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
+                    hy2) link=$(gen_hy2_link "$ip6" "$display_port" "$password" "$sni" "$country_code" "$(echo "$cfg" | jq -r '.obfs_password // empty')") ;;
                     trojan) link=$(gen_trojan_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
                     trojan-ws) link=$(gen_trojan_ws_link "$ip6" "$display_port" "$password" "$sni" "$path" "$country_code") ;;
                     snell) link=$(gen_snell_link "$ip6" "$display_port" "$psk" "$version" "$country_code") ;;
@@ -21015,17 +21021,26 @@ show_single_protocol_info() {
             echo -e "  ${C}${country_code}-SS = Shadowsocks, ${config_ip}, ${display_port}, ${method}, \"${password}\", udp=true${NC}"
             ;;
         hy2)
+            local obfs_password=$(echo "$cfg" | jq -r '.obfs_password // empty')
+            local surge_obfs="" loon_obfs=""
+            if [[ -n "$obfs_password" ]]; then
+                surge_obfs=", salamander-password=${obfs_password}"
+                loon_obfs=", salamander-password=${obfs_password}"
+            fi
             echo -e "  密码: ${G}$password${NC}"
             echo -e "  SNI: ${G}$sni${NC}"
             if [[ "$hop_enable" == "1" ]]; then
                 echo -e "  端口跳跃: ${G}${hop_start}-${hop_end}${NC}"
             fi
+            if [[ -n "$obfs_password" ]]; then
+                echo -e "  混淆: ${G}Salamander${NC}  混淆密码: ${G}$obfs_password${NC}"
+            fi
             echo ""
-            echo -e "  ${Y}Surge 配置:${NC}"
-            echo -e "  ${C}${country_code}-Hysteria2 = hysteria2, ${config_ip}, ${display_port}, password=${password}, sni=${sni}, skip-cert-verify=true${NC}"
+            echo -e "  ${Y}Surge 配置:${NC}${obfs_password:+ ${D}(Salamander 需 Surge Mac 6.4.3+)${NC}}"
+            echo -e "  ${C}${country_code}-Hysteria2 = hysteria2, ${config_ip}, ${display_port}, password=${password}, sni=${sni}, skip-cert-verify=true${surge_obfs}${NC}"
             echo ""
             echo -e "  ${Y}Loon 配置:${NC}"
-            echo -e "  ${C}${country_code}-Hysteria2 = Hysteria2, ${config_ip}, ${display_port}, \"${password}\", udp=true, sni=${sni}, skip-cert-verify=true${NC}"
+            echo -e "  ${C}${country_code}-Hysteria2 = Hysteria2, ${config_ip}, ${display_port}, \"${password}\", udp=true, sni=${sni}, skip-cert-verify=true${loon_obfs}${NC}"
             echo ""
             echo -e "  ${Y}Clash Meta 配置:${NC}"
             echo -e "  ${C}- name: ${country_code}-Hysteria2${NC}"
@@ -21035,6 +21050,10 @@ show_single_protocol_info() {
             echo -e "  ${C}  password: ${password}${NC}"
             echo -e "  ${C}  sni: ${sni}${NC}"
             echo -e "  ${C}  skip-cert-verify: true${NC}"
+            if [[ -n "$obfs_password" ]]; then
+                echo -e "  ${C}  obfs: salamander${NC}"
+                echo -e "  ${C}  obfs-password: \"${obfs_password}\"${NC}"
+            fi
             ;;
         trojan)
             echo -e "  密码: ${G}$password${NC}"
@@ -21255,8 +21274,9 @@ show_single_protocol_info() {
                 join_code=$(echo "SS|${ip_addr}|${link_port}|${method}|${password}" | base64 -w 0)
                 ;;
             hy2)
-                link=$(gen_hy2_link "$ip_addr" "$link_port" "$password" "$sni" "$country_code")
-                join_code=$(echo "HY2|${ip_addr}|${link_port}|${password}|${sni}" | base64 -w 0)
+                local obfs_password=$(echo "$cfg" | jq -r '.obfs_password // empty')
+                link=$(gen_hy2_link "$ip_addr" "$link_port" "$password" "$sni" "$country_code" "$obfs_password")
+                join_code=$(echo "HY2|${ip_addr}|${link_port}|${password}|${sni}${obfs_password:+|${obfs_password}}" | base64 -w 0)
                 ;;
             trojan)
                 link=$(gen_trojan_link "$ip_addr" "$link_port" "$password" "$sni" "$country_code")
@@ -23325,6 +23345,19 @@ do_install_server() {
                 echo -e "  ${D}已选择：不启用端口跳跃${NC}"
             fi
 
+            echo ""
+            echo -e "  ${W}Salamander 混淆${NC}"
+            echo -e "  ${D}说明：把 QUIC 流量混淆成随机字节，可应对针对 QUIC 的封锁；客户端必须填写相同的混淆密码。${NC}"
+            echo -e "  ${D}启用后不再像普通 HTTP/3 网站，网页伪装失效。客户端：Surge Mac 6.4.3+、Loon、Clash Meta (mihomo) 等。${NC}"
+            local obfs_password=""
+            read -rp "  是否启用 Salamander 混淆? [y/N]: " obfs_ans
+            if [[ "$obfs_ans" =~ ^[yY]$ ]]; then
+                obfs_password=$(ask_password 16 "混淆密码")
+                echo -e "  ${C}已启用 Salamander 混淆${NC}"
+            else
+                echo -e "  ${D}已选择：不启用混淆${NC}"
+            fi
+
             _line
             echo ""
             read -rp "  确认安装? [Y/n]: " confirm
@@ -23332,7 +23365,7 @@ do_install_server() {
 
             _info "生成配置..."
             # ★改：把 hop 参数传进去
-            gen_hy2_server_config "$password" "$port" "$final_sni" "$hop_enable" "$hop_start" "$hop_end"
+            gen_hy2_server_config "$password" "$port" "$final_sni" "$hop_enable" "$hop_start" "$hop_end" "$obfs_password"
             ;;
         trojan)
             local password=$(ask_password 16 "Trojan密码")
@@ -25446,7 +25479,7 @@ gen_v2ray_sub() {
                     [[ -n "$server_ip" ]] && link=$(gen_ss_legacy_link "$server_ip" "$actual_port" "$method" "$password" "$country_code")
                     ;;
                 hy2)
-                    [[ -n "$server_ip" ]] && link=$(gen_hy2_link "$server_ip" "$actual_port" "$password" "$sni" "$country_code")
+                    [[ -n "$server_ip" ]] && link=$(gen_hy2_link "$server_ip" "$actual_port" "$password" "$sni" "$country_code" "$(echo "$cfg" | jq -r '.obfs_password // empty')")
                     ;;
                 tuic)
                     [[ -n "$server_ip" ]] && link=$(gen_tuic_link "$server_ip" "$actual_port" "$uuid" "$password" "$sni" "$country_code")
@@ -25658,6 +25691,7 @@ gen_clash_sub() {
     udp: true"
                 ;;
             hy2)
+                local obfs_password=$(echo "$cfg" | jq -r '.obfs_password // empty')
                 [[ -n "$server_ip" ]] && proxy="  - name: \"$name\"
     type: hysteria2
     server: \"$server_ip\"
@@ -25665,6 +25699,9 @@ gen_clash_sub() {
     password: $password
     sni: $sni
     skip-cert-verify: true"
+                [[ -n "$proxy" && -n "$obfs_password" ]] && proxy+="
+    obfs: salamander
+    obfs-password: \"$obfs_password\""
                 ;;
             tuic)
                 [[ -n "$server_ip" ]] && proxy="  - name: \"$name\"
@@ -25828,7 +25865,8 @@ gen_surge_sub() {
                     [[ -n "$server_ip" ]] && proxy="$name = ss, $server_ip, $port, encrypt-method=$method, password=$password"
                     ;;
                 hy2)
-                    [[ -n "$server_ip" ]] && proxy="$name = hysteria2, $server_ip, $port, password=$password, sni=$sni, skip-cert-verify=true"
+                    local obfs_password=$(echo "$cfg" | jq -r '.obfs_password // empty')
+                    [[ -n "$server_ip" ]] && proxy="$name = hysteria2, $server_ip, $port, password=$password, sni=$sni, skip-cert-verify=true${obfs_password:+, salamander-password=$obfs_password}"
                     ;;
                 tuic)
                     [[ -n "$server_ip" ]] && proxy="$name = tuic, $server_ip, $port, uuid=$uuid, password=$password, sni=$sni, skip-cert-verify=true, alpn=h3"
@@ -28176,7 +28214,7 @@ _gen_user_share_link() {
         ss-legacy)
             link=$(gen_ss_legacy_link "$server_addr" "$display_port" "$method" "$credential" "$remark")
             ;;
-        hy2) link=$(gen_hy2_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
+        hy2) link=$(gen_hy2_link "$server_addr" "$display_port" "$credential" "$sni" "$remark" "$(echo "$cfg" | jq -r '.obfs_password // empty')") ;;
         trojan) link=$(gen_trojan_link "$server_addr" "$display_port" "$credential" "$sni" "$remark") ;;
         trojan-ws) link=$(gen_trojan_ws_link "$server_addr" "$display_port" "$credential" "$sni" "$path" "$remark") ;;
         tuic) link=$(gen_tuic_link "$server_addr" "$display_port" "$credential" "$password" "$sni" "$remark") ;;
