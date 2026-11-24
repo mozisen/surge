@@ -596,6 +596,7 @@ get_protocol_name() {
         trojan) echo "Trojan" ;;
         trojan-ws) echo "Trojan-WS" ;;
         anytls) echo "AnyTLS" ;;
+        mieru) echo "Mieru" ;;
         *) echo "$proto" ;;
     esac
 }
@@ -4070,7 +4071,7 @@ XRAY_PROTOCOLS="vless vless-xhttp vless-xhttp-cdn vless-ws vless-ws-notls vmess-
 # 和 Shadowsocks；其他共同协议待兼容性回归完成后再开放。
 SINGBOX_PROTOCOLS="vless trojan ss2022 ss-legacy hy2 tuic anytls"
 # 仍需独立进程的协议 (Snell 等闭源协议)
-STANDALONE_PROTOCOLS="snell snell-v5 snell-v6 snell-shadowtls snell-v5-shadowtls ss2022-shadowtls naive"
+STANDALONE_PROTOCOLS="snell snell-v5 snell-v6 snell-shadowtls snell-v5-shadowtls ss2022-shadowtls naive mieru"
 
 # 协议—内核唯一注册表。格式为以空格分隔的可用内核；第一个为自动推荐值。
 declare -A PROTO_SUPPORTED_CORES PROTO_DEFAULT_CORE
@@ -4143,6 +4144,8 @@ PROTO_SVC[snell-v6]="vless-snell-v6"; PROTO_EXEC[snell-v6]="/usr/local/bin/snell
 
 # 动态命令：运行时从数据库取参数
 PROTO_SVC[naive]="vless-naive"; PROTO_KIND[naive]="naive"
+# Mieru：mita 守护进程以 mita 用户运行，配置通过 mita 命令导入
+PROTO_SVC[mieru]="vless-mieru"; PROTO_KIND[mieru]="mieru"; PROTO_BIN[mieru]="mita"
 
 # ShadowTLS：主服务 shadow-tls + 额外 backend 服务
 for _p in snell-shadowtls snell-v5-shadowtls ss2022-shadowtls; do
@@ -4172,6 +4175,7 @@ declare -A SVC_PROC=(
     [vless-snell-v6]="snell-server-v6"
     [vless-anytls]="anytls-server"
     [vless-naive]="caddy"
+    [vless-mieru]="mita"
     [vless-snell-shadowtls]="shadow-tls"
     [vless-snell-v5-shadowtls]="shadow-tls"
     [vless-ss2022-shadowtls]="shadow-tls"
@@ -6549,8 +6553,9 @@ recommend_port() {
                 fi
             fi
             ;;
-        vless|vless-xhttp)
+        vless|vless-xhttp|mieru)
             # Reality 协议：伪装特性使其可使用任意端口，默认随机高位端口
+            # Mieru 只能监听 1025-65535，同样使用随机高位端口
             while true; do
                 local p=$(gen_port)
                 if ! is_internal_port_occupied "$p" >/dev/null; then
@@ -6635,6 +6640,10 @@ ask_port() {
             echo -e "  ${D}(Reality 协议伪装能力强，可使用任意端口)${NC}" >&2
             echo -e "  ${C}建议: ${G}$recommend${NC} (随机高位端口)" >&2
             ;;
+        mieru)
+            echo -e "  ${D}(Mieru 仅支持 1025-65535 端口，使用 TCP)${NC}" >&2
+            echo -e "  ${C}建议: ${G}$recommend${NC} (随机高位端口)" >&2
+            ;;
         vless-vision|trojan)
             if [[ "$recommend" == "443" ]]; then
                 echo -e "  ${C}建议: ${G}443${NC} (标准 HTTPS 端口)" >&2
@@ -6677,6 +6686,11 @@ ask_port() {
             _err "无效端口: $custom_port" >&2
             _warn "端口必须是 1-65535 之间的数字" >&2
             continue # 跳过本次循环，让用户重输
+        fi
+
+        if [[ "$protocol" == "mieru" && $custom_port -lt 1025 ]]; then
+            _err "Mieru 不支持 1025 以下的端口" >&2
+            continue
         fi
         
         # 0.1 检查是否使用了系统保留端口
@@ -7557,6 +7571,15 @@ gen_naive_link() {
     local name="${country:+${country}-}Naive"
     # Shadowrocket HTTP/2 格式，使用域名
     printf '%s\n' "http2://${username}:${password}@${host}:${port}#${name}"
+}
+
+# Mieru 简单分享链接（mierus://），mihomo 和 mieru 客户端可导入
+gen_mieru_link() {
+    local ip="$1" port="$2" username="$3" password="$4" country="${5:-}"
+    local ip_suffix=$(get_ip_suffix "$ip")
+    local name="${country:+${country}-}Mieru${ip_suffix:+-${ip_suffix}}"
+    [[ "$ip" == *:* && "$ip" != \[* ]] && ip="[$ip]"
+    printf '%s\n' "mierus://$(urlencode "$username"):$(urlencode "$password")@${ip}?mtu=1400&multiplexing=MULTIPLEXING_LOW&port=${port}&profile=$(urlencode "$name")&protocol=TCP"
 }
 
 gen_shadowtls_link() {
@@ -9958,6 +9981,12 @@ _install_binary() {
             ;;
         shadowtls)
             install -m 755 "$tmp/pkg" /usr/local/bin/shadow-tls && install_ok=true
+            ;;
+        mita)
+            _archive_paths_safe "$tmp/pkg" tar.gz &&
+            tar -xzf "$tmp/pkg" -C "$tmp/" &&
+            [[ -f "$tmp/mita" && ! -L "$tmp/mita" ]] &&
+            install -m 755 "$tmp/mita" /usr/local/bin/mita && install_ok=true
             ;;
         *)
             _err "未知安装类型: $install_kind"
@@ -12684,6 +12713,33 @@ install_anytls() {
         anytls
 }
 
+# 安装 Mieru 服务端 mita（官方只提供 amd64 / arm64）
+install_mieru() {
+    local aarch
+    aarch=$(_map_arch "amd64:arm64:") && [[ -n "$aarch" ]] || { _err "Mieru 服务端仅支持 x86_64 和 aarch64"; return 1; }
+    _install_binary "mita" "enfein/mieru" \
+        'https://github.com/enfein/mieru/releases/download/v$version/mita_${version}_linux_${aarch}.tar.gz' \
+        mita "${1:-stable}" "${2:-false}" "${3:-}" || return 1
+    _ensure_mita_user
+}
+
+# mita 守护进程要求存在 mita 用户和组，并使用 /etc/mita、/var/lib/mita、/var/run/mita
+_ensure_mita_user() {
+    if ! id mita >/dev/null 2>&1; then
+        if command -v useradd >/dev/null 2>&1; then
+            useradd --system --no-create-home --user-group --shell /bin/false mita >/dev/null 2>&1
+        else
+            addgroup -S mita >/dev/null 2>&1
+            adduser -S -D -H -G mita -s /bin/false mita >/dev/null 2>&1
+        fi
+    fi
+    id mita >/dev/null 2>&1 || { _err "创建 mita 用户失败"; return 1; }
+    local d
+    for d in /etc/mita /var/lib/mita /var/run/mita; do
+        mkdir -p "$d" && chown mita:mita "$d" && chmod 775 "$d" || { _err "无法准备目录 $d"; return 1; }
+    done
+}
+
 # 安装 ShadowTLS
 install_shadowtls() {
     local aarch=$(_map_arch "x86_64-unknown-linux-musl:aarch64-unknown-linux-musl:armv7-unknown-linux-musleabihf") || { _err "不支持的架构"; return 1; }
@@ -13325,6 +13381,49 @@ gen_anytls_server_config() {
     echo "server" > "$CFG/role"
 }
 
+# Mieru 服务端配置：生成 mita 配置 JSON 与导入脚本，由服务启动后执行导入
+gen_mieru_server_config() {
+    local username="$1" password="$2" port="$3"
+    mkdir -p "$CFG"
+    local tmpcfg="$CFG/mieru.json.tmp"
+    jq -n --arg user "$username" --arg pass "$password" --argjson port "$port" '{
+        portBindings: [{port: $port, protocol: "TCP"}],
+        users: [{name: $user, password: $pass}],
+        loggingLevel: "WARN",
+        mtu: 1400
+    }' > "$tmpcfg" && chmod 600 "$tmpcfg" && mv -f "$tmpcfg" "$CFG/mieru.json" || {
+        rm -f "$tmpcfg"; _err "生成 Mieru 配置失败"; return 1
+    }
+    gen_mieru_apply_script || return 1
+
+    register_protocol "mieru" "$(build_config username "$username" password "$password" port "$port")"
+    _save_join_info "mieru" "MIERU|%s|$port|$username|$password" \
+        gen_mieru_link "%s" "$port" "$username" "$password"
+    cp "$CFG/mieru.join" "$CFG/join.txt" 2>/dev/null
+    echo "server" > "$CFG/role"
+}
+
+# mita 的代理配置保存在 /etc/mita，需要守护进程运行后用 mita 命令导入。
+# 每次服务启动后都重新导入一次，保证 $CFG/mieru.json 为唯一配置来源。
+gen_mieru_apply_script() {
+    cat > "$CFG/mieru-apply.sh" << EOF
+#!/bin/sh
+# 由 vless-server.sh 生成：把 $CFG/mieru.json 导入 mita 并启动代理
+mita=/usr/local/bin/mita
+i=0
+until \$mita status >/dev/null 2>&1; do
+    i=\$((i + 1))
+    [ "\$i" -ge 30 ] && { echo "mita 守护进程未就绪" >&2; exit 1; }
+    sleep 1
+done
+\$mita replace config "$CFG/mieru.json" || exit 1
+\$mita stop >/dev/null 2>&1 || true
+\$mita start || exit 1
+\$mita status 2>&1 | grep -q RUNNING
+EOF
+    chmod 700 "$CFG/mieru-apply.sh"
+}
+
 # NaïveProxy 服务端配置
 gen_naive_server_config() {
     local username="$1" password="$2" port="$3" domain="$4"
@@ -13943,6 +14042,16 @@ create_service() {
             exec_cmd="/usr/local/bin/caddy run --config $CFG/Caddyfile"
             exec_name="caddy"
             ;;
+        mieru)
+            _need_cfg "mieru" "Mieru" || return 1
+            [[ -f "$CFG/mieru.json" ]] || { _err "Mieru 配置文件不存在"; return 1; }
+            [[ -f "$CFG/mieru-apply.sh" ]] || gen_mieru_apply_script || return 1
+            _ensure_mita_user || return 1
+            _write_mieru_service "$service_name" || return 1
+            create_watchdog_service
+            [[ "$DISTRO" == "alpine" ]] || systemctl daemon-reload 2>/dev/null
+            return 0
+            ;;
         shadowtls)
             _need_cfg "$protocol" "$protocol" || return 1
             local cfg_core=$(_get_proto_core "$protocol")
@@ -14068,6 +14177,50 @@ EOF
 }
 
 
+# Mieru 服务：mita 守护进程以 mita 用户运行，启动后由 root 执行导入脚本加载配置
+_write_mieru_service() {
+    local name="$1"
+    if [[ "$DISTRO" == "alpine" ]]; then
+        cat >"/etc/init.d/${name}" <<EOF
+#!/sbin/openrc-run
+name="Proxy Server (mieru)"
+command="/usr/local/bin/mita"
+command_args="run"
+command_user="mita:mita"
+command_background="yes"
+pidfile="/run/${name}.pid"
+export MITA_LOG_NO_TIMESTAMP=true
+depend() { need net localmount; after firewall; }
+start_pre() { mkdir -p /var/run/mita && chown mita:mita /var/run/mita && chmod 775 /var/run/mita; }
+start_post() { /bin/sh "$CFG/mieru-apply.sh"; }
+EOF
+        chmod +x "/etc/init.d/${name}"
+    else
+        cat >"/etc/systemd/system/${name}.service" <<EOF
+[Unit]
+Description=Proxy Server (mieru)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mita
+Group=mita
+Environment=MITA_LOG_NO_TIMESTAMP=true
+ExecStartPre=+/bin/mkdir -p /var/run/mita
+ExecStartPre=+/bin/chown mita:mita /var/run/mita
+ExecStartPre=+/bin/chmod 775 /var/run/mita
+ExecStart=/usr/local/bin/mita run
+ExecStartPost=+/bin/sh $CFG/mieru-apply.sh
+Restart=always
+RestartSec=3
+LimitNOFILE=51200
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+}
 
 svc() { # svc action service_name
     local action="$1" name="$2"
@@ -20444,6 +20597,7 @@ show_all_share_links() {
                     tuic) link=$(gen_tuic_link "$ipv4" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
                     anytls) link=$(gen_anytls_link "$ipv4" "$display_port" "$password" "$sni" "$country_code") ;;
                     naive) link=$(gen_naive_link "$domain" "$display_port" "$username" "$password" "$country_code") ;;
+                    mieru) link=$(gen_mieru_link "$ipv4" "$display_port" "$username" "$password" "$country_code") ;;
                     socks) link=$(gen_socks_link "$ipv4" "$display_port" "$username" "$password" "$country_code") ;;
                     # ShadowTLS 组合协议：没有标准分享链接，显示 Surge/Loon 配置
                     snell-shadowtls)
@@ -20496,6 +20650,7 @@ show_all_share_links() {
                     tuic) link=$(gen_tuic_link "$ip6" "$display_port" "$uuid" "$password" "$sni" "$country_code") ;;
                     anytls) link=$(gen_anytls_link "$ip6" "$display_port" "$password" "$sni" "$country_code") ;;
                     naive) ;; # NaïveProxy 使用域名，不需要 IPv6 链接
+                    mieru) link=$(gen_mieru_link "$ip6" "$display_port" "$username" "$password" "$country_code") ;;
                     socks) link=$(gen_socks_link "$ip6" "$display_port" "$username" "$password" "$country_code") ;;
                     # ShadowTLS 组合协议 IPv6：没有标准分享链接，显示 Surge/Loon 配置
                     snell-shadowtls)
@@ -20892,6 +21047,25 @@ show_single_protocol_info() {
             echo -e "  ${Y}Shadowrocket (HTTP/2):${NC}"
             echo -e "  ${C}http2://${username}:${password}@${domain}:${display_port}${NC}"
             ;;
+        mieru)
+            echo -e "  用户名: ${G}$username${NC}"
+            echo -e "  密码: ${G}$password${NC}"
+            echo -e "  传输: ${G}TCP${NC}"
+            echo ""
+            echo -e "  ${Y}Clash Meta (mihomo) 配置:${NC}"
+            echo -e "  ${C}- name: ${country_code}-Mieru${NC}"
+            echo -e "  ${C}  type: mieru${NC}"
+            local mieru_server="${config_ip#[}"; mieru_server="${mieru_server%]}"
+            echo -e "  ${C}  server: ${mieru_server}${NC}"
+            echo -e "  ${C}  port: ${display_port}${NC}"
+            echo -e "  ${C}  transport: TCP${NC}"
+            echo -e "  ${C}  udp: true${NC}"
+            echo -e "  ${C}  username: \"${username}\"${NC}"
+            echo -e "  ${C}  password: \"${password}\"${NC}"
+            echo -e "  ${C}  multiplexing: MULTIPLEXING_LOW${NC}"
+            echo ""
+            echo -e "  ${D}Surge、Loon、sing-box、v2rayN 暂不支持 Mieru，请使用 mihomo 内核客户端或 Mieru 官方客户端${NC}"
+            ;;
         snell-shadowtls)
             echo -e "  PSK: ${G}$psk${NC}"
             echo -e "  SNI: ${G}$sni${NC}"
@@ -21091,6 +21265,10 @@ show_single_protocol_info() {
                 local domain=$(echo "$cfg" | jq -r '.domain // empty')
                 link=$(gen_naive_link "$domain" "$link_port" "$username" "$password" "$country_code")
                 join_code=$(echo "NAIVE|${domain}|${link_port}|${username}|${password}" | base64 -w 0)
+                ;;
+            mieru)
+                link=$(gen_mieru_link "$ip_addr" "$link_port" "$username" "$password" "$country_code")
+                join_code=$(echo "MIERU|${ip_addr}|${link_port}|${username}|${password}" | base64 -w 0)
                 ;;
             socks)
                 local use_tls=$(echo "$cfg" | jq -r '.tls // "false"')
@@ -21706,6 +21884,7 @@ uninstall_specific_protocol() {
             snell-shadowtls) rm -f "$CFG/snell-shadowtls.conf" ;;
             snell-v5-shadowtls) rm -f "$CFG/snell-v5-shadowtls.conf" ;;
             ss2022-shadowtls) rm -f "$CFG/ss2022-shadowtls-backend.json" ;;
+            mieru) rm -f "$CFG/mieru.json" "$CFG/mieru-apply.sh"; rm -rf /etc/mita /var/lib/mita /var/run/mita ;;
         esac
         
         # 删除服务文件
@@ -21935,7 +22114,9 @@ do_uninstall() {
     find "$CFG" -name "*.join" -delete 2>/dev/null
     find "$CFG" -name "*.yaml" -delete 2>/dev/null
     find "$CFG" -name "*.conf" -delete 2>/dev/null
-    rm -f "$CFG/installed_protocols" 2>/dev/null
+    rm -f "$CFG/installed_protocols" "$CFG/mieru-apply.sh" 2>/dev/null
+    # Mieru 的 mita 配置（含用户密码）保存在 /etc/mita
+    rm -rf /etc/mita /var/lib/mita /var/run/mita 2>/dev/null
     
     # 如果没有证书，删除整个目录
     if [[ ! -d "$CFG/certs" ]]; then
@@ -21961,11 +22142,11 @@ do_uninstall() {
     echo ""
     echo -e "  ${Y}已保留的内容:${NC}"
     echo -e "  • 软件包: xray, sing-box, snell-server"
-    echo -e "  • 软件包: anytls-server, shadow-tls, caddy"
+    echo -e "  • 软件包: anytls-server, shadow-tls, caddy, mita"
     echo -e "  • ${G}域名证书: 下次安装将自动复用，无需重新申请${NC}"
     echo ""
     echo -e "  ${C}如需完全删除软件包，请执行:${NC}"
-    echo -e "  ${G}rm -f /usr/local/bin/{xray,sing-box,snell-server*,anytls-*,shadow-tls,caddy}${NC}"
+    echo -e "  ${G}rm -f /usr/local/bin/{xray,sing-box,snell-server*,anytls-*,shadow-tls,caddy,mita}${NC}"
     echo ""
     echo -e "  ${C}如需删除证书，请执行:${NC}"
     echo -e "  ${G}rm -rf $CFG/certs $CFG/cert_domain${NC}"
@@ -22033,13 +22214,14 @@ select_protocol() {
     _item "13" "AnyTLS"
     _item "14" "TUIC v5"
     _item "15" "NaïveProxy"
+    _item "16" "Mieru ${D}(mihomo / Clash Meta)${NC}"
     _item "0" "返回"
     echo ""
     echo -e "  ${D}提示: 5/6 使用 8443 端口时，3/4 可作为回落共用${NC}"
     echo ""
     
     while true; do
-        read -rp "  选择协议 [0-15]: " choice
+        read -rp "  选择协议 [0-16]: " choice
         case $choice in
             0) SELECTED_PROTOCOL=""; return 1 ;;
             1) select_vless_mode || return 1; break ;;
@@ -22057,6 +22239,7 @@ select_protocol() {
             13) SELECTED_PROTOCOL="anytls"; break ;;
             14) SELECTED_PROTOCOL="tuic"; break ;;
             15) SELECTED_PROTOCOL="naive"; break ;;
+            16) SELECTED_PROTOCOL="mieru"; break ;;
             *) _err "无效选择" ;;
         esac
     done
@@ -22192,6 +22375,7 @@ do_install_server() {
                 snell-shadowtls) rm -f "$CFG/snell-shadowtls.conf" ;;
                 snell-v5-shadowtls) rm -f "$CFG/snell-v5-shadowtls.conf" ;;
                 ss2022-shadowtls) rm -f "$CFG/ss2022-shadowtls-backend.json" ;;
+                mieru) rm -f "$CFG/mieru.json" "$CFG/mieru-apply.sh"; rm -rf /etc/mita /var/lib/mita /var/run/mita ;;
             esac
             
             # 删除服务文件
@@ -22334,6 +22518,9 @@ do_install_server() {
             ;;
         naive)
             install_naive || { _err "NaïveProxy 安装失败"; _pause; return 1; }
+            ;;
+        mieru)
+            install_mieru || { _err "Mieru 安装失败"; _pause; return 1; }
             ;;
       esac
     fi
@@ -23539,6 +23726,26 @@ do_install_server() {
             
             _info "生成配置..."
             gen_naive_server_config "$username" "$password" "$port" "$domain"
+            ;;
+        mieru)
+            local username=$(ask_password 8 "Mieru用户名")
+            local password=$(ask_password 16 "Mieru密码")
+
+            echo ""
+            _line
+            echo -e "  ${C}Mieru 配置${NC}"
+            _line
+            echo -e "  端口: ${G}$port${NC} ${D}(TCP)${NC}"
+            echo -e "  用户名: ${G}$username${NC}"
+            echo -e "  密码: ${G}$password${NC}"
+            echo -e "  ${D}客户端: mihomo / Clash Meta、Mieru 官方客户端；Surge、sing-box、v2rayN 不支持${NC}"
+            _line
+            echo ""
+            read -rp "  确认安装? [Y/n]: " confirm
+            [[ "$confirm" =~ ^[nN]$ ]] && return
+
+            _info "生成配置..."
+            gen_mieru_server_config "$username" "$password" "$port" || { _pause; return 1; }
             ;;
     esac
     
@@ -25445,6 +25652,17 @@ gen_clash_sub() {
     password: $password
     sni: $sni
     skip-cert-verify: true"
+                ;;
+            mieru)
+                [[ -n "$server_ip" ]] && proxy="  - name: \"$name\"
+    type: mieru
+    server: \"$server_ip\"
+    port: $port
+    transport: TCP
+    udp: true
+    username: \"$username\"
+    password: \"$password\"
+    multiplexing: MULTIPLEXING_LOW"
                 ;;
             esac
             

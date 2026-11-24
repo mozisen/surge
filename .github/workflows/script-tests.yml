@@ -31,11 +31,29 @@ jobs:
           tar -xzf "$RUNNER_TEMP/core/pkg.tar.gz" -C "$RUNNER_TEMP/core"
           echo "$(jq -r .binary_sha256 "$RUNNER_TEMP/core/manifest.json")  $RUNNER_TEMP/core/sing-box" | sha256sum -c -
           GOBIN="$RUNNER_TEMP/core" go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.4
+      - name: Fetch verified mieru server and client
+        env:
+          MIERU_VERSION: '3.40.0'
+          MITA_SHA256: '635dc431d5847cbd9567ed525ea55cc924949785617c6a5396bdd694917342a7'
+          MIERU_SHA256: 'f08a4fd67eaa2819a30dda62ad6c2955dfd898563da133040f800b9ad3e2401f'
+        run: |
+          set -euo pipefail
+          base="https://github.com/enfein/mieru/releases/download/v$MIERU_VERSION"
+          mkdir -p "$RUNNER_TEMP/mieru"
+          cd "$RUNNER_TEMP/mieru"
+          curl -fsSL "$base/mita_${MIERU_VERSION}_linux_amd64.tar.gz" -o mita.tar.gz
+          curl -fsSL "$base/mieru_${MIERU_VERSION}_linux_amd64.tar.gz" -o mieru.tar.gz
+          echo "$MITA_SHA256  mita.tar.gz" | sha256sum -c -
+          echo "$MIERU_SHA256  mieru.tar.gz" | sha256sum -c -
+          tar -xzf mita.tar.gz
+          tar -xzf mieru.tar.gz
       - run: bash --version | head -1 && bash -n vless-server.sh
       - name: Run every script test
         env:
           SINGBOX_TEST_BIN: ${{ runner.temp }}/core/sing-box
           GRPCURL_TEST_BIN: ${{ runner.temp }}/core/grpcurl
+          MITA_TEST_BIN: ${{ runner.temp }}/mieru/mita
+          MIERU_TEST_BIN: ${{ runner.temp }}/mieru/mieru
         run: |
           failed=()
           for t in tests/*.sh; do
