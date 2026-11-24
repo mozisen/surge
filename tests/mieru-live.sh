@@ -44,6 +44,8 @@ id mita >/dev/null || fail "没有 mita 用户"
 
 port=38461 user=ci-user pass='p@ss+word=1'
 gen_mieru_server_config "$user" "$pass" "$port" || fail "生成配置失败"
+# 测试目标是本机 HTTP 服务；mita 默认禁止访问本机地址，只在测试中放开。
+jq '.users[0].allowLoopbackIP = true' "$CFG/mieru.json" > "$CFG/next" && mv "$CFG/next" "$CFG/mieru.json"
 DISTRO=debian _write_mieru_service vless-mieru
 systemctl daemon-reload
 systemctl start vless-mieru || fail "vless-mieru 启动失败"
