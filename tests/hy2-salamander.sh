@@ -51,7 +51,7 @@ jq '.singbox.hy2.obfs_password = "obfs-secret"' "$fixture/db.json" > "$fixture/n
 
 # 5. 节点信息：Surge / Loon / Clash Meta 都带混淆参数。
 info=$(show_single_protocol_info hy2 false 2>/dev/null </dev/null | sed 's/\x1b\[[0-9;]*m//g')
-grep -q 'hysteria2://hy2pass@203.0.113.7:7000?sni=www.example.com&insecure=1&obfs=salamander&obfs-password=obfs-secret#' <<<"$info" || fail "节点信息链接缺少混淆"
+grep -q 'hysteria2://hy2pass@203.0.113.7:7000?sni=www.example.com&insecure=1&obfs=salamander&obfs-password=obfs-secret#' <<<"$info" || fail "节点信息链接缺少混淆: $(grep -i 'hysteria2' <<<"$info")"
 grep -q '= hysteria2, 203.0.113.7, 7000, password=hy2pass, sni=www.example.com, skip-cert-verify=true, salamander-password=obfs-secret$' <<<"$info" || fail "Surge 配置缺少 salamander-password"
 grep -q '= Hysteria2, 203.0.113.7, 7000, "hy2pass", udp=true, sni=www.example.com, skip-cert-verify=true, salamander-password=obfs-secret$' <<<"$info" || fail "Loon 配置缺少 salamander-password"
 grep -q '^ *obfs: salamander$' <<<"$info" || fail "Clash 配置缺少 obfs"
