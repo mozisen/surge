@@ -15,6 +15,8 @@ _info() { :; }; _ok() { :; }; _line() { :; }
 _warn() { echo "warn: $*" >&2; }; _err() { echo "err: $*" >&2; }
 _listen_addr() { echo "::"; }
 get_connection_addresses() { echo '203.0.113.7|'; }
+get_ipv4() { echo 203.0.113.7; }
+get_ipv6() { :; }
 get_ip_country() { echo JP; }
 get_all_external_links() { :; }
 netstat() { :; }
