@@ -6470,16 +6470,41 @@ check_domain_dns() {
 # 端口管理
 #═══════════════════════════════════════════════════════════════════════════════
 
+# 协议在监听端口上使用的传输层：tcp、udp 或 "tcp udp"。
+# 只用 UDP 的协议（Hysteria2、TUIC）可以与只用 TCP 的协议共用同一端口号。
+# 未列出的协议按 TCP+UDP 处理，宁可多报冲突。
+_proto_port_transports() {
+    case "$1" in
+        hy2|tuic) echo "udp" ;;
+        vless|vless-vision|vless-ws|vless-ws-notls|vless-xhttp|vless-xhttp-cdn|vmess-ws|vmess-xhttp|\
+        trojan|trojan-ws|anytls|snell|snell-shadowtls|snell-v5-shadowtls|ss2022-shadowtls|mieru) echo "tcp" ;;
+        *) echo "tcp udp" ;;
+    esac
+}
+
+# 两个协议在同一端口号上是否会抢占同一种传输层
+_proto_ports_clash() {
+    local a b
+    for a in $(_proto_port_transports "$1"); do
+        for b in $(_proto_port_transports "$2"); do
+            [[ "$a" == "$b" ]] && return 0
+        done
+    done
+    return 1
+}
+
 # 检查脚本内部记录的端口占用 (从数据库读取)
+# 用法: is_internal_port_occupied 端口 [协议]；给出协议时，传输层不重叠的协议不算占用
 # 返回 0 表示被占用，1 表示未被占用
 is_internal_port_occupied() {
-    local check_port="$1"
+    local check_port="$1" check_proto="${2:-}"
     
     # 遍历 Xray 协议
     local xray_protos=$(db_list_protocols "xray")
     for proto in $xray_protos; do
         local used_port=$(db_get_field "xray" "$proto" "port")
         if [[ "$used_port" == "$check_port" ]]; then
+            [[ -n "$check_proto" ]] && ! _proto_ports_clash "$check_proto" "$proto" && continue
             echo "$proto"
             return 0
         fi
@@ -6490,6 +6515,7 @@ is_internal_port_occupied() {
     for proto in $singbox_protos; do
         local used_port=$(db_get_field "singbox" "$proto" "port")
         if [[ "$used_port" == "$check_port" ]]; then
+            [[ -n "$check_proto" ]] && ! _proto_ports_clash "$check_proto" "$proto" && continue
             echo "$proto"
             return 0
         fi
@@ -6736,9 +6762,14 @@ ask_port() {
             fi
         fi
         
-        # 2. 检查系统端口占用 (Nginx 等外部程序)
+        # 2. 检查系统端口占用 (Nginx 等外部程序)，只检查本协议会用到的传输层
         # 使用正则匹配：端口号后跟非数字字符（空格、tab、冒号等）
-        if ss -tuln 2>/dev/null | grep -Eq ":${custom_port}[^0-9]" || netstat -tuln 2>/dev/null | grep -Eq ":${custom_port}[^0-9]"; then
+        local ss_flags="-tuln"
+        case "$(_proto_port_transports "$protocol")" in
+            udp) ss_flags="-uln" ;;
+            tcp) ss_flags="-tln" ;;
+        esac
+        if ss "$ss_flags" 2>/dev/null | grep -Eq ":${custom_port}[^0-9]" || netstat "$ss_flags" 2>/dev/null | grep -Eq ":${custom_port}[^0-9]"; then
             # 覆盖模式：如果是被覆盖的端口，允许使用（服务正在运行是正常的）
             if [[ "$INSTALL_MODE" == "replace" && "$custom_port" == "$REPLACE_PORT" ]]; then
                 echo "$custom_port"
@@ -6844,6 +6875,8 @@ check_port_conflict() {
     # 检查 xray 协议
     for proto in $(db_list_protocols "xray"); do
         [[ "$proto" == "$current_protocol" && "$current_core" == "xray" ]] && continue
+        # TCP 与 UDP 互不占用（例如 Hysteria2 可与 VLESS 使用同一端口号）
+        _proto_ports_clash "$current_protocol" "$proto" || continue
         
         local ports=$(db_list_ports "xray" "$proto")
         if echo "$ports" | grep -q "^${check_port}$"; then
@@ -6855,6 +6888,8 @@ check_port_conflict() {
     # 检查 singbox 协议
     for proto in $(db_list_protocols "singbox"); do
         [[ "$proto" == "$current_protocol" && "$current_core" == "singbox" ]] && continue
+        # TCP 与 UDP 互不占用（例如 Hysteria2 可与 VLESS 使用同一端口号）
+        _proto_ports_clash "$current_protocol" "$proto" || continue
         
         local ports=$(db_list_ports "singbox" "$proto")
         if echo "$ports" | grep -q "^${check_port}$"; then
